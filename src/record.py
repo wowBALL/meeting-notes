@@ -71,7 +71,7 @@ def record_until_interrupted(
     speaker_thread.start()
 
     try:
-        while True:
+        while not stop_event.is_set():
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass
