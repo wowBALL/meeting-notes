@@ -13,8 +13,18 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
     config.failed_dir.mkdir(parents=True, exist_ok=True)
     config.meetings_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load the multi-GB pyannote model once at startup, then reuse it for every
+    # file, instead of reloading it from disk on each meeting.
+    from pyannote.audio import Pipeline
+
+    logging.info("Loading speaker-diarization model...")
+    diarization_pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1", use_auth_token=config.hf_token
+    )
+
     logging.info("Watching %s for new audio files...", config.inbox_dir)
-    watch_loop(config)
+    watch_loop(config, diarization_pipeline=diarization_pipeline)
 
 
 if __name__ == "__main__":

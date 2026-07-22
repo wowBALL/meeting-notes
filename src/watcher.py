@@ -1,6 +1,7 @@
 import logging
 import time
 from pathlib import Path
+from typing import Any
 
 from src.config import Config
 from src.pipeline import process_file
@@ -25,12 +26,19 @@ def is_file_stable(path: Path, check_interval: float = 1.0) -> bool:
     return size_before == size_after and size_before > 0
 
 
-def watch_loop(config: Config, poll_interval: float = 5.0, single_pass: bool = False) -> None:
+def watch_loop(
+    config: Config,
+    poll_interval: float = 5.0,
+    single_pass: bool = False,
+    diarization_pipeline: Any = None,
+) -> None:
     while True:
         for audio_path in scan_inbox(config.inbox_dir):
             if is_file_stable(audio_path, check_interval=0.5):
                 try:
-                    meeting_dir = process_file(audio_path, config)
+                    meeting_dir = process_file(
+                        audio_path, config, diarization_pipeline=diarization_pipeline
+                    )
                     logger.info("Processed %s -> %s", audio_path.name, meeting_dir)
                 except Exception:
                     logger.exception("Failed to process %s", audio_path.name)

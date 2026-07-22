@@ -4,8 +4,17 @@ def format_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def render_transcript_markdown(merged_segments: list[dict]) -> str:
+DIARIZATION_FAILED_NOTE = (
+    '> ⚠️ ไม่สามารถแยกผู้พูดได้อัตโนมัติ ข้อความทั้งหมดจึงแสดงเป็น "ผู้พูด 1" เพียงคนเดียว'
+)
+
+
+def render_transcript_markdown(
+    merged_segments: list[dict], diarization_failed: bool = False
+) -> str:
     lines = ["# Transcript"]
+    if diarization_failed:
+        lines.append(DIARIZATION_FAILED_NOTE)
     speaker_display: dict[str, str] = {}
     counter = 1
     for seg in merged_segments:

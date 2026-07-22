@@ -60,7 +60,28 @@ def test_watch_loop_processes_stable_files_once_with_single_pass(tmp_path):
     ):
         watch_loop(config, single_pass=True)
 
-    mock_process_file.assert_called_once_with(audio_path, config)
+    mock_process_file.assert_called_once_with(
+        audio_path, config, diarization_pipeline=None
+    )
+
+
+def test_watch_loop_threads_diarization_pipeline_to_process_file(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "sample.mp3"
+    audio_path.write_bytes(b"fake audio data")
+
+    sentinel_pipeline = object()
+
+    with (
+        patch("src.watcher.is_file_stable", return_value=True),
+        patch("src.watcher.process_file") as mock_process_file,
+    ):
+        watch_loop(config, single_pass=True, diarization_pipeline=sentinel_pipeline)
+
+    mock_process_file.assert_called_once_with(
+        audio_path, config, diarization_pipeline=sentinel_pipeline
+    )
 
 
 def test_watch_loop_skips_unstable_files(tmp_path):

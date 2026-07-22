@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Any
 
 from src.config import Config
 from src.diarize import diarize_audio
@@ -13,7 +14,9 @@ from src.transcribe import transcribe_audio
 logger = logging.getLogger(__name__)
 
 
-def process_file(audio_path: Path, config: Config) -> Path:
+def process_file(
+    audio_path: Path, config: Config, diarization_pipeline: Any = None
+) -> Path:
     try:
         whisper_segments = retry_with_backoff(
             lambda: transcribe_audio(audio_path, api_key=config.openai_api_key)
@@ -22,14 +25,24 @@ def process_file(audio_path: Path, config: Config) -> Path:
         move_to_failed(audio_path, config.failed_dir, f"Transcription failed: {e}")
         raise
 
+    diarization_failed = False
     try:
-        speaker_turns = diarize_audio(audio_path, hf_token=config.hf_token)
+        speaker_turns = diarize_audio(
+            audio_path, hf_token=config.hf_token, pipeline=diarization_pipeline
+        )
     except Exception as e:
         logger.warning("Diarization failed, continuing without speaker labels: %s", e)
         speaker_turns = []
+        diarization_failed = True
 
-    merged = merge_transcript_and_speakers(whisper_segments, speaker_turns)
-    transcript_markdown = render_transcript_markdown(merged)
+    try:
+        merged = merge_transcript_and_speakers(whisper_segments, speaker_turns)
+        transcript_markdown = render_transcript_markdown(
+            merged, diarization_failed=diarization_failed
+        )
+    except Exception as e:
+        move_to_failed(audio_path, config.failed_dir, f"Rendering failed: {e}")
+        raise
 
     try:
         summary_markdown = retry_with_backoff(
@@ -41,6 +54,11 @@ def process_file(audio_path: Path, config: Config) -> Path:
         move_to_failed(audio_path, config.failed_dir, f"Summarization failed: {e}")
         raise
 
-    meeting_dir = create_meeting_folder(audio_path, config.meetings_dir)
-    save_outputs(meeting_dir, audio_path, transcript_markdown, summary_markdown)
+    try:
+        meeting_dir = create_meeting_folder(audio_path, config.meetings_dir)
+        save_outputs(meeting_dir, audio_path, transcript_markdown, summary_markdown)
+    except Exception as e:
+        move_to_failed(audio_path, config.failed_dir, f"Save failed: {e}")
+        raise
+
     return meeting_dir
