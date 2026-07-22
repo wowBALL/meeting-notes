@@ -1,5 +1,3 @@
-import threading
-import time as time_module
 from datetime import datetime
 
 import numpy as np
@@ -60,18 +58,12 @@ def test_build_output_filename_without_name():
 
 
 class _FakeRecorder:
-    """Fake recorder context manager. Yields real chunks first, then keeps
-    returning empty (zero-length) arrays forever instead of raising or
-    blocking, so a background _record_loop thread never errors out and never
-    hangs on its own -- it only stops when the caller sets stop_event.
+    """Fake recorder context manager. Yields real chunks in order; once
+    exhausted, the next record() call raises KeyboardInterrupt, simulating
+    the user pressing Ctrl+C right as the stream runs dry."""
 
-    If a `drained_event` is supplied, it is set right after the last real
-    chunk has been popped, so a test can synchronize on "all real chunks
-    have been consumed" instead of guessing with a fixed sleep."""
-
-    def __init__(self, chunks, drained_event=None):
+    def __init__(self, chunks):
         self._chunks = list(chunks)
-        self._drained_event = drained_event
 
     def __enter__(self):
         return self
@@ -80,21 +72,17 @@ class _FakeRecorder:
         return False
 
     def record(self, numframes=None):
-        if self._chunks:
-            chunk = self._chunks.pop(0)
-            if not self._chunks and self._drained_event is not None:
-                self._drained_event.set()
-            return chunk
-        return np.zeros(0, dtype=np.float32)
+        if not self._chunks:
+            raise KeyboardInterrupt
+        return self._chunks.pop(0)
 
 
 class _FakeDevice:
-    def __init__(self, chunks, drained_event=None):
+    def __init__(self, chunks):
         self._chunks = chunks
-        self._drained_event = drained_event
 
     def recorder(self, samplerate=None, channels=None, blocksize=None, exclusive_mode=False):
-        return _FakeRecorder(self._chunks, drained_event=self._drained_event)
+        return _FakeRecorder(self._chunks)
 
 
 class _FailingRecorder:
@@ -110,34 +98,14 @@ class _FailingDevice:
         return _FailingRecorder()
 
 
-def test_record_until_interrupted_returns_concatenated_frames_when_stopped_normally(monkeypatch):
-    # Fake devices each hand out two small chunks, then run dry (empty
-    # arrays) forever -- np.concatenate ignores the empty arrays, so the
-    # assertion below is deterministic regardless of exactly how many extra
-    # empty reads happen before the stop is noticed.
+def test_record_until_interrupted_returns_concatenated_frames_when_stopped_normally():
     mic_chunk_1 = np.array([1.0, 1.0], dtype=np.float32)
     mic_chunk_2 = np.array([2.0, 2.0], dtype=np.float32)
     speaker_chunk_1 = np.array([3.0, 3.0], dtype=np.float32)
     speaker_chunk_2 = np.array([4.0, 4.0], dtype=np.float32)
 
-    mic_drained = threading.Event()
-    speaker_drained = threading.Event()
-    mic = _FakeDevice([mic_chunk_1, mic_chunk_2], drained_event=mic_drained)
-    speaker = _FakeDevice([speaker_chunk_1, speaker_chunk_2], drained_event=speaker_drained)
-
-    def fake_sleep_then_interrupt(seconds):
-        # Wait for both background threads to signal that they've popped
-        # their last real chunk (a generous but bounded timeout avoids ever
-        # hanging forever if something is broken), then simulate the user
-        # hitting Ctrl+C -- this is what the main polling loop's
-        # `except KeyboardInterrupt` is designed to handle. This replaces a
-        # fixed-duration sleep, which was a latent source of flakiness under
-        # slow/loaded test runners.
-        assert mic_drained.wait(timeout=2), "mic fake never drained its chunks"
-        assert speaker_drained.wait(timeout=2), "speaker fake never drained its chunks"
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(record.time, "sleep", fake_sleep_then_interrupt)
+    mic = _FakeDevice([mic_chunk_1, mic_chunk_2])
+    speaker = _FakeDevice([speaker_chunk_1, speaker_chunk_2])
 
     mic_frames, speaker_frames = record.record_until_interrupted(
         mic, speaker, samplerate=16000, blocksize=2
@@ -147,20 +115,9 @@ def test_record_until_interrupted_returns_concatenated_frames_when_stopped_norma
     assert np.array_equal(speaker_frames, np.concatenate([speaker_chunk_1, speaker_chunk_2]))
 
 
-def test_record_until_interrupted_raises_when_a_device_fails(monkeypatch):
-    # Regression test for the two bugs fixed during task review: a failing
-    # recorder's exception must propagate out of record_until_interrupted
-    # (not be swallowed by the thread), and the main loop must notice the
-    # failure promptly via stop_event rather than hanging until Ctrl+C.
+def test_record_until_interrupted_raises_when_a_device_fails():
     mic = _FailingDevice()
     speaker = _FakeDevice([np.zeros(2, dtype=np.float32)])
-
-    real_sleep = time_module.sleep
-
-    def fast_sleep(seconds):
-        real_sleep(0.01)
-
-    monkeypatch.setattr(record.time, "sleep", fast_sleep)
 
     with pytest.raises(RuntimeError, match="permission denied"):
         record.record_until_interrupted(mic, speaker, samplerate=16000, blocksize=2)

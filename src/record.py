@@ -1,6 +1,4 @@
 import sys
-import threading
-import time
 from datetime import datetime
 
 import numpy as np
@@ -42,47 +40,28 @@ def get_default_speaker_loopback():
     return sc.get_microphone(id=str(speaker.name), include_loopback=True)
 
 
-def _record_loop(recorder_cm, blocksize, chunks, stop_event, errors):
-    try:
-        with recorder_cm as recorder:
-            while not stop_event.is_set():
-                chunks.append(recorder.record(numframes=blocksize))
-    except Exception as e:
-        errors.append(e)
-        stop_event.set()
-
-
 def record_until_interrupted(
     mic, speaker, samplerate: int = DEFAULT_SAMPLERATE, blocksize: int = 4096
 ) -> tuple[np.ndarray, np.ndarray]:
+    # soundcard only initializes COM (CoInitializeEx) on the thread that
+    # first imports it. Recording mic and speaker concurrently from two
+    # separate threads means calling WASAPI from a thread that never joined
+    # a COM apartment, which is undefined behavior on Windows -- in
+    # practice it reproducibly corrupted the process heap. Polling both
+    # streams alternately from this single thread avoids the problem
+    # entirely, at the cost of relying on each stream's own internal buffer
+    # to absorb the time spent blocked on the other.
     mic_chunks: list[np.ndarray] = []
     speaker_chunks: list[np.ndarray] = []
-    stop_event = threading.Event()
-    errors: list[Exception] = []
 
-    mic_thread = threading.Thread(
-        target=_record_loop,
-        args=(mic.recorder(samplerate=samplerate), blocksize, mic_chunks, stop_event, errors),
-    )
-    speaker_thread = threading.Thread(
-        target=_record_loop,
-        args=(speaker.recorder(samplerate=samplerate), blocksize, speaker_chunks, stop_event, errors),
-    )
-    mic_thread.start()
-    speaker_thread.start()
-
-    try:
-        while not stop_event.is_set():
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop_event.set()
-        mic_thread.join()
-        speaker_thread.join()
-
-    if errors:
-        raise errors[0]
+    with mic.recorder(samplerate=samplerate) as mic_recorder:
+        with speaker.recorder(samplerate=samplerate) as speaker_recorder:
+            try:
+                while True:
+                    mic_chunks.append(mic_recorder.record(numframes=blocksize))
+                    speaker_chunks.append(speaker_recorder.record(numframes=blocksize))
+            except KeyboardInterrupt:
+                pass
 
     mic_frames = np.concatenate(mic_chunks) if mic_chunks else np.zeros(0, dtype=np.float32)
     speaker_frames = (
