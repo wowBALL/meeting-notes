@@ -41,10 +41,14 @@ def get_default_speaker_loopback():
     return sc.get_microphone(id=str(speaker.name), include_loopback=True)
 
 
-def _record_loop(recorder_cm, blocksize, chunks, stop_event):
-    with recorder_cm as recorder:
-        while not stop_event.is_set():
-            chunks.append(recorder.record(numframes=blocksize))
+def _record_loop(recorder_cm, blocksize, chunks, stop_event, errors):
+    try:
+        with recorder_cm as recorder:
+            while not stop_event.is_set():
+                chunks.append(recorder.record(numframes=blocksize))
+    except Exception as e:
+        errors.append(e)
+        stop_event.set()
 
 
 def record_until_interrupted(
@@ -53,14 +57,15 @@ def record_until_interrupted(
     mic_chunks: list[np.ndarray] = []
     speaker_chunks: list[np.ndarray] = []
     stop_event = threading.Event()
+    errors: list[Exception] = []
 
     mic_thread = threading.Thread(
         target=_record_loop,
-        args=(mic.recorder(samplerate=samplerate), blocksize, mic_chunks, stop_event),
+        args=(mic.recorder(samplerate=samplerate), blocksize, mic_chunks, stop_event, errors),
     )
     speaker_thread = threading.Thread(
         target=_record_loop,
-        args=(speaker.recorder(samplerate=samplerate), blocksize, speaker_chunks, stop_event),
+        args=(speaker.recorder(samplerate=samplerate), blocksize, speaker_chunks, stop_event, errors),
     )
     mic_thread.start()
     speaker_thread.start()
@@ -74,6 +79,9 @@ def record_until_interrupted(
         stop_event.set()
         mic_thread.join()
         speaker_thread.join()
+
+    if errors:
+        raise errors[0]
 
     mic_frames = np.concatenate(mic_chunks) if mic_chunks else np.zeros(0, dtype=np.float32)
     speaker_frames = (
