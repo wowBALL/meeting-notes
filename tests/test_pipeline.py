@@ -1,0 +1,120 @@
+from datetime import date
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from src.config import Config
+from src.pipeline import process_file
+
+
+def make_config(tmp_path: Path) -> Config:
+    return Config(
+        base_dir=tmp_path,
+        inbox_dir=tmp_path / "inbox",
+        failed_dir=tmp_path / "failed",
+        meetings_dir=tmp_path / "meetings",
+        openai_api_key="sk-openai-test",
+        anthropic_api_key="sk-ant-test",
+        hf_token="hf-test-token",
+        claude_model="claude-opus-4-8",
+    )
+
+
+def test_process_file_saves_transcript_and_summary(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        ),
+        patch(
+            "src.pipeline.summarize_transcript",
+            return_value="## ประเด็นสำคัญ\n- ทดสอบ",
+        ),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    expected_dir = config.meetings_dir / f"{date.today().isoformat()}-weekly-standup"
+    assert meeting_dir == expected_dir
+    assert (meeting_dir / "transcript.md").exists()
+    assert (meeting_dir / "summary.md").read_text(encoding="utf-8") == "## ประเด็นสำคัญ\n- ทดสอบ"
+    assert (meeting_dir / "weekly-standup.mp3").exists()
+    assert not audio_path.exists()
+
+
+def test_process_file_continues_without_diarization_on_failure(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", side_effect=RuntimeError("model load failed")),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    transcript_text = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "ผู้พูด 1" in transcript_text
+
+
+def test_process_file_moves_to_failed_when_transcription_fails(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "broken.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        patch("src.pipeline.transcribe_audio", side_effect=RuntimeError("network error")),
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="network error"),
+    ):
+        process_file(audio_path, config)
+
+    assert not audio_path.exists()
+    assert (config.failed_dir / "broken.mp3").exists()
+    error_log = config.failed_dir / "broken.error.log"
+    assert "Transcription failed" in error_log.read_text(encoding="utf-8")
+
+
+def test_process_file_moves_to_failed_when_summarization_fails(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "broken.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        ),
+        patch(
+            "src.pipeline.summarize_transcript",
+            side_effect=RuntimeError("claude api error"),
+        ),
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="claude api error"),
+    ):
+        process_file(audio_path, config)
+
+    assert not audio_path.exists()
+    assert (config.failed_dir / "broken.mp3").exists()
+    error_log = config.failed_dir / "broken.error.log"
+    assert "Summarization failed" in error_log.read_text(encoding="utf-8")

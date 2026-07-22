@@ -1,0 +1,46 @@
+import logging
+from pathlib import Path
+
+from src.config import Config
+from src.diarize import diarize_audio
+from src.merge import merge_transcript_and_speakers
+from src.render import render_transcript_markdown
+from src.retry import retry_with_backoff
+from src.storage import create_meeting_folder, move_to_failed, save_outputs
+from src.summarize import summarize_transcript
+from src.transcribe import transcribe_audio
+
+logger = logging.getLogger(__name__)
+
+
+def process_file(audio_path: Path, config: Config) -> Path:
+    try:
+        whisper_segments = retry_with_backoff(
+            lambda: transcribe_audio(audio_path, api_key=config.openai_api_key)
+        )
+    except Exception as e:
+        move_to_failed(audio_path, config.failed_dir, f"Transcription failed: {e}")
+        raise
+
+    try:
+        speaker_turns = diarize_audio(audio_path, hf_token=config.hf_token)
+    except Exception as e:
+        logger.warning("Diarization failed, continuing without speaker labels: %s", e)
+        speaker_turns = []
+
+    merged = merge_transcript_and_speakers(whisper_segments, speaker_turns)
+    transcript_markdown = render_transcript_markdown(merged)
+
+    try:
+        summary_markdown = retry_with_backoff(
+            lambda: summarize_transcript(
+                transcript_markdown, model=config.claude_model, api_key=config.anthropic_api_key
+            )
+        )
+    except Exception as e:
+        move_to_failed(audio_path, config.failed_dir, f"Summarization failed: {e}")
+        raise
+
+    meeting_dir = create_meeting_folder(audio_path, config.meetings_dir)
+    save_outputs(meeting_dir, audio_path, transcript_markdown, summary_markdown)
+    return meeting_dir
