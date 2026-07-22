@@ -3,3 +3,4 @@ anthropic>=0.40.0
 pyannote.audio>=3.1.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
+numpy>=1.26.0
