@@ -1,7 +1,9 @@
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
+from src.audio_convert import convert_to_wav
 from src.config import Config
 from src.diarize import diarize_audio
 from src.merge import merge_transcript_and_speakers
@@ -20,25 +22,33 @@ def process_file(
     diarization_pipeline: Any = None,
     whisper_model: Any = None,
 ) -> Path:
-    try:
-        whisper_segments = retry_with_backoff(
-            lambda: transcribe_audio(
-                audio_path, model_size=config.whisper_model, model=whisper_model
-            )
-        )
-    except Exception as e:
-        move_to_failed(audio_path, config.failed_dir, f"Transcription failed: {e}")
-        raise
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
+        try:
+            convert_to_wav(audio_path, wav_path)
+        except Exception as e:
+            move_to_failed(audio_path, config.failed_dir, f"Audio conversion failed: {e}")
+            raise
 
-    diarization_failed = False
-    try:
-        speaker_turns = diarize_audio(
-            audio_path, hf_token=config.hf_token, pipeline=diarization_pipeline
-        )
-    except Exception as e:
-        logger.warning("Diarization failed, continuing without speaker labels: %s", e)
-        speaker_turns = []
-        diarization_failed = True
+        try:
+            whisper_segments = retry_with_backoff(
+                lambda: transcribe_audio(
+                    wav_path, model_size=config.whisper_model, model=whisper_model
+                )
+            )
+        except Exception as e:
+            move_to_failed(audio_path, config.failed_dir, f"Transcription failed: {e}")
+            raise
+
+        diarization_failed = False
+        try:
+            speaker_turns = diarize_audio(
+                wav_path, hf_token=config.hf_token, pipeline=diarization_pipeline
+            )
+        except Exception as e:
+            logger.warning("Diarization failed, continuing without speaker labels: %s", e)
+            speaker_turns = []
+            diarization_failed = True
 
     try:
         merged = merge_transcript_and_speakers(whisper_segments, speaker_turns)

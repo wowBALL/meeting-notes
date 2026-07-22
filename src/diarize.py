@@ -9,7 +9,8 @@ def diarize_audio(audio_path: Path, hf_token: str, pipeline: Any = None) -> list
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1", token=hf_token
         )
-    diarization = pipeline(str(audio_path))
+    result = pipeline(str(audio_path))
+    diarization = result.speaker_diarization
     turns = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
         turns.append({"start": turn.start, "end": turn.end, "speaker": speaker})

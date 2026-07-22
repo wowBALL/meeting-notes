@@ -21,6 +21,10 @@ def make_config(tmp_path: Path) -> Config:
     )
 
 
+def _mock_convert_to_wav():
+    return patch("src.pipeline.convert_to_wav", side_effect=lambda src, dst: dst)
+
+
 def test_process_file_saves_transcript_and_summary(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
@@ -28,6 +32,7 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
     audio_path.write_bytes(b"fake audio")
 
     with (
+        _mock_convert_to_wav(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -58,6 +63,7 @@ def test_process_file_continues_without_diarization_on_failure(tmp_path):
     audio_path.write_bytes(b"fake audio")
 
     with (
+        _mock_convert_to_wav(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -71,6 +77,24 @@ def test_process_file_continues_without_diarization_on_failure(tmp_path):
     assert "ผู้พูด 1" in transcript_text
 
 
+def test_process_file_moves_to_failed_when_conversion_fails(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "broken.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        patch("src.pipeline.convert_to_wav", side_effect=RuntimeError("ffmpeg not found")),
+        pytest.raises(RuntimeError, match="ffmpeg not found"),
+    ):
+        process_file(audio_path, config)
+
+    assert not audio_path.exists()
+    assert (config.failed_dir / "broken.mp3").exists()
+    error_log = config.failed_dir / "broken.error.log"
+    assert "Audio conversion failed" in error_log.read_text(encoding="utf-8")
+
+
 def test_process_file_moves_to_failed_when_transcription_fails(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
@@ -78,6 +102,7 @@ def test_process_file_moves_to_failed_when_transcription_fails(tmp_path):
     audio_path.write_bytes(b"fake audio")
 
     with (
+        _mock_convert_to_wav(),
         patch("src.pipeline.transcribe_audio", side_effect=RuntimeError("network error")),
         patch("time.sleep"),
         pytest.raises(RuntimeError, match="network error"),
@@ -97,6 +122,7 @@ def test_process_file_moves_to_failed_when_summarization_fails(tmp_path):
     audio_path.write_bytes(b"fake audio")
 
     with (
+        _mock_convert_to_wav(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -127,6 +153,7 @@ def test_process_file_moves_to_failed_when_rendering_fails(tmp_path):
     audio_path.write_bytes(b"fake audio")
 
     with (
+        _mock_convert_to_wav(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -156,6 +183,7 @@ def test_process_file_moves_to_failed_when_save_fails(tmp_path):
     audio_path.write_bytes(b"fake audio")
 
     with (
+        _mock_convert_to_wav(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -183,6 +211,7 @@ def test_process_file_notes_diarization_failure_in_transcript(tmp_path):
     audio_path.write_bytes(b"fake audio")
 
     with (
+        _mock_convert_to_wav(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -208,6 +237,7 @@ def test_process_file_threads_diarization_pipeline_to_diarize_audio(tmp_path):
     )
 
     with (
+        _mock_convert_to_wav(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -232,6 +262,7 @@ def test_process_file_threads_whisper_model_to_transcribe_audio(tmp_path):
     )
 
     with (
+        _mock_convert_to_wav(),
         patch("src.pipeline.transcribe_audio", mock_transcribe),
         patch(
             "src.pipeline.diarize_audio",

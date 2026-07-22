@@ -18,7 +18,8 @@ def test_diarize_audio_extracts_speaker_turns(tmp_path):
         (FakeTurn(0.0, 3.0), None, "SPEAKER_00"),
         (FakeTurn(3.0, 6.0), None, "SPEAKER_01"),
     ]
-    mock_pipeline = MagicMock(return_value=fake_diarization)
+    fake_output = MagicMock(speaker_diarization=fake_diarization)
+    mock_pipeline = MagicMock(return_value=fake_output)
 
     result = diarize_audio(audio_path, hf_token="test-token", pipeline=mock_pipeline)
 
