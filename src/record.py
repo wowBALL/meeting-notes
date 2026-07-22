@@ -51,11 +51,20 @@ def record_until_interrupted(
     # streams alternately from this single thread avoids the problem
     # entirely, at the cost of relying on each stream's own internal buffer
     # to absorb the time spent blocked on the other.
+    # When `channels` isn't given, soundcard auto-detects it by reading a
+    # COM property blob (IPropertyStore PKEY_AudioEngine_DeviceFormat) that
+    # is unreliable in practice: it intermittently returns garbage channel
+    # counts (observed: 87508, ~24940), which then corrupt buffer-size
+    # math downstream -- sometimes as a catchable OverflowError, sometimes
+    # as a native heap corruption crash with no Python-level output at
+    # all. Passing channels explicitly skips that code path entirely.
+    # WASAPI's shared-mode auto-convert flags (set unconditionally by
+    # soundcard) handle any actual channel-count mismatch.
     mic_chunks: list[np.ndarray] = []
     speaker_chunks: list[np.ndarray] = []
 
-    with mic.recorder(samplerate=samplerate) as mic_recorder:
-        with speaker.recorder(samplerate=samplerate) as speaker_recorder:
+    with mic.recorder(samplerate=samplerate, channels=2) as mic_recorder:
+        with speaker.recorder(samplerate=samplerate, channels=2) as speaker_recorder:
             try:
                 while True:
                     mic_chunks.append(mic_recorder.record(numframes=blocksize))
