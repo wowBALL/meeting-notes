@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import numpy as np
 
 
@@ -14,3 +16,9 @@ def mix_recordings(mic_frames: np.ndarray, speaker_frames: np.ndarray) -> np.nda
     mic_padded[: len(mic_frames)] = mic_frames
     speaker_padded[: len(speaker_frames)] = speaker_frames
     return (mic_padded * 0.5) + (speaker_padded * 0.5)
+
+
+def build_output_filename(name: str | None, now: datetime) -> str:
+    if name:
+        return f"{name}-{now.strftime('%H-%M-%S')}.wav"
+    return f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.wav"
