@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 from src.config import load_config
+from src.transcribe import load_whisper_model
 from src.watcher import watch_loop
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -14,8 +15,8 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
     config.failed_dir.mkdir(parents=True, exist_ok=True)
     config.meetings_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load the multi-GB pyannote model once at startup, then reuse it for every
-    # file, instead of reloading it from disk on each meeting.
+    # Load both models once at startup, then reuse them for every file,
+    # instead of reloading from disk on each meeting.
     from pyannote.audio import Pipeline
 
     logging.info("Loading speaker-diarization model...")
@@ -23,8 +24,15 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
         "pyannote/speaker-diarization-3.1", token=config.hf_token
     )
 
+    logging.info("Loading Whisper model (%s)...", config.whisper_model)
+    whisper_model = load_whisper_model(config.whisper_model)
+
     logging.info("Watching %s for new audio files...", config.inbox_dir)
-    watch_loop(config, diarization_pipeline=diarization_pipeline)
+    watch_loop(
+        config,
+        diarization_pipeline=diarization_pipeline,
+        whisper_model=whisper_model,
+    )
 
 
 if __name__ == "__main__":

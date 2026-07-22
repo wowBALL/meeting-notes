@@ -31,13 +31,17 @@ def watch_loop(
     poll_interval: float = 5.0,
     single_pass: bool = False,
     diarization_pipeline: Any = None,
+    whisper_model: Any = None,
 ) -> None:
     while True:
         for audio_path in scan_inbox(config.inbox_dir):
             if is_file_stable(audio_path, check_interval=0.5):
                 try:
                     meeting_dir = process_file(
-                        audio_path, config, diarization_pipeline=diarization_pipeline
+                        audio_path,
+                        config,
+                        diarization_pipeline=diarization_pipeline,
+                        whisper_model=whisper_model,
                     )
                     logger.info("Processed %s -> %s", audio_path.name, meeting_dir)
                 except Exception:

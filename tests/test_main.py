@@ -15,13 +15,13 @@ def _fake_pyannote(mock_pipeline_cls):
 
 
 def test_main_creates_required_directories_and_starts_watch_loop(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")
 
     mock_pipeline_cls = MagicMock()
     with (
         patch("src.main.watch_loop") as mock_watch_loop,
+        patch("src.main.load_whisper_model", return_value=object()),
         patch.dict(sys.modules, _fake_pyannote(mock_pipeline_cls)),
     ):
         main(base_dir=tmp_path)
@@ -35,7 +35,6 @@ def test_main_creates_required_directories_and_starts_watch_loop(tmp_path, monke
 def test_main_loads_diarization_pipeline_once_and_passes_to_watch_loop(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")
 
@@ -45,6 +44,7 @@ def test_main_loads_diarization_pipeline_once_and_passes_to_watch_loop(
 
     with (
         patch("src.main.watch_loop") as mock_watch_loop,
+        patch("src.main.load_whisper_model", return_value=object()),
         patch.dict(sys.modules, _fake_pyannote(mock_pipeline_cls)),
     ):
         main(base_dir=tmp_path)
@@ -55,3 +55,24 @@ def test_main_loads_diarization_pipeline_once_and_passes_to_watch_loop(
     assert (
         mock_watch_loop.call_args.kwargs["diarization_pipeline"] is loaded_pipeline
     )
+
+
+def test_main_loads_whisper_model_once_and_passes_to_watch_loop(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_MODEL", "medium")
+
+    loaded_whisper_model = object()
+    mock_pipeline_cls = MagicMock()
+
+    with (
+        patch("src.main.watch_loop") as mock_watch_loop,
+        patch(
+            "src.main.load_whisper_model", return_value=loaded_whisper_model
+        ) as mock_load_whisper,
+        patch.dict(sys.modules, _fake_pyannote(mock_pipeline_cls)),
+    ):
+        main(base_dir=tmp_path)
+
+    mock_load_whisper.assert_called_once_with("medium")
+    assert mock_watch_loop.call_args.kwargs["whisper_model"] is loaded_whisper_model

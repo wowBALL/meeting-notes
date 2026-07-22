@@ -15,11 +15,16 @@ logger = logging.getLogger(__name__)
 
 
 def process_file(
-    audio_path: Path, config: Config, diarization_pipeline: Any = None
+    audio_path: Path,
+    config: Config,
+    diarization_pipeline: Any = None,
+    whisper_model: Any = None,
 ) -> Path:
     try:
         whisper_segments = retry_with_backoff(
-            lambda: transcribe_audio(audio_path, api_key=config.openai_api_key)
+            lambda: transcribe_audio(
+                audio_path, model_size=config.whisper_model, model=whisper_model
+            )
         )
     except Exception as e:
         move_to_failed(audio_path, config.failed_dir, f"Transcription failed: {e}")

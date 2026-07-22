@@ -14,10 +14,10 @@ def make_config(tmp_path: Path) -> Config:
         inbox_dir=tmp_path / "inbox",
         failed_dir=tmp_path / "failed",
         meetings_dir=tmp_path / "meetings",
-        openai_api_key="sk-openai-test",
         anthropic_api_key="sk-ant-test",
         hf_token="hf-test-token",
         claude_model="claude-opus-4-8",
+        whisper_model="small",
     )
 
 
@@ -218,3 +218,28 @@ def test_process_file_threads_diarization_pipeline_to_diarize_audio(tmp_path):
         process_file(audio_path, config, diarization_pipeline=sentinel_pipeline)
 
     assert mock_diarize.call_args.kwargs["pipeline"] is sentinel_pipeline
+
+
+def test_process_file_threads_whisper_model_to_transcribe_audio(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    sentinel_model = object()
+    mock_transcribe = MagicMock(
+        return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}]
+    )
+
+    with (
+        patch("src.pipeline.transcribe_audio", mock_transcribe),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config, whisper_model=sentinel_model)
+
+    assert mock_transcribe.call_args.kwargs["model"] is sentinel_model
+    assert mock_transcribe.call_args.kwargs["model_size"] == config.whisper_model
