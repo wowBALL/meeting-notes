@@ -1,5 +1,18 @@
 import logging
+import os
 from pathlib import Path
+
+if os.name == "nt":
+    # Since Python 3.8, PATH is no longer consulted when ctypes/torch resolve
+    # dependency DLLs (e.g. torchcodec loading ffmpeg's avcodec-*.dll), even
+    # though PATH itself is set correctly. Re-registering every PATH entry
+    # here restores that lookup regardless of how the process was launched.
+    for _dir in os.environ.get("PATH", "").split(os.pathsep):
+        if _dir and os.path.isdir(_dir):
+            try:
+                os.add_dll_directory(_dir)
+            except OSError:
+                pass
 
 from src.config import load_config
 from src.transcribe import load_whisper_model
