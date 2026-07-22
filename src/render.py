@@ -1,0 +1,18 @@
+def format_timestamp(seconds: float) -> str:
+    total_seconds = int(seconds)
+    minutes, secs = divmod(total_seconds, 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def render_transcript_markdown(merged_segments: list[dict]) -> str:
+    lines = ["# Transcript"]
+    speaker_display: dict[str, str] = {}
+    counter = 1
+    for seg in merged_segments:
+        speaker_key = seg["speaker"]
+        if speaker_key not in speaker_display:
+            speaker_display[speaker_key] = f"ผู้พูด {counter}"
+            counter += 1
+        timestamp = format_timestamp(seg["start"])
+        lines.append(f"**{speaker_display[speaker_key]}** [{timestamp}]: {seg['text']}")
+    return "\n\n".join(lines)
