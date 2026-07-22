@@ -1,6 +1,14 @@
+import sys
+import threading
+import time
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
+import soundcard as sc
+import soundfile as sf
+
+from src.config import load_config
 
 
 def to_mono(frames: np.ndarray) -> np.ndarray:
@@ -22,3 +30,91 @@ def build_output_filename(name: str | None, now: datetime) -> str:
     if name:
         return f"{name}-{now.strftime('%H-%M-%S')}.wav"
     return f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.wav"
+
+
+def get_default_mic():
+    return sc.default_microphone()
+
+
+def get_default_speaker_loopback():
+    speaker = sc.default_speaker()
+    return sc.get_microphone(id=str(speaker.name), include_loopback=True)
+
+
+def _record_loop(recorder_cm, blocksize, chunks, stop_event):
+    with recorder_cm as recorder:
+        while not stop_event.is_set():
+            chunks.append(recorder.record(numframes=blocksize))
+
+
+def record_until_interrupted(
+    mic, speaker, samplerate: int = 48000, blocksize: int = 4096
+) -> tuple[np.ndarray, np.ndarray]:
+    mic_chunks: list[np.ndarray] = []
+    speaker_chunks: list[np.ndarray] = []
+    stop_event = threading.Event()
+
+    mic_thread = threading.Thread(
+        target=_record_loop,
+        args=(mic.recorder(samplerate=samplerate), blocksize, mic_chunks, stop_event),
+    )
+    speaker_thread = threading.Thread(
+        target=_record_loop,
+        args=(speaker.recorder(samplerate=samplerate), blocksize, speaker_chunks, stop_event),
+    )
+    mic_thread.start()
+    speaker_thread.start()
+
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        mic_thread.join()
+        speaker_thread.join()
+
+    mic_frames = np.concatenate(mic_chunks) if mic_chunks else np.zeros(0, dtype=np.float32)
+    speaker_frames = (
+        np.concatenate(speaker_chunks) if speaker_chunks else np.zeros(0, dtype=np.float32)
+    )
+    return mic_frames, speaker_frames
+
+
+def main() -> None:
+    name = sys.argv[1] if len(sys.argv) > 1 else None
+
+    config = load_config()
+    config.inbox_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        mic = get_default_mic()
+        speaker = get_default_speaker_loopback()
+    except Exception as e:
+        print(f"ไม่พบไมค์/ลำโพง default กรุณาตรวจสอบการตั้งค่าเสียงของ Windows: {e}")
+        return
+
+    print("กำลังอัดเสียง... กด Ctrl+C เพื่อหยุด")
+    samplerate = 48000
+    try:
+        mic_frames, speaker_frames = record_until_interrupted(mic, speaker, samplerate=samplerate)
+    except Exception as e:
+        print(
+            "อัดเสียงไม่สำเร็จ (อาจไม่มีสิทธิ์เข้าถึงไมค์ - ตรวจสอบที่ "
+            f"Settings > Privacy > Microphone): {e}"
+        )
+        return
+
+    mixed = mix_recordings(to_mono(mic_frames), to_mono(speaker_frames))
+
+    now = datetime.now()
+    filename = build_output_filename(name, now)
+    output_path = config.inbox_dir / filename
+    sf.write(str(output_path), mixed, samplerate)
+
+    print(f"หยุดอัดแล้ว บันทึกไปที่ {output_path}")
+
+
+if __name__ == "__main__":
+    main()
