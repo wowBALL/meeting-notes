@@ -2,13 +2,14 @@ import sys
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import soundcard as sc
 import soundfile as sf
 
 from src.config import load_config
+
+DEFAULT_SAMPLERATE = 48000
 
 
 def to_mono(frames: np.ndarray) -> np.ndarray:
@@ -52,7 +53,7 @@ def _record_loop(recorder_cm, blocksize, chunks, stop_event, errors):
 
 
 def record_until_interrupted(
-    mic, speaker, samplerate: int = 48000, blocksize: int = 4096
+    mic, speaker, samplerate: int = DEFAULT_SAMPLERATE, blocksize: int = 4096
 ) -> tuple[np.ndarray, np.ndarray]:
     mic_chunks: list[np.ndarray] = []
     speaker_chunks: list[np.ndarray] = []
@@ -104,9 +105,8 @@ def main() -> None:
         return
 
     print("กำลังอัดเสียง... กด Ctrl+C เพื่อหยุด")
-    samplerate = 48000
     try:
-        mic_frames, speaker_frames = record_until_interrupted(mic, speaker, samplerate=samplerate)
+        mic_frames, speaker_frames = record_until_interrupted(mic, speaker)
     except Exception as e:
         print(
             "อัดเสียงไม่สำเร็จ (อาจไม่มีสิทธิ์เข้าถึงไมค์ - ตรวจสอบที่ "
@@ -119,7 +119,7 @@ def main() -> None:
     now = datetime.now()
     filename = build_output_filename(name, now)
     output_path = config.inbox_dir / filename
-    sf.write(str(output_path), mixed, samplerate)
+    sf.write(str(output_path), mixed, DEFAULT_SAMPLERATE)
 
     print(f"หยุดอัดแล้ว บันทึกไปที่ {output_path}")
 
