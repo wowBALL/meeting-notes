@@ -1,0 +1,8 @@
+.env
+inbox/
+failed/
+meetings/
+__pycache__/
+*.pyc
+.venv/
+venv/
