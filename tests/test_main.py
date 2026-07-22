@@ -50,7 +50,7 @@ def test_main_loads_diarization_pipeline_once_and_passes_to_watch_loop(
         main(base_dir=tmp_path)
 
     mock_pipeline_cls.from_pretrained.assert_called_once_with(
-        "pyannote/speaker-diarization-3.1", use_auth_token="hf-test-token"
+        "pyannote/speaker-diarization-3.1", token="hf-test-token"
     )
     assert (
         mock_watch_loop.call_args.kwargs["diarization_pipeline"] is loaded_pipeline

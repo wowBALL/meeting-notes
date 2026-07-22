@@ -7,7 +7,7 @@ def diarize_audio(audio_path: Path, hf_token: str, pipeline: Any = None) -> list
         from pyannote.audio import Pipeline
 
         pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1", use_auth_token=hf_token
+            "pyannote/speaker-diarization-3.1", token=hf_token
         )
     diarization = pipeline(str(audio_path))
     turns = []

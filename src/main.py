@@ -20,7 +20,7 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
 
     logging.info("Loading speaker-diarization model...")
     diarization_pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1", use_auth_token=config.hf_token
+        "pyannote/speaker-diarization-3.1", token=config.hf_token
     )
 
     logging.info("Watching %s for new audio files...", config.inbox_dir)
