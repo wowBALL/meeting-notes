@@ -105,76 +105,77 @@ def get_common_samplerate(mic_device: dict, speaker_device: dict) -> int:
     return mic_rate
 
 
-def record_until_interrupted(
-    mic, speaker, samplerate: int = DEFAULT_SAMPLERATE, blocksize: int = 4096
-) -> tuple[np.ndarray, np.ndarray]:
-    # soundcard only initializes COM (CoInitializeEx) on the thread that
-    # first imports it. Recording mic and speaker concurrently from two
-    # separate threads means calling WASAPI from a thread that never joined
-    # a COM apartment, which is undefined behavior on Windows -- in
-    # practice it reproducibly corrupted the process heap. Polling both
-    # streams alternately from this single thread avoids the problem
-    # entirely, at the cost of relying on each stream's own internal buffer
-    # to absorb the time spent blocked on the other.
-    # When `channels` isn't given, soundcard auto-detects it by reading a
-    # COM property blob (IPropertyStore PKEY_AudioEngine_DeviceFormat) that
-    # is unreliable in practice: it intermittently returns garbage channel
-    # counts (observed: 87508, ~24940), which then corrupt buffer-size
-    # math downstream -- sometimes as a catchable OverflowError, sometimes
-    # as a native heap corruption crash with no Python-level output at
-    # all. Passing channels explicitly skips that code path entirely.
-    # WASAPI's shared-mode auto-convert flags (set unconditionally by
-    # soundcard) handle any actual channel-count mismatch.
-    mic_chunks: list[np.ndarray] = []
-    speaker_chunks: list[np.ndarray] = []
-
-    with mic.recorder(samplerate=samplerate, channels=2) as mic_recorder:
-        with speaker.recorder(samplerate=samplerate, channels=2) as speaker_recorder:
-            try:
-                while True:
-                    mic_chunks.append(mic_recorder.record(numframes=blocksize))
-                    speaker_chunks.append(speaker_recorder.record(numframes=blocksize))
-            except KeyboardInterrupt:
-                pass
-
-    mic_frames = np.concatenate(mic_chunks) if mic_chunks else np.zeros(0, dtype=np.float32)
-    speaker_frames = (
-        np.concatenate(speaker_chunks) if speaker_chunks else np.zeros(0, dtype=np.float32)
-    )
-    return mic_frames, speaker_frames
-
-
 def main() -> None:
     name = sys.argv[1] if len(sys.argv) > 1 else None
 
     config = load_config()
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
 
+    p = pyaudio.PyAudio()
     try:
-        mic = get_default_mic()
-        speaker = get_default_speaker_loopback()
-    except Exception as e:
-        print(f"ไม่พบไมค์/ลำโพง default กรุณาตรวจสอบการตั้งค่าเสียงของ Windows: {e}")
-        return
+        try:
+            mic_device = get_wasapi_mic_device(p)
+            speaker_device = get_wasapi_loopback_device(p)
+            samplerate = get_common_samplerate(mic_device, speaker_device)
+        except Exception as e:
+            print(f"ไม่พบไมค์/ลำโพง default กรุณาตรวจสอบการตั้งค่าเสียงของ Windows: {e}")
+            return
 
-    print("กำลังอัดเสียง... กด Ctrl+C เพื่อหยุด")
-    try:
-        mic_frames, speaker_frames = record_until_interrupted(mic, speaker)
-    except Exception as e:
-        print(
-            "อัดเสียงไม่สำเร็จ (อาจไม่มีสิทธิ์เข้าถึงไมค์ - ตรวจสอบที่ "
-            f"Settings > Privacy > Microphone): {e}"
+        mic_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        speaker_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        stop_event = threading.Event()
+        output_path = config.inbox_dir / build_output_filename(name, datetime.now())
+
+        try:
+            mic_stream = p.open(
+                format=pyaudio.paFloat32,
+                channels=int(mic_device["maxInputChannels"]),
+                rate=samplerate,
+                input=True,
+                input_device_index=mic_device["index"],
+                frames_per_buffer=4096,
+                stream_callback=make_callback(mic_queue, int(mic_device["maxInputChannels"])),
+            )
+            speaker_stream = p.open(
+                format=pyaudio.paFloat32,
+                channels=int(speaker_device["maxInputChannels"]),
+                rate=samplerate,
+                input=True,
+                input_device_index=speaker_device["index"],
+                frames_per_buffer=4096,
+                stream_callback=make_callback(
+                    speaker_queue, int(speaker_device["maxInputChannels"])
+                ),
+            )
+        except Exception as e:
+            print(
+                "อัดเสียงไม่สำเร็จ (อาจไม่มีสิทธิ์เข้าถึงไมค์ - ตรวจสอบที่ "
+                f"Settings > Privacy > Microphone): {e}"
+            )
+            return
+
+        recorder_thread = threading.Thread(
+            target=record_streams_to_file,
+            args=(mic_queue, speaker_queue, output_path, samplerate, stop_event),
         )
-        return
+        recorder_thread.start()
 
-    mixed = mix_recordings(to_mono(mic_frames), to_mono(speaker_frames))
+        print("กำลังอัดเสียง... กด Ctrl+C เพื่อหยุด")
+        try:
+            while recorder_thread.is_alive():
+                recorder_thread.join(timeout=0.2)
+        except KeyboardInterrupt:
+            stop_event.set()
+            recorder_thread.join()
+        finally:
+            mic_stream.stop_stream()
+            mic_stream.close()
+            speaker_stream.stop_stream()
+            speaker_stream.close()
 
-    now = datetime.now()
-    filename = build_output_filename(name, now)
-    output_path = config.inbox_dir / filename
-    sf.write(str(output_path), mixed, DEFAULT_SAMPLERATE)
-
-    print(f"หยุดอัดแล้ว บันทึกไปที่ {output_path}")
+        print(f"หยุดอัดแล้ว บันทึกไปที่ {output_path}")
+    finally:
+        p.terminate()
 
 
 if __name__ == "__main__":
