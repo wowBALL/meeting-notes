@@ -1,30 +1,150 @@
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.summarize import summarize_transcript
+import src.summarize as summarize_module
+from src.chunk import parse_transcript_segments, split_into_chunks
+from src.summarize import CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS, summarize_transcript
 
 
-def test_summarize_transcript_returns_text_from_response():
-    mock_response = SimpleNamespace(
-        content=[SimpleNamespace(type="text", text="## ประเด็นสำคัญ\n- ทดสอบระบบ")]
-    )
-    mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_response
+def _response(text: str):
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    response = MagicMock()
+    response.content = [block]
+    return response
 
-    with patch("anthropic.Anthropic", return_value=mock_client):
-        result = summarize_transcript("# Transcript\n\nสวัสดีครับ", api_key="test-key")
+
+def _patch_anthropic(client):
+    return patch("anthropic.Anthropic", return_value=client)
+
+
+def _single_response_client(text: str):
+    client = MagicMock()
+    client.messages.create.return_value = _response(text)
+    return client
+
+
+def _prompt_aware_client():
+    """Answers map calls with a numbered chunk summary and the reduce call with a
+    fixed marker, keyed off the system prompt. Keeps assertions independent of how
+    many chunks the splitter happens to produce."""
+    state = {"map_calls": 0}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            return _response("สรุปรวมทั้งประชุม")
+        index = state["map_calls"]
+        state["map_calls"] += 1
+        return _response(f"สรุปช่วง {index}")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+    return client
+
+
+def _long_transcript(segment_count: int) -> str:
+    blocks = [
+        f"**ผู้พูด 1** [{i:02d}:00]: " + ("ก" * 400) for i in range(segment_count)
+    ]
+    return "# Transcript\n\n" + "\n\n".join(blocks)
+
+
+def _expected_chunk_count(transcript: str) -> int:
+    segments = parse_transcript_segments(transcript)
+    return len(split_into_chunks(segments, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS))
+
+
+def test_short_transcript_returns_the_single_response_verbatim():
+    client = _single_response_client("## ประเด็นสำคัญ\n- ทดสอบระบบ")
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(
+            "# Transcript\n\n**ผู้พูด 1** [00:00]: สั้นมาก", api_key="test-key"
+        )
 
     assert result == "## ประเด็นสำคัญ\n- ทดสอบระบบ"
+    assert client.messages.create.call_count == 1
+    assert "ไทม์ไลน์" not in result
 
 
-def test_summarize_transcript_uses_given_model():
-    mock_response = SimpleNamespace(content=[SimpleNamespace(type="text", text="สรุป")])
-    mock_client = MagicMock()
-    mock_client.messages.create.return_value = mock_response
+def test_short_transcript_uses_given_model_and_original_prompt():
+    client = _single_response_client("สรุป")
 
-    with patch("anthropic.Anthropic", return_value=mock_client):
+    with _patch_anthropic(client):
         summarize_transcript("transcript", model="claude-sonnet-5", api_key="test-key")
 
-    call_kwargs = mock_client.messages.create.call_args.kwargs
-    assert call_kwargs["model"] == "claude-sonnet-5"
-    assert "transcript" in call_kwargs["messages"][0]["content"]
+    kwargs = client.messages.create.call_args.kwargs
+    assert kwargs["model"] == "claude-sonnet-5"
+    assert "transcript" in kwargs["messages"][0]["content"]
+    assert kwargs["system"] == summarize_module.SUMMARY_SYSTEM_PROMPT
+    assert kwargs["max_tokens"] == summarize_module.MAP_MAX_OUTPUT_TOKENS
+
+
+def test_long_transcript_makes_one_call_per_chunk_plus_one_reduce():
+    transcript = _long_transcript(100)
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, api_key="test-key")
+
+    assert client.messages.create.call_count == _expected_chunk_count(transcript) + 1
+
+
+def test_long_transcript_output_has_merged_summary_then_timeline():
+    transcript = _long_transcript(100)
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    assert result.startswith("สรุปรวมทั้งประชุม")
+    assert "## ไทม์ไลน์ตามช่วง" in result
+    assert "สรุปช่วง 0" in result
+    assert "### [00:00–" in result
+
+
+def test_long_transcript_chunk_calls_use_the_chunk_prompt():
+    transcript = _long_transcript(100)
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, api_key="test-key")
+
+    first_kwargs = client.messages.create.call_args_list[0].kwargs
+    assert first_kwargs["system"] == summarize_module.CHUNK_SYSTEM_PROMPT
+    assert first_kwargs["max_tokens"] == summarize_module.MAP_MAX_OUTPUT_TOKENS
+
+
+def test_long_transcript_reduce_call_uses_reduce_prompt_and_larger_cap():
+    transcript = _long_transcript(100)
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, api_key="test-key")
+
+    reduce_kwargs = client.messages.create.call_args_list[-1].kwargs
+    assert reduce_kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT
+    assert reduce_kwargs["max_tokens"] == summarize_module.REDUCE_MAX_OUTPUT_TOKENS
+
+
+def test_a_failing_chunk_is_retried_individually():
+    transcript = _long_transcript(100)
+    expected_chunks = _expected_chunk_count(transcript)
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("transient api error")
+        return _response("ok")
+
+    client = MagicMock()
+    client.messages.create.side_effect = flaky
+
+    with _patch_anthropic(client), patch("time.sleep"):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    assert "ok" in result
+    # every chunk + one reduce + exactly one extra attempt for the retried chunk;
+    # a restart-everything retry would cost far more calls than this
+    assert calls["n"] == expected_chunks + 1 + 1
