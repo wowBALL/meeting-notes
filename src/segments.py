@@ -164,10 +164,14 @@ def finish_session(
 
     # The encode+move already succeeded -- the user's audio is safe at
     # `destination`, so nothing below may raise. A lingering handle or an AV
-    # scanner (common on Windows) can make cleanup fail after the fact; deleting
-    # the parts FIRST means whatever survives no longer looks like a recoverable
-    # session, so the next run cannot re-encode it into a duplicate meeting.
-    for name in parts:
+    # scanner (common on Windows) can make ANY of these deletions fail after the
+    # fact -- the first real recording lost both the part unlink and the rmtree
+    # to a transient lock. The manifest goes FIRST because find_orphan_sessions
+    # requires it: once it is gone, whatever else survives can never qualify as
+    # a recoverable session, so the next run cannot re-encode the leftovers into
+    # a duplicate meeting. (A .json is also far less likely to be lock-scanned
+    # than a fresh media file.)
+    for name in [MANIFEST_NAME, "concat.txt", *parts]:
         try:
             (session_dir / name).unlink()
         except OSError:

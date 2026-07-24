@@ -187,6 +187,33 @@ def test_finish_session_leaves_nothing_recoverable_when_cleanup_fails(tmp_path):
     assert find_orphan_sessions(inbox) == []
 
 
+def test_finish_session_survives_a_genuinely_locked_part_file(tmp_path):
+    # Seen on the first real recording (2026-07-24): Explorer/AV briefly held the
+    # fresh part file, so BOTH the part unlink and rmtree failed and the leftover
+    # directory still had its manifest -- the next startup would have re-encoded
+    # it into a duplicate meeting. Holding an open handle reproduces that lock
+    # for real on Windows. The manifest must be deleted FIRST, so whatever else
+    # survives can never qualify as recoverable.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1)
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with open(session_dir / part_filename(1), "rb"):  # the Explorer/AV lock
+        with patch("src.segments.subprocess.run", side_effect=fake_run):
+            destination = finish_session(session_dir, inbox)
+
+        assert destination.read_bytes() == b"fake opus"
+        # the locked part is still on disk -- but with the manifest gone the
+        # directory no longer counts as a recoverable session
+        assert (session_dir / part_filename(1)).exists()
+        assert not (session_dir / MANIFEST_NAME).exists()
+        assert find_orphan_sessions(inbox) == []
+
+
 def test_finish_session_encodes_moves_and_cleans_up(tmp_path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
