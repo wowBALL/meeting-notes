@@ -14,6 +14,15 @@ from src.segments import find_orphan_sessions, finish_session, part_filename, se
 ROTATE_SECONDS = 1800
 
 
+def _ffmpeg_error_detail(error: Exception) -> str:
+    stderr = getattr(error, "stderr", None)
+    if not stderr:
+        return str(error)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return f"{error}\n{stderr[-2000:]}"
+
+
 def to_mono(frames: np.ndarray) -> np.ndarray:
     if frames.ndim == 1:
         return frames
@@ -85,8 +94,10 @@ def record_streams_to_session(
 
     def close_current_part() -> None:
         nonlocal handle
-        handle.flush()
-        handle.close()
+        try:
+            handle.flush()
+        finally:
+            handle.close()
         handle = None
         if on_part_closed is not None:
             on_part_closed(list(parts))
@@ -115,8 +126,10 @@ def record_streams_to_session(
             # NOT fire on_part_closed: the previous close already reported the true
             # part list, and firing again would report a part that no longer exists.
             trailing_empty = samples_in_part == 0 and len(parts) > 1
-            handle.flush()
-            handle.close()
+            try:
+                handle.flush()
+            finally:
+                handle.close()
             handle = None
             if trailing_empty:
                 (session_dir / parts[-1]).unlink()
@@ -164,7 +177,10 @@ def recover_orphan_sessions(inbox_dir: Path) -> list[Path]:
         try:
             destination = finish_session(session_dir, inbox_dir)
         except Exception as e:
-            print(f"กู้ {session_dir.name} ไม่สำเร็จ ข้ามไปก่อน (ชิ้นส่วนยังอยู่): {e}")
+            print(
+                f"กู้ {session_dir.name} ไม่สำเร็จ ข้ามไปก่อน (ชิ้นส่วนยังอยู่): "
+                f"{_ffmpeg_error_detail(e)}"
+            )
             continue
         print(f"กู้สำเร็จ: {destination}")
         recovered.append(session_dir)
@@ -201,13 +217,6 @@ def main() -> None:
         now = datetime.now()
         stem = Path(build_output_filename(name, now)).stem
         session_dir = session_dir_for(config.inbox_dir, stem)
-        session_dir.mkdir(parents=True, exist_ok=True)
-        write_manifest(session_dir, stem, now.isoformat(), samplerate, [], "recording")
-
-        def on_part_closed(parts: list[str]) -> None:
-            write_manifest(
-                session_dir, stem, now.isoformat(), samplerate, parts, "recording"
-            )
 
         try:
             mic_stream = p.open(
@@ -236,6 +245,19 @@ def main() -> None:
                 f"Settings > Privacy > Microphone): {e}"
             )
             return
+
+        # Only create the session directory (and let the watcher's orphan-recovery
+        # machinery become aware of it) once both streams are confirmed open --
+        # otherwise a stream-open failure above would leave an empty, permanently
+        # unrecoverable .session-* directory behind (find_orphan_sessions requires
+        # at least one part file, so nothing would ever clean it up).
+        session_dir.mkdir(parents=True, exist_ok=True)
+        write_manifest(session_dir, stem, now.isoformat(), samplerate, [], "recording")
+
+        def on_part_closed(parts: list[str]) -> None:
+            write_manifest(
+                session_dir, stem, now.isoformat(), samplerate, parts, "recording"
+            )
 
         try:
             recorder_thread = threading.Thread(
@@ -273,7 +295,10 @@ def main() -> None:
         try:
             destination = finish_session(session_dir, config.inbox_dir)
         except Exception as e:
-            print(f"บีบอัดไม่สำเร็จ ชิ้นส่วนเสียงยังอยู่ที่ {session_dir} : {e}")
+            print(
+                f"บีบอัดไม่สำเร็จ ชิ้นส่วนเสียงยังอยู่ที่ {session_dir} : "
+                f"{_ffmpeg_error_detail(e)}"
+            )
             return
         print(f"หยุดอัดแล้ว บันทึกไปที่ {destination}")
     finally:

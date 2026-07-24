@@ -9,6 +9,7 @@ from src.segments import (
     MANIFEST_NAME,
     OPUS_BITRATE,
     SESSION_PREFIX,
+    WAV_HEADER_ALLOWANCE,
     build_concat_list,
     ffmpeg_concat_command,
     finish_session,
@@ -19,6 +20,12 @@ from src.segments import (
     write_manifest,
 )
 
+# finish_session now decides which parts are "real" by size on disk (see
+# WAV_HEADER_ALLOWANCE), so fixture parts representing genuine recorded audio
+# must be comfortably larger than the allowance -- a bare `b"fake wav bytes"`
+# (14 bytes) would now be mistaken for a header-only, in-progress file.
+_FAKE_WAV_BYTES = b"fake wav bytes " * (WAV_HEADER_ALLOWANCE // 16 + 2)
+
 
 def _make_session(inbox: Path, stem: str, part_count: int, status: str = "recording") -> Path:
     session_dir = session_dir_for(inbox, stem)
@@ -26,7 +33,7 @@ def _make_session(inbox: Path, stem: str, part_count: int, status: str = "record
     parts = []
     for index in range(1, part_count + 1):
         name = part_filename(index)
-        (session_dir / name).write_bytes(b"fake wav bytes")
+        (session_dir / name).write_bytes(_FAKE_WAV_BYTES)
         parts.append(name)
     write_manifest(session_dir, stem, "2026-07-24T14:30:05", 48000, parts, status)
     return session_dir
@@ -79,6 +86,25 @@ def test_build_concat_list_lists_every_part_in_order(tmp_path):
     assert len(lines) == 2
     assert lines[0].startswith("file '") and lines[0].endswith("part0001.wav'")
     assert lines[1].endswith("part0002.wav'")
+
+
+def test_build_concat_list_escapes_apostrophes_in_the_path(tmp_path):
+    # ffmpeg's concat demuxer ends a single-quoted token at the next "'", so an
+    # apostrophe in a meeting name (straight from sys.argv[1]) must be escaped
+    # or the emitted path gets truncated and ffmpeg fails to find the file.
+    session_dir = tmp_path / ".session-Bob's standup"
+    session_dir.mkdir()
+    real_path = str((session_dir / "part0001.wav").resolve())
+
+    listing = build_concat_list(session_dir, ["part0001.wav"])
+
+    line = listing.strip()
+    assert line.startswith("file '") and line.endswith("'")
+    escaped = line[len("file '") : -1]
+    # each real "'" must have become the shell-style close-escape-reopen idiom
+    assert escaped == real_path.replace("'", "'\\''")
+    # round-trip: undoing that idiom recovers the exact real path
+    assert escaped.replace("'\\''", "'") == real_path
 
 
 def test_ffmpeg_concat_command_has_the_required_flags(tmp_path):
@@ -189,6 +215,78 @@ def test_finish_session_raises_when_no_parts_survive(tmp_path):
 
     with pytest.raises(RuntimeError, match="ไม่พบชิ้นส่วนเสียง"):
         finish_session(session_dir, inbox)
+
+
+def test_finish_session_includes_the_in_progress_part_missing_from_the_manifest(tmp_path):
+    # A crash is always mid-part, so the part being written when the process died
+    # was never recorded in the manifest (only closed parts are). It still holds
+    # real audio on disk and must not be silently discarded on recovery.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1)
+    in_progress = part_filename(2)
+    (session_dir / in_progress).write_bytes(_FAKE_WAV_BYTES)
+    # sanity check on the premise: the manifest (only updated when a part closes)
+    # does not yet know about the in-progress part
+    assert in_progress not in read_manifest(session_dir)["parts"]
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        concat_path = Path(command[command.index("-i") + 1])
+        seen["listing"] = concat_path.read_text(encoding="utf-8")
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        finish_session(session_dir, inbox)
+
+    assert in_progress in seen["listing"]
+
+
+def test_finish_session_succeeds_when_manifest_lists_no_parts_but_one_exists_on_disk(tmp_path):
+    # The common real-world crash: killed before the first rotation, so
+    # manifest["parts"] is still []. The directory listing must still find the
+    # part and recover the whole recording instead of raising.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = session_dir_for(inbox, "meet1")
+    session_dir.mkdir(parents=True)
+    (session_dir / part_filename(1)).write_bytes(_FAKE_WAV_BYTES)
+    write_manifest(session_dir, "meet1", "2026-07-24T14:30:05", 48000, [], "recording")
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        destination = finish_session(session_dir, inbox)
+
+    assert destination == inbox / "meet1.ogg"
+    assert destination.read_bytes() == b"fake opus"
+
+
+def test_finish_session_excludes_a_header_only_part_from_the_concat_list(tmp_path):
+    # A part file left by a killed process before any audio was flushed still has
+    # only its (possibly zero-length) RIFF header on disk -- not worth encoding,
+    # and including it would just hand ffmpeg a truncated/empty stream.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1)
+    header_only = part_filename(2)
+    (session_dir / header_only).write_bytes(b"RIFF")  # far below WAV_HEADER_ALLOWANCE
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        concat_path = Path(command[command.index("-i") + 1])
+        seen["listing"] = concat_path.read_text(encoding="utf-8")
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        finish_session(session_dir, inbox)
+
+    assert header_only not in seen["listing"]
+    assert seen["listing"].count("file '") == 1
 
 
 def test_finish_session_marks_the_manifest_encoding_before_running_ffmpeg(tmp_path):
