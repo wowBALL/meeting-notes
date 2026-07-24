@@ -1,7 +1,7 @@
 from datetime import datetime
 import queue
 import threading
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -89,6 +89,86 @@ def test_recover_orphan_sessions_keeps_going_when_one_fails(tmp_path):
 
     # the failure must not block recovery of the others, nor abort the new recording
     assert recovered == [tmp_path / "b"]
+
+
+class _FakeStopEvent:
+    """Lets a test drive the poll loop: is_set() stays False for `waits` polls."""
+
+    def __init__(self, waits: int):
+        self.remaining = waits
+
+    def wait(self, _timeout):
+        if self.remaining <= 0:
+            return True
+        self.remaining -= 1
+        return False
+
+
+def test_default_output_name_reads_from_a_fresh_audio_instance():
+    # PortAudio snapshots the device list at initialization, so a long-lived
+    # instance keeps reporting the device that was default when recording began.
+    # Only a fresh instance sees a switch that happened mid-meeting.
+    audio = MagicMock()
+    audio.get_host_api_info_by_type.return_value = {"index": 0, "defaultOutputDevice": 7}
+    audio.get_device_info_by_index.return_value = {"name": "Headphones (FreeBuds)"}
+
+    with patch("src.record.pyaudio_instance", return_value=audio) as mock_new:
+        assert record.default_output_name() == "Headphones (FreeBuds)"
+
+    mock_new.assert_called_once()
+    audio.terminate.assert_called_once()  # must not leak an instance every poll
+
+
+def test_watch_output_device_reports_each_switch():
+    names = iter(["Speakers (NX-S2)", "Headphones (FreeBuds)", "Headphones (FreeBuds)"])
+    changes = []
+
+    record.watch_output_device(
+        get_name=lambda: next(names),
+        initial_name="Speakers (NX-S2)",
+        stop_event=_FakeStopEvent(3),
+        on_change=lambda old, new: changes.append((old, new)),
+        poll_seconds=0,
+    )
+
+    assert changes == [("Speakers (NX-S2)", "Headphones (FreeBuds)")]
+
+
+def test_watch_output_device_stays_quiet_when_nothing_changes():
+    changes = []
+
+    record.watch_output_device(
+        get_name=lambda: "Speakers (NX-S2)",
+        initial_name="Speakers (NX-S2)",
+        stop_event=_FakeStopEvent(3),
+        on_change=lambda old, new: changes.append((old, new)),
+        poll_seconds=0,
+    )
+
+    assert changes == []
+
+
+def test_watch_output_device_survives_a_failed_probe():
+    # a device switch can make enumeration throw for an instant; one bad poll
+    # must not kill the watch for the rest of the meeting
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("device in flux")
+        return "Headphones (FreeBuds)"
+
+    changes = []
+    record.watch_output_device(
+        get_name=flaky,
+        initial_name="Speakers (NX-S2)",
+        stop_event=_FakeStopEvent(3),
+        on_change=lambda old, new: changes.append((old, new)),
+        poll_seconds=0,
+    )
+
+    assert changes == [("Speakers (NX-S2)", "Headphones (FreeBuds)")]
 
 
 def test_recover_orphan_sessions_sweeps_manifest_less_debris_first(tmp_path):

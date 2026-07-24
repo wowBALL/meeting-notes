@@ -10,7 +10,7 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 
 from src.config import load_config
-from src.segments import (
+from src.segments import (  # noqa: F401 -- write_manifest re-exported for tests
     NoAudioRecorded,
     find_orphan_sessions,
     finish_session,
@@ -21,6 +21,7 @@ from src.segments import (
 )
 
 ROTATE_SECONDS = 1800
+DEVICE_POLL_SECONDS = 5.0
 
 
 def _ffmpeg_error_detail(error: Exception) -> str:
@@ -146,6 +147,46 @@ def record_streams_to_session(
             elif on_part_closed is not None:
                 on_part_closed(list(parts))
     return parts
+
+
+def pyaudio_instance():
+    return pyaudio.PyAudio()
+
+
+def default_output_name() -> str:
+    # A FRESH instance on purpose: PortAudio snapshots the device list when it
+    # initializes, so the instance that is busy recording keeps reporting the
+    # device that was default when the meeting started -- exactly the switch we
+    # need to notice.
+    audio = pyaudio_instance()
+    try:
+        wasapi = audio.get_host_api_info_by_type(pyaudio.paWASAPI)
+        return audio.get_device_info_by_index(wasapi["defaultOutputDevice"])["name"]
+    finally:
+        audio.terminate()
+
+
+def watch_output_device(
+    get_name,
+    initial_name: str,
+    stop_event,
+    on_change,
+    poll_seconds: float = DEVICE_POLL_SECONDS,
+) -> None:
+    # The loopback stream is bound to one device for the whole recording. If the
+    # default output moves (headset connected, speaker unplugged), the far end of
+    # the meeting stops being captured and nothing else would ever say so.
+    last = initial_name
+    while not stop_event.wait(poll_seconds):
+        try:
+            current = get_name()
+        except Exception:
+            # enumeration can throw for an instant while a device is switching;
+            # one bad poll must not end the watch for the rest of the meeting
+            continue
+        if current != last:
+            on_change(last, current)
+            last = current
 
 
 def get_wasapi_mic_device(p) -> dict:
@@ -277,12 +318,37 @@ def main() -> None:
         # unrecoverable .session-* directory behind (find_orphan_sessions requires
         # at least one part file, so nothing would ever clean it up).
         session_dir.mkdir(parents=True, exist_ok=True)
-        write_manifest(session_dir, stem, now.isoformat(), samplerate, [], "recording")
+        devices = {"mic": mic_device["name"], "loopback": speaker_device["name"]}
+        write_manifest(
+            session_dir, stem, now.isoformat(), samplerate, [], "recording", devices
+        )
 
         def on_part_closed(parts: list[str]) -> None:
             write_manifest(
-                session_dir, stem, now.isoformat(), samplerate, parts, "recording"
+                session_dir, stem, now.isoformat(), samplerate, parts, "recording", devices
             )
+
+        def warn_output_changed(old_name: str, new_name: str) -> None:
+            print()
+            print("*" * 70)
+            print(f"!! อุปกรณ์เสียงเปลี่ยนจาก \"{old_name}\" เป็น \"{new_name}\"")
+            print(f"!! เครื่องอัดยังดักฟัง \"{speaker_device['name']}\" อยู่")
+            print("!! เสียงคู่สนทนาที่ออกอุปกรณ์ใหม่จะไม่ถูกอัด")
+            print("!! ให้สลับกลับเป็นอุปกรณ์เดิม หรือหยุดแล้วเริ่มอัดใหม่")
+            print("*" * 70)
+
+        # Daemon: an audio device probe must never be the reason Ctrl+C hangs.
+        device_watch_thread = threading.Thread(
+            target=watch_output_device,
+            args=(
+                default_output_name,
+                default_output_name(),
+                stop_event,
+                warn_output_changed,
+            ),
+            daemon=True,
+        )
+        device_watch_thread.start()
 
         try:
             recorder_thread = threading.Thread(
@@ -300,6 +366,8 @@ def main() -> None:
             recorder_thread.start()
             thread_started = True
 
+            print(f"อัดจากไมค์: {mic_device['name']}")
+            print(f"อัดเสียงคู่สนทนาจาก: {speaker_device['name']}")
             print("กำลังอัดเสียง... กด Ctrl+C เพื่อหยุด")
             while recorder_thread.is_alive():
                 recorder_thread.join(timeout=0.2)
