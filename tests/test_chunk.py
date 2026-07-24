@@ -1,4 +1,9 @@
+import math
+
+import pytest
+
 from src.chunk import (
+    CHARS_PER_TOKEN,
     estimate_tokens,
     parse_timestamp,
     parse_transcript_segments,
@@ -118,9 +123,30 @@ def test_split_into_chunks_overlap_never_stalls_progress():
     segments = [_segment(i * 10, "x" * 100) for i in range(8)]
     per_segment = estimate_tokens(segments[0]["raw"])
 
-    # overlap budget larger than a whole chunk must still terminate and cover all
+    # overlap budget just under max_tokens (as large as the guard in
+    # split_into_chunks allows) must still terminate and cover all segments
     chunks = split_into_chunks(
-        segments, max_tokens=per_segment * 2, overlap_tokens=per_segment * 99
+        segments, max_tokens=per_segment * 2, overlap_tokens=per_segment * 2 - 1
     )
 
     assert chunks[-1]["end_seconds"] == 70
+
+
+def test_split_into_chunks_raises_when_overlap_reaches_max_tokens():
+    segments = [_segment(i * 10, "x" * 100) for i in range(3)]
+    per_segment = estimate_tokens(segments[0]["raw"])
+
+    with pytest.raises(ValueError):
+        split_into_chunks(segments, max_tokens=per_segment * 2, overlap_tokens=per_segment * 2)
+
+
+def test_split_into_chunks_exceeds_budget_only_by_joiner_overhead():
+    segments = [_segment(i * 10, "x" * 100) for i in range(200)]
+    max_tokens = 2000
+
+    chunks = split_into_chunks(segments, max_tokens=max_tokens, overlap_tokens=0)
+
+    for chunk in chunks:
+        segment_count = chunk["text"].count("\n\n") + 1
+        joiner_allowance = math.ceil(2 * (segment_count - 1) / CHARS_PER_TOKEN)
+        assert estimate_tokens(chunk["text"]) <= max_tokens + joiner_allowance

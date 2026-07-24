@@ -2,7 +2,12 @@ from unittest.mock import MagicMock, patch
 
 import src.summarize as summarize_module
 from src.chunk import parse_transcript_segments, split_into_chunks
-from src.summarize import CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS, summarize_transcript
+from src.summarize import (
+    CHUNK_MAX_TOKENS,
+    CHUNK_OVERLAP_TOKENS,
+    SUMMARY_SYSTEM_PROMPT,
+    summarize_transcript,
+)
 
 
 def _response(text: str):
@@ -148,3 +153,52 @@ def test_a_failing_chunk_is_retried_individually():
     # every chunk + one reduce + exactly one extra attempt for the retried chunk;
     # a restart-everything retry would cost far more calls than this
     assert calls["n"] == expected_chunks + 1 + 1
+
+
+def test_long_transcript_demotes_heading_levels_in_chunk_summaries():
+    transcript = _long_transcript(100)
+    chunk_summary_with_headings = (
+        "## หัวข้อระดับสอง\n- อยากจะเก็บ bullet\n"
+        "### หัวข้อระดับสาม\n- bullet อีกอัน\n"
+        "##### หัวข้อระดับห้า\n- bullet สุดท้าย"
+    )
+    reduce_input_holder = {}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            reduce_input_holder["content"] = kwargs["messages"][0]["content"]
+            return _response("สรุปรวมทั้งประชุม")
+        return _response(chunk_summary_with_headings)
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    # ## and ### are demoted to the floor (####); ##### is left alone
+    assert "#### หัวข้อระดับสอง" in result
+    assert "#### หัวข้อระดับสาม" in result
+    assert "##### หัวข้อระดับห้า" in result
+    assert "\n## หัวข้อระดับสอง" not in result
+    assert "\n### หัวข้อระดับสาม" not in result
+
+    # the reduce ("combined") input sees the same demoted text, not the raw headings
+    combined = reduce_input_holder["content"]
+    assert "#### หัวข้อระดับสอง" in combined
+    assert "\n## หัวข้อระดับสอง" not in combined
+
+
+def test_over_threshold_transcript_with_no_parseable_segments_falls_back_to_single_call():
+    # Exceeds SINGLE_CALL_THRESHOLD_TOKENS but has no "**speaker** [MM:SS]:" blocks,
+    # so parse_transcript_segments returns [] and chunks is [].
+    transcript = "# Transcript\n\n" + ("ไม่มีรูปแบบ segment ที่แยกได้ " * 3000)
+    client = _single_response_client("สรุปแบบเดียว")
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    assert result == "สรุปแบบเดียว"
+    assert client.messages.create.call_count == 1
+    kwargs = client.messages.create.call_args.kwargs
+    assert kwargs["system"] == SUMMARY_SYSTEM_PROMPT

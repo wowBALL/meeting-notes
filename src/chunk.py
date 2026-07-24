@@ -70,6 +70,13 @@ def split_into_chunks(
     if not segments:
         return []
 
+    if overlap_tokens >= max_tokens:
+        raise ValueError(
+            f"overlap_tokens ({overlap_tokens}) must be smaller than max_tokens "
+            f"({max_tokens}); otherwise each chunk retains nearly all of the "
+            "previous one, causing an API-call explosion with no error."
+        )
+
     chunks: list[dict] = []
     current: list[dict] = []
     current_tokens = 0

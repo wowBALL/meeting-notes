@@ -1,3 +1,5 @@
+import re
+
 from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
 from src.render import format_timestamp
 from src.retry import retry_with_backoff
@@ -7,6 +9,16 @@ CHUNK_MAX_TOKENS = 15_000
 CHUNK_OVERLAP_TOKENS = 1_500
 MAP_MAX_OUTPUT_TOKENS = 4096
 REDUCE_MAX_OUTPUT_TOKENS = 8192
+
+# ^ requires whitespace so "#1 ..." in prose is not mangled
+_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
+
+
+def _demote_headings(markdown: str, floor: int = 4) -> str:
+    """A chunk summary is nested under a ### timeline entry; any ##-level heading
+    the model returns would outrank it and break the document outline."""
+    return _HEADING_RE.sub(lambda m: "#" * max(floor, len(m.group(1))) + " ", markdown)
+
 
 SUMMARY_SYSTEM_PROMPT = """คุณเป็นผู้ช่วยสรุปการประชุม อ่าน transcript ที่ให้มาแล้วสรุปเป็นภาษาไทยในรูปแบบ Markdown ประกอบด้วย:
 
@@ -22,7 +34,7 @@ CHUNK_SYSTEM_PROMPT = """คุณเป็นผู้ช่วยสรุป�
 
 สรุปเฉพาะเนื้อหาในช่วงนี้เป็นภาษาไทยแบบ Markdown เป็น bullet point เก็บรายละเอียดให้ครบ ทั้งประเด็นที่คุยกัน ข้อสรุป และสิ่งที่ต้องทำพร้อมผู้รับผิดชอบถ้าระบุได้
 
-ห้ามเดาเนื้อหาช่วงอื่นที่ไม่ได้ให้มา และไม่ต้องเขียนคำนำหรือคำลงท้าย"""
+ห้ามเดาเนื้อหาช่วงอื่นที่ไม่ได้ให้มา และไม่ต้องเขียนคำนำหรือคำลงท้าย ใช้ bullet point เท่านั้น ห้ามใส่ markdown heading (เช่น ## หรือ ###)"""
 
 REDUCE_SYSTEM_PROMPT = """ข้อความที่ให้มาคือสรุปย่อยของการประชุมเดียวกัน เรียงตามช่วงเวลา
 
@@ -61,6 +73,8 @@ def summarize_transcript(
     client = Anthropic(api_key=api_key) if api_key else Anthropic()
 
     if estimate_tokens(transcript_markdown) <= SINGLE_CALL_THRESHOLD_TOKENS:
+        # Reused deliberately: this short path is not a map call, but it shares
+        # the map call's output budget so tuning one doesn't silently change the other.
         return _summarize(
             client,
             model,
@@ -72,19 +86,26 @@ def summarize_transcript(
     segments = parse_transcript_segments(transcript_markdown)
     chunks = split_into_chunks(segments, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS)
 
+    if not chunks:
+        return _summarize(
+            client, model, SUMMARY_SYSTEM_PROMPT, transcript_markdown, MAP_MAX_OUTPUT_TOKENS
+        )
+
     # Retry each chunk on its own: one transient failure late in a long meeting
     # must not force every earlier chunk to be summarized again.
     chunk_summaries = [
-        retry_with_backoff(
-            lambda chunk=chunk: _summarize(
-                client, model, CHUNK_SYSTEM_PROMPT, chunk["text"], MAP_MAX_OUTPUT_TOKENS
+        _demote_headings(
+            retry_with_backoff(
+                lambda chunk=chunk: _summarize(
+                    client, model, CHUNK_SYSTEM_PROMPT, chunk["text"], MAP_MAX_OUTPUT_TOKENS
+                )
             )
         )
         for chunk in chunks
     ]
 
     combined = "\n\n".join(
-        f"## ช่วง [{_time_range(chunk)}]\n{summary}"
+        f"## ช่วง [{_time_range(chunk)}]\n\n{summary}"
         for chunk, summary in zip(chunks, chunk_summaries)
     )
     overall = retry_with_backoff(
