@@ -30,6 +30,20 @@ if errorlevel 1 (
     echo Watcher is already running.
 )
 
+rem --- Preflight: a real meeting cannot be re-recorded, so verify the audio
+rem --- paths BEFORE it starts, not from the transcript afterwards.
+echo.
+.\.venv\Scripts\python.exe -m src.preflight
+if errorlevel 1 (
+    echo.
+    choice /c YN /m "ผลตรวจไม่ผ่าน ต้องการอัดต่อไปหรือไม่"
+    if errorlevel 2 (
+        echo ยกเลิกการอัด
+        endlocal
+        exit /b 1
+    )
+)
+
 echo.
 set /p MEETING_NAME=Meeting name (optional, press Enter to skip):
 
