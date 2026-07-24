@@ -1,5 +1,6 @@
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
 from src.render import format_timestamp
@@ -12,6 +13,14 @@ CHUNK_MAX_TOKENS = 15_000
 CHUNK_OVERLAP_TOKENS = 1_500
 MAP_MAX_OUTPUT_TOKENS = 4096
 REDUCE_MAX_OUTPUT_TOKENS = 8192
+# Chunks are independent, so the map stage is bound by its slowest call rather
+# than by their sum. 4 keeps a 13-chunk (5-hour) meeting well inside the API's
+# rate limits while cutting the map stage to roughly a quarter of its wall clock.
+MAP_MAX_CONCURRENCY = 4
+
+# Substituted for a chunk whose summary failed every retry, so the surrounding
+# chunks' summaries still reach the reader and the gap is visible in the timeline.
+CHUNK_FAILURE_PLACEHOLDER = "> ⚠️ สรุปช่วงนี้ล้มเหลว (เรียก Claude ไม่สำเร็จหลังลองใหม่ครบทุกครั้ง)"
 
 # ^ requires whitespace so "#1 ..." in prose is not mangled
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
@@ -82,6 +91,31 @@ def _time_range(chunk: dict) -> str:
     return f"{format_timestamp(chunk['start_seconds'])}–{format_timestamp(chunk['end_seconds'])}"
 
 
+def _summarize_chunk(
+    client, model: str, chunk: dict, index: int, total: int
+) -> str | Exception:
+    """The chunk's summary, or the exception that ended it after every retry.
+    Returning the failure instead of raising keeps one dead chunk from throwing
+    away the summaries of every other chunk in the meeting."""
+    try:
+        return _demote_headings(
+            retry_with_backoff(
+                lambda: _summarize(
+                    client, model, CHUNK_SYSTEM_PROMPT, chunk["text"], MAP_MAX_OUTPUT_TOKENS
+                )
+            )
+        )
+    except Exception as e:
+        logger.error(
+            "Chunk %d/%d [%s] failed after every retry, using a placeholder: %s",
+            index + 1,
+            total,
+            _time_range(chunk),
+            e,
+        )
+        return e
+
+
 def summarize_transcript(
     transcript_markdown: str,
     model: str = "claude-opus-4-8",
@@ -91,41 +125,57 @@ def summarize_transcript(
 
     client = Anthropic(api_key=api_key) if api_key else Anthropic()
 
-    if estimate_tokens(transcript_markdown) <= SINGLE_CALL_THRESHOLD_TOKENS:
+    # Every API call below is retried here, inside summarize_transcript. Callers
+    # must not add a retry of their own: with per-chunk retries in place, an outer
+    # retry re-runs the entire map-reduce because of a single dead chunk.
+    def single_call() -> str:
         # Reused deliberately: this short path is not a map call, but it shares
         # the map call's output budget so tuning one doesn't silently change the other.
-        return _summarize(
-            client,
-            model,
-            SUMMARY_SYSTEM_PROMPT,
-            transcript_markdown,
-            MAP_MAX_OUTPUT_TOKENS,
+        return retry_with_backoff(
+            lambda: _summarize(
+                client,
+                model,
+                SUMMARY_SYSTEM_PROMPT,
+                transcript_markdown,
+                MAP_MAX_OUTPUT_TOKENS,
+            )
         )
+
+    if estimate_tokens(transcript_markdown) <= SINGLE_CALL_THRESHOLD_TOKENS:
+        return single_call()
 
     segments = parse_transcript_segments(transcript_markdown)
     chunks = split_into_chunks(segments, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS)
 
     if not chunks:
-        return _summarize(
-            client, model, SUMMARY_SYSTEM_PROMPT, transcript_markdown, MAP_MAX_OUTPUT_TOKENS
-        )
+        return single_call()
 
-    # Retry each chunk on its own: one transient failure late in a long meeting
-    # must not force every earlier chunk to be summarized again.
-    chunk_summaries = [
-        _demote_headings(
-            retry_with_backoff(
-                lambda chunk=chunk: _summarize(
-                    client, model, CHUNK_SYSTEM_PROMPT, chunk["text"], MAP_MAX_OUTPUT_TOKENS
-                )
+    # Chunks are independent, so summarize them concurrently. executor.map yields
+    # results in submission order, so the timeline stays in transcript order no
+    # matter which chunk finishes first.
+    with ThreadPoolExecutor(max_workers=min(MAP_MAX_CONCURRENCY, len(chunks))) as pool:
+        chunk_summaries = list(
+            pool.map(
+                lambda item: _summarize_chunk(client, model, item[1], item[0], len(chunks)),
+                enumerate(chunks),
             )
         )
-        for chunk in chunks
-    ]
 
-    combined = "\n\n".join(
-        f"## ช่วง [{_time_range(chunk)}]\n\n{summary}"
+    succeeded = [
+        (chunk, summary)
         for chunk, summary in zip(chunks, chunk_summaries)
+        if not isinstance(summary, Exception)
+    ]
+    if not succeeded:
+        first_error = chunk_summaries[0]
+        raise RuntimeError(
+            f"Every one of the {len(chunks)} chunk summaries failed: {first_error}"
+        ) from first_error
+
+    # The reduce stage sees real summaries only -- a placeholder here would invite
+    # the model to write about the outage instead of about the meeting.
+    combined = "\n\n".join(
+        f"## ช่วง [{_time_range(chunk)}]\n\n{summary}" for chunk, summary in succeeded
     )
     overall = retry_with_backoff(
         lambda: _summarize(
@@ -134,7 +184,8 @@ def summarize_transcript(
     )
 
     timeline = "\n\n".join(
-        f"### [{_time_range(chunk)}]\n\n{summary}"
+        f"### [{_time_range(chunk)}]\n\n"
+        f"{CHUNK_FAILURE_PLACEHOLDER if isinstance(summary, Exception) else summary}"
         for chunk, summary in zip(chunks, chunk_summaries)
     )
     return f"{overall}\n\n---\n\n## ไทม์ไลน์ตามช่วง\n\n{timeline}"

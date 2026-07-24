@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,12 +40,14 @@ def _prompt_aware_client():
     fixed marker, keyed off the system prompt. Keeps assertions independent of how
     many chunks the splitter happens to produce."""
     state = {"map_calls": 0}
+    lock = threading.Lock()
 
     def create(**kwargs):
         if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
             return _response("สรุปรวมทั้งประชุม")
-        index = state["map_calls"]
-        state["map_calls"] += 1
+        with lock:
+            index = state["map_calls"]
+            state["map_calls"] += 1
         return _response(f"สรุปช่วง {index}")
 
     client = MagicMock()
@@ -58,9 +62,17 @@ def _long_transcript(segment_count: int) -> str:
     return "# Transcript\n\n" + "\n\n".join(blocks)
 
 
-def _expected_chunk_count(transcript: str) -> int:
+def _chunk_texts(transcript: str) -> list[str]:
+    """The exact strings the map stage will send, so a test can key its fake
+    client off *which* chunk it is answering rather than off call ordering --
+    which the concurrent map stage no longer fixes."""
     segments = parse_transcript_segments(transcript)
-    return len(split_into_chunks(segments, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS))
+    chunks = split_into_chunks(segments, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS)
+    return [chunk["text"] for chunk in chunks]
+
+
+def _expected_chunk_count(transcript: str) -> int:
+    return len(_chunk_texts(transcript))
 
 
 def test_short_transcript_returns_the_single_response_verbatim():
@@ -166,11 +178,18 @@ def test_long_transcript_reduce_call_uses_reduce_prompt_and_larger_cap():
 def test_a_failing_chunk_is_retried_individually():
     transcript = _long_transcript(100)
     expected_chunks = _expected_chunk_count(transcript)
-    calls = {"n": 0}
+    first_chunk = _chunk_texts(transcript)[0]
+    lock = threading.Lock()
+    calls = {"total": 0, "first_chunk": 0}
 
     def flaky(**kwargs):
-        calls["n"] += 1
-        if calls["n"] == 2:
+        with lock:
+            calls["total"] += 1
+            first_attempt_at_first_chunk = False
+            if kwargs["messages"][0]["content"] == first_chunk:
+                calls["first_chunk"] += 1
+                first_attempt_at_first_chunk = calls["first_chunk"] == 1
+        if first_attempt_at_first_chunk:
             raise RuntimeError("transient api error")
         return _response("ok")
 
@@ -181,9 +200,126 @@ def test_a_failing_chunk_is_retried_individually():
         result = summarize_transcript(transcript, api_key="test-key")
 
     assert "ok" in result
+    assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
     # every chunk + one reduce + exactly one extra attempt for the retried chunk;
     # a restart-everything retry would cost far more calls than this
-    assert calls["n"] == expected_chunks + 1 + 1
+    assert calls["total"] == expected_chunks + 1 + 1
+
+
+def test_short_path_is_retried_inside_summarize():
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient api error")
+        return _response("สรุปสั้น")
+
+    client = MagicMock()
+    client.messages.create.side_effect = flaky
+
+    with _patch_anthropic(client), patch("time.sleep"):
+        result = summarize_transcript("สั้น", api_key="test-key")
+
+    # the pipeline no longer wraps this call, so the retry has to live here
+    assert result == "สรุปสั้น"
+    assert calls["n"] == 2
+
+
+def test_a_permanently_failing_chunk_becomes_a_placeholder():
+    transcript = _long_transcript(100)
+    dead_chunk = _chunk_texts(transcript)[0]
+    reduce_input_holder = {}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            reduce_input_holder["content"] = kwargs["messages"][0]["content"]
+            return _response("สรุปรวมทั้งประชุม")
+        if kwargs["messages"][0]["content"] == dead_chunk:
+            raise RuntimeError("permanent api error")
+        return _response("สรุปช่วงที่สำเร็จ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client), patch("time.sleep"):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    # the healthy chunks still reach the user instead of the whole meeting failing
+    assert result.startswith("สรุปรวมทั้งประชุม")
+    assert summarize_module.CHUNK_FAILURE_PLACEHOLDER in result
+    assert "สรุปช่วงที่สำเร็จ" in result
+    # the reduce stage is fed real summaries only -- a placeholder there would
+    # invite the model to describe the outage instead of the meeting
+    assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in reduce_input_holder["content"]
+
+
+def test_every_chunk_failing_still_raises():
+    transcript = _long_transcript(100)
+
+    client = MagicMock()
+    client.messages.create.side_effect = RuntimeError("permanent api error")
+
+    with (
+        _patch_anthropic(client),
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="permanent api error"),
+    ):
+        summarize_transcript(transcript, api_key="test-key")
+
+
+def test_map_calls_run_concurrently():
+    transcript = _long_transcript(100)
+    assert _expected_chunk_count(transcript) >= 2
+    assert summarize_module.MAP_MAX_CONCURRENCY >= 2
+
+    lock = threading.Lock()
+    state = {"in_flight": 0, "peak": 0}
+
+    def create(**kwargs):
+        if kwargs["system"] != summarize_module.CHUNK_SYSTEM_PROMPT:
+            return _response("สรุปรวมทั้งประชุม")
+        with lock:
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+        # held long enough that a sequential map stage could never overlap two
+        time.sleep(0.05)
+        with lock:
+            state["in_flight"] -= 1
+        return _response("ok")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    assert state["peak"] >= 2
+    assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
+
+
+def test_chunk_summaries_keep_transcript_order_under_concurrency():
+    transcript = _long_transcript(100)
+    chunk_texts = _chunk_texts(transcript)
+    index_of = {text: i for i, text in enumerate(chunk_texts)}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            return _response("สรุปรวมทั้งประชุม")
+        index = index_of[kwargs["messages"][0]["content"]]
+        # earlier chunks answer last, so completion order is the reverse of
+        # transcript order
+        time.sleep(0.02 * (len(chunk_texts) - index))
+        return _response(f"สรุปช่วง {index}")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    positions = [result.index(f"สรุปช่วง {i}") for i in range(len(chunk_texts))]
+    assert positions == sorted(positions)
 
 
 def test_long_transcript_demotes_heading_levels_in_chunk_summaries():
