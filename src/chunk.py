@@ -1,5 +1,8 @@
+import logging
 import math
 import re
+
+logger = logging.getLogger(__name__)
 
 # Measured on this project's real Thai transcripts: 6,728 characters produced
 # 5,902 tokens (~1.14 chars/token). 1.1 is deliberately conservative so the
@@ -9,8 +12,10 @@ CHARS_PER_TOKEN = 1.1
 
 # Matches a block produced by render_transcript_markdown:
 #   **ผู้พูด 1** [00:00]: text
-# Blocks that don't match (the "# Transcript" heading, the diarization-failed
-# note) are skipped, which is how they stay out of every chunk.
+# Blocks that don't match and come *before* the first segment (the "# Transcript"
+# heading, the diarization-failed note) are skipped, which is how they stay out
+# of every chunk. Anything after the first segment is meeting content and is
+# re-attached to the segment it belongs to -- see parse_transcript_segments.
 SEGMENT_PATTERN = re.compile(r"\*\*(?P<speaker>[^*]+)\*\*\s*\[(?P<timestamp>\d+:\d{2})\]:")
 
 
@@ -24,16 +29,28 @@ def parse_timestamp(timestamp: str) -> int:
 
 
 def parse_transcript_segments(markdown: str) -> list[dict]:
-    segments = []
+    segments: list[dict] = []
+    skipped_before_first_segment = 0
     for block in markdown.split("\n\n"):
         block = block.strip()
         if not block:
             continue
         match = SEGMENT_PATTERN.match(block)
-        if not match:
-            continue
-        segments.append(
-            {"raw": block, "start_seconds": parse_timestamp(match.group("timestamp"))}
+        if match:
+            segments.append(
+                {"raw": block, "start_seconds": parse_timestamp(match.group("timestamp"))}
+            )
+        elif segments:
+            # An utterance containing a blank line arrives here as two blocks.
+            # Appending to the segment it belongs to -- rather than dropping it --
+            # makes losing meeting content structurally impossible.
+            segments[-1]["raw"] += "\n\n" + block
+        else:
+            skipped_before_first_segment += 1
+    if skipped_before_first_segment:
+        logger.debug(
+            "Skipped %d transcript block(s) before the first segment",
+            skipped_before_first_segment,
         )
     return segments
 

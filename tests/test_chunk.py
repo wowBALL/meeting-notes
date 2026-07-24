@@ -59,6 +59,34 @@ def test_parse_transcript_segments_skips_heading_and_diarization_note():
     assert segments[0]["start_seconds"] == 10
 
 
+def test_parse_transcript_segments_keeps_a_blank_line_inside_a_segment():
+    markdown = (
+        "# Transcript\n\n"
+        "**ผู้พูด 1** [00:00]: บรรทัดแรก\n\nบรรทัดที่สองของคนเดิม\n\n"
+        "**ผู้พูด 2** [00:20]: ต่อไป"
+    )
+
+    segments = parse_transcript_segments(markdown)
+
+    assert len(segments) == 2
+    assert "บรรทัดที่สองของคนเดิม" in segments[0]["raw"]
+    assert segments[0]["start_seconds"] == 0
+    assert segments[1]["start_seconds"] == 20
+
+
+def test_parse_transcript_segments_loses_nothing_after_the_first_segment():
+    markdown = (
+        "# Transcript\n\n"
+        "**ผู้พูด 1** [00:00]: หนึ่ง\n\nสอง\n\nสาม\n\n"
+        "**ผู้พูด 2** [00:20]: สี่"
+    )
+
+    joined = "\n\n".join(s["raw"] for s in parse_transcript_segments(markdown))
+
+    for word in ("หนึ่ง", "สอง", "สาม", "สี่"):
+        assert word in joined
+
+
 def test_split_into_chunks_returns_empty_for_no_segments():
     assert split_into_chunks([], max_tokens=100, overlap_tokens=10) == []
 
