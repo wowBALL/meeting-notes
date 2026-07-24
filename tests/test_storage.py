@@ -1,6 +1,12 @@
 from datetime import date
 
-from src.storage import create_meeting_folder, move_to_failed, save_outputs
+from src.storage import (
+    archive_audio,
+    create_meeting_folder,
+    move_to_failed,
+    save_summary,
+    save_transcript,
+)
 
 
 def test_create_meeting_folder_uses_date_and_filename_slug(tmp_path):
@@ -13,7 +19,27 @@ def test_create_meeting_folder_uses_date_and_filename_slug(tmp_path):
     assert result.is_dir()
 
 
-def test_save_outputs_writes_markdown_and_moves_audio(tmp_path):
+def test_save_transcript_writes_the_transcript_file(tmp_path):
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_transcript(meeting_dir, "# Transcript")
+
+    assert path == meeting_dir / "transcript.md"
+    assert path.read_text(encoding="utf-8") == "# Transcript"
+
+
+def test_save_summary_writes_the_summary_file(tmp_path):
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, "# Summary")
+
+    assert path == meeting_dir / "summary.md"
+    assert path.read_text(encoding="utf-8") == "# Summary"
+
+
+def test_archive_audio_moves_the_recording_into_the_meeting_folder(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
     inbox_dir = tmp_path / "inbox"
@@ -21,11 +47,10 @@ def test_save_outputs_writes_markdown_and_moves_audio(tmp_path):
     audio_path = inbox_dir / "weekly-standup.mp3"
     audio_path.write_bytes(b"fake audio")
 
-    save_outputs(meeting_dir, audio_path, "# Transcript", "# Summary")
+    destination = archive_audio(meeting_dir, audio_path)
 
-    assert (meeting_dir / "transcript.md").read_text(encoding="utf-8") == "# Transcript"
-    assert (meeting_dir / "summary.md").read_text(encoding="utf-8") == "# Summary"
-    assert (meeting_dir / "weekly-standup.mp3").exists()
+    assert destination == meeting_dir / "weekly-standup.mp3"
+    assert destination.exists()
     assert not audio_path.exists()
 
 

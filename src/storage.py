@@ -14,12 +14,25 @@ def create_meeting_folder(
     return meeting_dir
 
 
-def save_outputs(
-    meeting_dir: Path, audio_path: Path, transcript_markdown: str, summary_markdown: str
-) -> None:
-    (meeting_dir / "transcript.md").write_text(transcript_markdown, encoding="utf-8")
-    (meeting_dir / "summary.md").write_text(summary_markdown, encoding="utf-8")
-    shutil.move(str(audio_path), str(meeting_dir / audio_path.name))
+# Saved separately because the pipeline writes them at different moments: the
+# transcript goes to disk before summarizing, so a summarization failure can
+# never discard a transcript that cost a full GPU pass over the recording.
+def save_transcript(meeting_dir: Path, transcript_markdown: str) -> Path:
+    path = meeting_dir / "transcript.md"
+    path.write_text(transcript_markdown, encoding="utf-8")
+    return path
+
+
+def save_summary(meeting_dir: Path, summary_markdown: str) -> Path:
+    path = meeting_dir / "summary.md"
+    path.write_text(summary_markdown, encoding="utf-8")
+    return path
+
+
+def archive_audio(meeting_dir: Path, audio_path: Path) -> Path:
+    destination = meeting_dir / audio_path.name
+    shutil.move(str(audio_path), str(destination))
+    return destination
 
 
 def move_to_failed(audio_path: Path, failed_dir: Path, error_message: str) -> Path:

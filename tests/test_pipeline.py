@@ -146,6 +146,71 @@ def test_process_file_moves_to_failed_when_summarization_fails(tmp_path):
     assert "Summarization failed" in error_log.read_text(encoding="utf-8")
 
 
+def test_process_file_keeps_the_transcript_when_summarization_fails(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "broken.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        ),
+        patch(
+            "src.pipeline.summarize_transcript",
+            side_effect=RuntimeError("claude api error"),
+        ),
+        pytest.raises(RuntimeError, match="claude api error"),
+    ):
+        process_file(audio_path, config)
+
+    # the transcript costs a GPU pass over the whole recording; a failed summary
+    # must never be what throws it away
+    transcript_path = (
+        config.meetings_dir / f"{date.today().isoformat()}-broken" / "transcript.md"
+    )
+    assert "สวัสดีครับ" in transcript_path.read_text(encoding="utf-8")
+    assert (config.failed_dir / "broken.mp3").exists()
+    error_log = (config.failed_dir / "broken.error.log").read_text(encoding="utf-8")
+    assert "Summarization failed" in error_log
+    assert str(transcript_path) in error_log
+
+
+def test_process_file_does_not_retry_summarization_itself(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "broken.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    mock_summarize = MagicMock(side_effect=RuntimeError("claude api error"))
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        ),
+        patch("src.pipeline.summarize_transcript", mock_summarize),
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="claude api error"),
+    ):
+        process_file(audio_path, config)
+
+    # summarize_transcript retries every API call internally; retrying it again
+    # here would re-run an entire map-reduce for one permanently dead chunk
+    assert mock_summarize.call_count == 1
+
+
 def test_process_file_moves_to_failed_when_rendering_fails(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
@@ -193,7 +258,7 @@ def test_process_file_moves_to_failed_when_save_fails(tmp_path):
             return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
-        patch("src.pipeline.save_outputs", side_effect=OSError("disk full")),
+        patch("src.pipeline.save_summary", side_effect=OSError("disk full")),
         pytest.raises(OSError, match="disk full"),
     ):
         process_file(audio_path, config)
