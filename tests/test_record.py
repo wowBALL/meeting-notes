@@ -91,6 +91,38 @@ def test_recover_orphan_sessions_keeps_going_when_one_fails(tmp_path):
     assert recovered == [tmp_path / "b"]
 
 
+def test_finish_or_discard_returns_the_destination_on_success(tmp_path):
+    with patch("src.record.finish_session", return_value=tmp_path / "meet1.ogg"):
+        assert record.finish_or_discard(tmp_path / ".session-meet1", tmp_path) == (
+            tmp_path / "meet1.ogg"
+        )
+
+
+def test_finish_or_discard_removes_a_session_that_recorded_no_audio(tmp_path):
+    # Ctrl+C before the first block leaves a header-only part. Keeping that
+    # directory means every later startup tries to recover it and fails forever.
+    session_dir = tmp_path / ".session-silent"
+    session_dir.mkdir()
+
+    with patch("src.record.finish_session", side_effect=record.NoAudioRecorded("no audio")):
+        assert record.finish_or_discard(session_dir, tmp_path) is None
+
+    assert not session_dir.exists()
+
+
+def test_finish_or_discard_propagates_a_real_encode_failure(tmp_path):
+    # An ffmpeg failure is different: the parts are real and must be kept for the
+    # next recovery pass, so the error has to reach the caller.
+    session_dir = tmp_path / ".session-meet1"
+    session_dir.mkdir()
+
+    with patch("src.record.finish_session", side_effect=RuntimeError("ffmpeg boom")):
+        with pytest.raises(RuntimeError, match="ffmpeg boom"):
+            record.finish_or_discard(session_dir, tmp_path)
+
+    assert session_dir.exists()
+
+
 class _FakePyAudio:
     def __init__(self, host_api, devices, loopback_devices):
         self._host_api = host_api

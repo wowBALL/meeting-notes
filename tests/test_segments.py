@@ -154,6 +154,39 @@ def test_find_orphan_sessions_returns_empty_when_inbox_missing(tmp_path):
     assert find_orphan_sessions(tmp_path / "nope") == []
 
 
+def test_find_orphan_sessions_skips_a_session_whose_parts_are_all_header_only(tmp_path):
+    # Stopping the recorder before a single block is written leaves part0001.wav
+    # holding nothing but a header. finish_session refuses such a session, so
+    # reporting it as recoverable makes every later startup print a failure for a
+    # directory that can never be finished.
+    session_dir = _make_session(tmp_path, "silent", part_count=0)
+    (session_dir / part_filename(1)).write_bytes(b"x" * (WAV_HEADER_ALLOWANCE - 20))
+
+    assert find_orphan_sessions(tmp_path) == []
+
+
+def test_finish_session_leaves_nothing_recoverable_when_cleanup_fails(tmp_path):
+    # rmtree can fail on Windows (lingering handle, AV scanner) after the encode
+    # and move already succeeded. Whatever survives must not look like a session
+    # worth recovering, or the next run re-encodes it into a duplicate meeting.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=2)
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with (
+        patch("src.segments.subprocess.run", side_effect=fake_run),
+        patch("src.segments.shutil.rmtree", side_effect=OSError("file in use")),
+    ):
+        destination = finish_session(session_dir, inbox)
+
+    assert destination.read_bytes() == b"fake opus"
+    assert find_orphan_sessions(inbox) == []
+
+
 def test_finish_session_encodes_moves_and_cleans_up(tmp_path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()

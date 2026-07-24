@@ -17,6 +17,12 @@ OPUS_BITRATE = "48k"
 WAV_HEADER_ALLOWANCE = 100
 
 
+class NoAudioRecorded(RuntimeError):
+    """A session whose parts hold no samples at all -- there is nothing to encode.
+    Distinct from an encode failure: the parts are worthless rather than at risk,
+    so the caller may discard the session instead of keeping it for recovery."""
+
+
 def session_dir_for(inbox_dir: Path, stem: str) -> Path:
     return inbox_dir / f"{SESSION_PREFIX}{stem}"
 
@@ -84,6 +90,24 @@ def ffmpeg_concat_command(
     ]
 
 
+def audio_parts(session_dir: Path) -> list[str]:
+    """Part files that actually hold samples, in recording order.
+
+    The manifest lists only parts that have already CLOSED -- it is updated on
+    rotation, never mid-part. A crash is by definition mid-part, so the part being
+    written when the process died is absent from the manifest even though its audio
+    is sitting right there on disk. The directory listing is therefore authoritative
+    and the manifest merely advisory; a header-only file (still showing the RIFF/data
+    size ffmpeg writes only on clean close) holds nothing and is excluded. 4-digit
+    zero-padded names sort lexicographically in the same order they were recorded.
+    """
+    return sorted(
+        path.name
+        for path in session_dir.glob("part*.wav")
+        if path.stat().st_size > WAV_HEADER_ALLOWANCE
+    )
+
+
 def find_orphan_sessions(inbox_dir: Path) -> list[Path]:
     # A session directory that still exists means the previous run never finished:
     # a successful finish_session() removes it.
@@ -95,7 +119,10 @@ def find_orphan_sessions(inbox_dir: Path) -> list[Path]:
             continue
         if not (entry / MANIFEST_NAME).exists():
             continue
-        if not any(entry.glob("part*.wav")):
+        # Same size floor finish_session applies: a session holding only header-only
+        # parts can never be finished, so reporting it as recoverable would make
+        # every future startup attempt it and print the same failure forever.
+        if not audio_parts(entry):
             continue
         orphans.append(entry)
     return orphans
@@ -106,21 +133,9 @@ def finish_session(
 ) -> Path:
     manifest = read_manifest(session_dir)
     stem = manifest["stem"]
-    # The manifest lists only parts that have already CLOSED -- it is updated on
-    # rotation, never mid-part. A crash is by definition mid-part, so the part
-    # being written when the process died is absent from the manifest even though
-    # its audio is sitting right there on disk. The directory listing is therefore
-    # authoritative and the manifest is merely advisory; a header-only file (still
-    # showing the RIFF/data size ffmpeg writes only on clean close) is excluded as
-    # not worth encoding. 4-digit zero-padded names sort lexicographically in the
-    # same order they were recorded.
-    parts = sorted(
-        path.name
-        for path in session_dir.glob("part*.wav")
-        if path.stat().st_size > WAV_HEADER_ALLOWANCE
-    )
+    parts = audio_parts(session_dir)
     if not parts:
-        raise RuntimeError(f"ไม่พบชิ้นส่วนเสียงใน {session_dir}")
+        raise NoAudioRecorded(f"ไม่พบชิ้นส่วนเสียงใน {session_dir}")
 
     write_manifest(
         session_dir,
@@ -146,15 +161,19 @@ def finish_session(
     destination = inbox_dir / f"{stem}.ogg"
     # Atomic within the volume: the watcher never sees a partially written file.
     os.replace(encoded_path, destination)
+
+    # The encode+move already succeeded -- the user's audio is safe at
+    # `destination`, so nothing below may raise. A lingering handle or an AV
+    # scanner (common on Windows) can make cleanup fail after the fact; deleting
+    # the parts FIRST means whatever survives no longer looks like a recoverable
+    # session, so the next run cannot re-encode it into a duplicate meeting.
+    for name in parts:
+        try:
+            (session_dir / name).unlink()
+        except OSError:
+            pass
     try:
         shutil.rmtree(session_dir)
-    except Exception:
-        # The encode+move already succeeded -- the user's audio is safe at
-        # `destination`. A lingering handle or an AV scanner (common on Windows)
-        # can make rmtree fail after the fact; that must not be reported as an
-        # encode failure, and the caller must still get the destination back.
-        # Note: the surviving directory will be picked up and re-encoded by the
-        # next find_orphan_sessions pass (producing a duplicate .ogg) unless it
-        # is cleaned up manually -- but the recording itself is never lost.
+    except OSError:
         pass
     return destination

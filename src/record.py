@@ -1,4 +1,5 @@
 import queue
+import shutil
 import sys
 import threading
 from datetime import datetime
@@ -9,7 +10,14 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 
 from src.config import load_config
-from src.segments import find_orphan_sessions, finish_session, part_filename, session_dir_for, write_manifest
+from src.segments import (
+    NoAudioRecorded,
+    find_orphan_sessions,
+    finish_session,
+    part_filename,
+    session_dir_for,
+    write_manifest,
+)
 
 ROTATE_SECONDS = 1800
 
@@ -168,6 +176,20 @@ def get_common_samplerate(mic_device: dict, speaker_device: dict) -> int:
     return mic_rate
 
 
+def finish_or_discard(session_dir: Path, inbox_dir: Path) -> Path | None:
+    # A session that captured no audio at all (stopped before the first block was
+    # written) can never be encoded. Keeping it would make every later startup try
+    # to recover it and fail again, forever -- so discard it and report nothing.
+    # A genuine encode failure is the opposite case: those parts hold real audio,
+    # so the error propagates and the directory survives for the next attempt.
+    try:
+        return finish_session(session_dir, inbox_dir)
+    except NoAudioRecorded:
+        shutil.rmtree(session_dir, ignore_errors=True)
+        print("ไม่มีเสียงถูกบันทึกในรอบนี้ (หยุดเร็วเกินไปหรือไมค์ไม่ส่งเสียงมา) ไม่ได้สร้างไฟล์")
+        return None
+
+
 def recover_orphan_sessions(inbox_dir: Path) -> list[Path]:
     # A leftover session directory means a previous run died before encoding.
     # Finish what we can; one bad session must not stop the others or the new run.
@@ -293,12 +315,14 @@ def main() -> None:
 
         print("กำลังบีบอัดไฟล์เสียง...")
         try:
-            destination = finish_session(session_dir, config.inbox_dir)
+            destination = finish_or_discard(session_dir, config.inbox_dir)
         except Exception as e:
             print(
                 f"บีบอัดไม่สำเร็จ ชิ้นส่วนเสียงยังอยู่ที่ {session_dir} : "
                 f"{_ffmpeg_error_detail(e)}"
             )
+            return
+        if destination is None:
             return
         print(f"หยุดอัดแล้ว บันทึกไปที่ {destination}")
     finally:
