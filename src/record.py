@@ -2,7 +2,7 @@ import sys
 from datetime import datetime
 
 import numpy as np
-import soundcard as sc
+import pyaudiowpatch as pyaudio
 import soundfile as sf
 
 from src.config import load_config
@@ -31,13 +31,33 @@ def build_output_filename(name: str | None, now: datetime) -> str:
     return f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.wav"
 
 
-def get_default_mic():
-    return sc.default_microphone()
+def get_wasapi_mic_device(p) -> dict:
+    wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+    return p.get_device_info_by_index(wasapi_info["defaultInputDevice"])
 
 
-def get_default_speaker_loopback():
-    speaker = sc.default_speaker()
-    return sc.get_microphone(id=str(speaker.name), include_loopback=True)
+def get_wasapi_loopback_device(p) -> dict:
+    wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+    default_speaker = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+    if default_speaker["isLoopbackDevice"]:
+        return default_speaker
+    for loopback in p.get_loopback_device_info_generator():
+        if default_speaker["name"] in loopback["name"]:
+            return loopback
+    raise RuntimeError(
+        f"ไม่พบ loopback device ของลำโพง default ({default_speaker['name']})"
+    )
+
+
+def get_common_samplerate(mic_device: dict, speaker_device: dict) -> int:
+    mic_rate = int(mic_device["defaultSampleRate"])
+    speaker_rate = int(speaker_device["defaultSampleRate"])
+    if mic_rate != speaker_rate:
+        raise RuntimeError(
+            f"sample rate ของไมค์ ({mic_rate} Hz) กับลำโพง ({speaker_rate} Hz) ไม่ตรงกัน "
+            "กรุณาไปที่ mmsys.cpl > อุปกรณ์ > Advanced แล้วตั้งให้เท่ากัน"
+        )
+    return mic_rate
 
 
 def record_until_interrupted(

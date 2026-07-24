@@ -121,3 +121,115 @@ def test_record_until_interrupted_raises_when_a_device_fails():
 
     with pytest.raises(RuntimeError, match="permission denied"):
         record.record_until_interrupted(mic, speaker, samplerate=16000, blocksize=2)
+
+
+class _FakePyAudio:
+    def __init__(self, host_api, devices, loopback_devices):
+        self._host_api = host_api
+        self._devices = devices
+        self._loopback_devices = loopback_devices
+
+    def get_host_api_info_by_type(self, api_type):
+        return self._host_api
+
+    def get_device_info_by_index(self, index):
+        return self._devices[index]
+
+    def get_loopback_device_info_generator(self):
+        return iter(self._loopback_devices)
+
+
+def test_get_wasapi_mic_device_returns_default_input():
+    fake = _FakePyAudio(
+        host_api={"defaultInputDevice": 5, "defaultOutputDevice": 3},
+        devices={
+            5: {
+                "index": 5,
+                "name": "Microphone (Realtek)",
+                "maxInputChannels": 2,
+                "defaultSampleRate": 48000.0,
+            }
+        },
+        loopback_devices=[],
+    )
+
+    result = record.get_wasapi_mic_device(fake)
+
+    assert result["name"] == "Microphone (Realtek)"
+
+
+def test_get_wasapi_loopback_device_returns_output_device_when_already_loopback():
+    fake = _FakePyAudio(
+        host_api={"defaultInputDevice": 5, "defaultOutputDevice": 3},
+        devices={
+            3: {
+                "index": 3,
+                "name": "Speakers [Loopback]",
+                "isLoopbackDevice": True,
+                "maxInputChannels": 2,
+                "defaultSampleRate": 48000.0,
+            }
+        },
+        loopback_devices=[],
+    )
+
+    result = record.get_wasapi_loopback_device(fake)
+
+    assert result["name"] == "Speakers [Loopback]"
+
+
+def test_get_wasapi_loopback_device_searches_loopback_generator_by_name():
+    fake = _FakePyAudio(
+        host_api={"defaultInputDevice": 5, "defaultOutputDevice": 3},
+        devices={
+            3: {
+                "index": 3,
+                "name": "Speakers (Realtek)",
+                "isLoopbackDevice": False,
+                "maxInputChannels": 0,
+                "defaultSampleRate": 48000.0,
+            }
+        },
+        loopback_devices=[
+            {"index": 20, "name": "Other Device [Loopback]"},
+            {"index": 21, "name": "Speakers (Realtek) [Loopback]"},
+        ],
+    )
+
+    result = record.get_wasapi_loopback_device(fake)
+
+    assert result["index"] == 21
+
+
+def test_get_wasapi_loopback_device_raises_when_not_found():
+    fake = _FakePyAudio(
+        host_api={"defaultInputDevice": 5, "defaultOutputDevice": 3},
+        devices={
+            3: {
+                "index": 3,
+                "name": "Speakers (Realtek)",
+                "isLoopbackDevice": False,
+                "maxInputChannels": 0,
+                "defaultSampleRate": 48000.0,
+            }
+        },
+        loopback_devices=[{"index": 20, "name": "Other Device [Loopback]"}],
+    )
+
+    with pytest.raises(RuntimeError, match="loopback"):
+        record.get_wasapi_loopback_device(fake)
+
+
+def test_get_common_samplerate_returns_shared_rate():
+    result = record.get_common_samplerate(
+        {"defaultSampleRate": 48000.0}, {"defaultSampleRate": 48000.0}
+    )
+
+    assert result == 48000
+
+
+def test_get_common_samplerate_raises_when_rates_differ():
+    with pytest.raises(RuntimeError, match="sample rate"):
+        record.get_common_samplerate(
+            {"defaultSampleRate": 44100.0}, {"defaultSampleRate": 48000.0}
+        )
