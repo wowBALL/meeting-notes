@@ -3,7 +3,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import src.transcribe as transcribe_module
-from src.transcribe import load_whisper_model, transcribe_audio
+from src.transcribe import _register_cuda_dll_dirs, load_whisper_model, transcribe_audio
 
 
 def _segment(start, end, text):
@@ -120,3 +120,39 @@ def test_load_whisper_model_registers_cuda_dll_dirs(monkeypatch):
         load_whisper_model("small")
 
     mock_reg.assert_called_once()
+
+
+def test_register_cuda_dll_dirs_is_noop_on_non_windows():
+    with (
+        patch.object(transcribe_module.os, "name", "posix"),
+        patch.object(
+            transcribe_module.os, "add_dll_directory", MagicMock(), create=True
+        ) as mock_add_dll_directory,
+    ):
+        result = _register_cuda_dll_dirs()
+
+    assert result is None
+    mock_add_dll_directory.assert_not_called()
+
+
+def test_register_cuda_dll_dirs_registers_existing_bin_dirs_on_windows(tmp_path):
+    cublas_bin = tmp_path / "cublas" / "bin"
+    cudnn_bin = tmp_path / "cudnn" / "bin"
+    cublas_bin.mkdir(parents=True)
+    cudnn_bin.mkdir(parents=True)
+    # cuda_nvrtc/bin intentionally left absent to verify only existing dirs register.
+
+    fake_nvidia = ModuleType("nvidia")
+    fake_nvidia.__path__ = [str(tmp_path)]
+
+    with (
+        patch.dict(sys.modules, {"nvidia": fake_nvidia}),
+        patch.object(transcribe_module.os, "name", "nt"),
+        patch.object(
+            transcribe_module.os, "add_dll_directory", MagicMock(), create=True
+        ) as mock_add_dll_directory,
+    ):
+        _register_cuda_dll_dirs()
+
+    registered = {call.args[0] for call in mock_add_dll_directory.call_args_list}
+    assert registered == {str(cublas_bin), str(cudnn_bin)}

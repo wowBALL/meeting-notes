@@ -35,7 +35,7 @@ def _select_device_and_compute() -> tuple[str, str]:
 
         if torch.cuda.is_available():
             return "cuda", "int8_float16"
-    except ImportError:
+    except Exception:
         pass
     return "cpu", "int8"
 
