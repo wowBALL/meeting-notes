@@ -9,7 +9,13 @@ from src.diarize import diarize_audio
 from src.merge import merge_transcript_and_speakers
 from src.render import render_transcript_markdown
 from src.retry import retry_with_backoff
-from src.storage import create_meeting_folder, move_to_failed, save_outputs
+from src.storage import (
+    archive_audio,
+    create_meeting_folder,
+    move_to_failed,
+    save_summary,
+    save_transcript,
+)
 from src.summarize import summarize_transcript
 from src.transcribe import transcribe_audio
 
@@ -59,19 +65,35 @@ def process_file(
         move_to_failed(audio_path, config.failed_dir, f"Rendering failed: {e}")
         raise
 
+    # Written before summarizing: the transcript is the expensive artifact of
+    # this pipeline (a full GPU pass over the recording), and summarization is
+    # the step most likely to fail. Persisting it first means a failed summary
+    # costs one Claude call to redo, not another transcription.
     try:
-        summary_markdown = retry_with_backoff(
-            lambda: summarize_transcript(
-                transcript_markdown, model=config.claude_model, api_key=config.anthropic_api_key
-            )
+        meeting_dir = create_meeting_folder(audio_path, config.meetings_dir)
+        transcript_path = save_transcript(meeting_dir, transcript_markdown)
+    except Exception as e:
+        move_to_failed(audio_path, config.failed_dir, f"Save failed: {e}")
+        raise
+
+    # No retry here on purpose: summarize_transcript retries every API call it
+    # makes, per chunk. Wrapping it again would re-run a whole map-reduce
+    # (8 chunks, ~27 calls) because of one permanently failing chunk.
+    try:
+        summary_markdown = summarize_transcript(
+            transcript_markdown, model=config.claude_model, api_key=config.anthropic_api_key
         )
     except Exception as e:
-        move_to_failed(audio_path, config.failed_dir, f"Summarization failed: {e}")
+        move_to_failed(
+            audio_path,
+            config.failed_dir,
+            f"Summarization failed: {e}\nTranscript was saved to {transcript_path}",
+        )
         raise
 
     try:
-        meeting_dir = create_meeting_folder(audio_path, config.meetings_dir)
-        save_outputs(meeting_dir, audio_path, transcript_markdown, summary_markdown)
+        save_summary(meeting_dir, summary_markdown)
+        archive_audio(meeting_dir, audio_path)
     except Exception as e:
         move_to_failed(audio_path, config.failed_dir, f"Save failed: {e}")
         raise
