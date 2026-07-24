@@ -204,50 +204,109 @@ def test_make_callback_converts_stereo_block_to_mono_and_queues_it():
     assert np.allclose(queued, [0.5, 0.5])
 
 
-def test_record_streams_to_file_writes_mixed_audio(tmp_path):
-    mic_queue: queue.Queue = queue.Queue()
-    speaker_queue: queue.Queue = queue.Queue()
-    mic_queue.put(np.array([1.0, 1.0], dtype=np.float32))
-    speaker_queue.put(np.array([0.0, 0.0], dtype=np.float32))
+def _queue_with(*blocks):
+    q: "queue.Queue[np.ndarray]" = queue.Queue()
+    for block in blocks:
+        q.put(block)
+    return q
+
+
+def test_record_streams_to_session_writes_a_single_part_when_short(tmp_path):
     stop_event = threading.Event()
     stop_event.set()
-    output_path = tmp_path / "out.wav"
+    block = np.array([0.5, 0.5], dtype=np.float32)
 
-    record.record_streams_to_file(
-        mic_queue,
-        speaker_queue,
-        output_path,
+    parts = record.record_streams_to_session(
+        _queue_with(block),
+        _queue_with(block),
+        tmp_path,
         samplerate=16000,
         stop_event=stop_event,
-        block_timeout=0.05,
-        flush_every=1,
+        rotate_samples=1000,
+        block_timeout=0.01,
     )
 
-    written, samplerate = sf.read(str(output_path), dtype="float32")
-    assert samplerate == 16000
-    assert np.allclose(written, [0.5, 0.5], atol=1e-4)
-
-
-def test_record_streams_to_file_drains_remaining_blocks_after_stop_requested(tmp_path):
-    mic_queue: queue.Queue = queue.Queue()
-    speaker_queue: queue.Queue = queue.Queue()
-    mic_queue.put(np.array([1.0], dtype=np.float32))
-    mic_queue.put(np.array([1.0], dtype=np.float32))
-    speaker_queue.put(np.array([0.0], dtype=np.float32))
-    speaker_queue.put(np.array([0.0], dtype=np.float32))
-    stop_event = threading.Event()
-    stop_event.set()
-    output_path = tmp_path / "out.wav"
-
-    record.record_streams_to_file(
-        mic_queue,
-        speaker_queue,
-        output_path,
-        samplerate=16000,
-        stop_event=stop_event,
-        block_timeout=0.05,
-        flush_every=1,
-    )
-
-    written, _ = sf.read(str(output_path), dtype="float32")
+    assert parts == ["part0001.wav"]
+    written, _ = sf.read(str(tmp_path / "part0001.wav"), dtype="float32")
     assert len(written) == 2
+
+
+def test_record_streams_to_session_rotates_after_the_sample_budget(tmp_path):
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(4, dtype=np.float32)
+
+    parts = record.record_streams_to_session(
+        _queue_with(block, block, block),
+        _queue_with(block, block, block),
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=4,
+        block_timeout=0.01,
+    )
+
+    # each 4-sample block fills the budget exactly, so every block gets its own part
+    assert parts == ["part0001.wav", "part0002.wav", "part0003.wav"]
+    for name in parts:
+        written, _ = sf.read(str(tmp_path / name), dtype="float32")
+        assert len(written) == 4
+
+
+def test_record_streams_to_session_reports_each_closed_part(tmp_path):
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(4, dtype=np.float32)
+    seen = []
+
+    record.record_streams_to_session(
+        _queue_with(block, block),
+        _queue_with(block, block),
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=4,
+        on_part_closed=lambda parts: seen.append(list(parts)),
+        block_timeout=0.01,
+    )
+
+    assert seen == [["part0001.wav"], ["part0001.wav", "part0002.wav"]]
+
+
+def test_record_streams_to_session_drops_a_trailing_empty_part(tmp_path):
+    # rotation landing exactly on the last block must not leave a 0-sample file
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(4, dtype=np.float32)
+
+    parts = record.record_streams_to_session(
+        _queue_with(block),
+        _queue_with(block),
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=4,
+        block_timeout=0.01,
+    )
+
+    assert parts == ["part0001.wav"]
+    assert not (tmp_path / "part0002.wav").exists()
+
+
+def test_record_streams_to_session_drains_queues_after_stop_requested(tmp_path):
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(2, dtype=np.float32)
+
+    parts = record.record_streams_to_session(
+        _queue_with(block, block),
+        _queue_with(block, block),
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=10_000,
+        block_timeout=0.01,
+    )
+
+    written, _ = sf.read(str(tmp_path / parts[0]), dtype="float32")
+    assert len(written) == 4

@@ -9,6 +9,9 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 
 from src.config import load_config
+from src.segments import part_filename
+
+ROTATE_SECONDS = 1800
 
 
 def to_mono(frames: np.ndarray) -> np.ndarray:
@@ -48,30 +51,79 @@ def make_callback(block_queue: "queue.Queue[np.ndarray]", channels: int):
     return callback
 
 
-def record_streams_to_file(
+def record_streams_to_session(
     mic_queue: "queue.Queue[np.ndarray]",
     speaker_queue: "queue.Queue[np.ndarray]",
-    output_path: Path,
+    session_dir: Path,
     samplerate: int,
     stop_event: threading.Event,
+    rotate_samples: int,
+    on_part_closed=None,
     block_timeout: float = 0.5,
     flush_every: int = 60,
-) -> None:
-    with sf.SoundFile(
-        str(output_path), mode="w", samplerate=samplerate, channels=1, subtype="FLOAT"
-    ) as f:
-        blocks_written = 0
+) -> list[str]:
+    # Writes mixed audio into rotating part files and returns their names in order.
+    # Rotating bounds how much a crash can cost and keeps every file far below the
+    # 4GB RIFF ceiling; the parts are concatenated and encoded once, on stop.
+    parts: list[str] = []
+    handle = None
+    samples_in_part = 0
+    blocks_written = 0
+
+    def open_next_part() -> None:
+        nonlocal handle, samples_in_part
+        name = part_filename(len(parts) + 1)
+        parts.append(name)
+        handle = sf.SoundFile(
+            str(session_dir / name),
+            mode="w",
+            samplerate=samplerate,
+            channels=1,
+            subtype="FLOAT",
+        )
+        samples_in_part = 0
+
+    def close_current_part() -> None:
+        nonlocal handle
+        handle.flush()
+        handle.close()
+        handle = None
+        if on_part_closed is not None:
+            on_part_closed(list(parts))
+
+    open_next_part()
+    try:
         while not stop_event.is_set() or not mic_queue.empty() or not speaker_queue.empty():
             mic_block = drain_next_block(mic_queue, block_timeout)
             speaker_block = drain_next_block(speaker_queue, block_timeout)
             if len(mic_block) == 0 and len(speaker_block) == 0:
                 continue
             mixed = mix_recordings(mic_block, speaker_block)
-            f.write(mixed)
+            handle.write(mixed)
+            samples_in_part += len(mixed)
             blocks_written += 1
             if blocks_written % flush_every == 0:
-                f.flush()
-        f.flush()
+                handle.flush()
+            # checked only after a whole block is written, so no block is ever split
+            if samples_in_part >= rotate_samples:
+                close_current_part()
+                open_next_part()
+    finally:
+        if handle is not None:
+            # Rotation can land exactly on the final block, leaving a freshly opened
+            # part with nothing in it. Drop that file instead of closing it, and do
+            # NOT fire on_part_closed: the previous close already reported the true
+            # part list, and firing again would report a part that no longer exists.
+            trailing_empty = samples_in_part == 0 and len(parts) > 1
+            handle.flush()
+            handle.close()
+            handle = None
+            if trailing_empty:
+                (session_dir / parts[-1]).unlink()
+                parts.pop()
+            elif on_part_closed is not None:
+                on_part_closed(list(parts))
+    return parts
 
 
 def get_wasapi_mic_device(p) -> dict:
