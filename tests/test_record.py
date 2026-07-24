@@ -1,6 +1,7 @@
 from datetime import datetime
 import queue
 import threading
+from unittest.mock import patch
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -50,7 +51,7 @@ def test_build_output_filename_with_name():
 
     result = build_output_filename("weekly-standup", now)
 
-    assert result == "weekly-standup-16-30-05.wav"
+    assert result == "weekly-standup-16-30-05.ogg"
 
 
 def test_build_output_filename_without_name():
@@ -58,7 +59,68 @@ def test_build_output_filename_without_name():
 
     result = build_output_filename(None, now)
 
-    assert result == "2026-07-22_16-30-05.wav"
+    assert result == "2026-07-22_16-30-05.ogg"
+
+
+def test_recover_orphan_sessions_finishes_each_leftover_session(tmp_path):
+    finished = []
+
+    with (
+        patch("src.record.find_orphan_sessions", return_value=[tmp_path / "a", tmp_path / "b"]),
+        patch("src.record.finish_session", side_effect=lambda d, inbox: finished.append(d) or d),
+    ):
+        recovered = record.recover_orphan_sessions(tmp_path)
+
+    assert finished == [tmp_path / "a", tmp_path / "b"]
+    assert recovered == [tmp_path / "a", tmp_path / "b"]
+
+
+def test_recover_orphan_sessions_keeps_going_when_one_fails(tmp_path):
+    def flaky(session_dir, inbox_dir):
+        if session_dir.name == "a":
+            raise RuntimeError("ffmpeg boom")
+        return session_dir
+
+    with (
+        patch("src.record.find_orphan_sessions", return_value=[tmp_path / "a", tmp_path / "b"]),
+        patch("src.record.finish_session", side_effect=flaky),
+    ):
+        recovered = record.recover_orphan_sessions(tmp_path)
+
+    # the failure must not block recovery of the others, nor abort the new recording
+    assert recovered == [tmp_path / "b"]
+
+
+def test_finish_or_discard_returns_the_destination_on_success(tmp_path):
+    with patch("src.record.finish_session", return_value=tmp_path / "meet1.ogg"):
+        assert record.finish_or_discard(tmp_path / ".session-meet1", tmp_path) == (
+            tmp_path / "meet1.ogg"
+        )
+
+
+def test_finish_or_discard_removes_a_session_that_recorded_no_audio(tmp_path):
+    # Ctrl+C before the first block leaves a header-only part. Keeping that
+    # directory means every later startup tries to recover it and fails forever.
+    session_dir = tmp_path / ".session-silent"
+    session_dir.mkdir()
+
+    with patch("src.record.finish_session", side_effect=record.NoAudioRecorded("no audio")):
+        assert record.finish_or_discard(session_dir, tmp_path) is None
+
+    assert not session_dir.exists()
+
+
+def test_finish_or_discard_propagates_a_real_encode_failure(tmp_path):
+    # An ffmpeg failure is different: the parts are real and must be kept for the
+    # next recovery pass, so the error has to reach the caller.
+    session_dir = tmp_path / ".session-meet1"
+    session_dir.mkdir()
+
+    with patch("src.record.finish_session", side_effect=RuntimeError("ffmpeg boom")):
+        with pytest.raises(RuntimeError, match="ffmpeg boom"):
+            record.finish_or_discard(session_dir, tmp_path)
+
+    assert session_dir.exists()
 
 
 class _FakePyAudio:
@@ -204,50 +266,109 @@ def test_make_callback_converts_stereo_block_to_mono_and_queues_it():
     assert np.allclose(queued, [0.5, 0.5])
 
 
-def test_record_streams_to_file_writes_mixed_audio(tmp_path):
-    mic_queue: queue.Queue = queue.Queue()
-    speaker_queue: queue.Queue = queue.Queue()
-    mic_queue.put(np.array([1.0, 1.0], dtype=np.float32))
-    speaker_queue.put(np.array([0.0, 0.0], dtype=np.float32))
+def _queue_with(*blocks):
+    q: "queue.Queue[np.ndarray]" = queue.Queue()
+    for block in blocks:
+        q.put(block)
+    return q
+
+
+def test_record_streams_to_session_writes_a_single_part_when_short(tmp_path):
     stop_event = threading.Event()
     stop_event.set()
-    output_path = tmp_path / "out.wav"
+    block = np.array([0.5, 0.5], dtype=np.float32)
 
-    record.record_streams_to_file(
-        mic_queue,
-        speaker_queue,
-        output_path,
+    parts = record.record_streams_to_session(
+        _queue_with(block),
+        _queue_with(block),
+        tmp_path,
         samplerate=16000,
         stop_event=stop_event,
-        block_timeout=0.05,
-        flush_every=1,
+        rotate_samples=1000,
+        block_timeout=0.01,
     )
 
-    written, samplerate = sf.read(str(output_path), dtype="float32")
-    assert samplerate == 16000
-    assert np.allclose(written, [0.5, 0.5], atol=1e-4)
-
-
-def test_record_streams_to_file_drains_remaining_blocks_after_stop_requested(tmp_path):
-    mic_queue: queue.Queue = queue.Queue()
-    speaker_queue: queue.Queue = queue.Queue()
-    mic_queue.put(np.array([1.0], dtype=np.float32))
-    mic_queue.put(np.array([1.0], dtype=np.float32))
-    speaker_queue.put(np.array([0.0], dtype=np.float32))
-    speaker_queue.put(np.array([0.0], dtype=np.float32))
-    stop_event = threading.Event()
-    stop_event.set()
-    output_path = tmp_path / "out.wav"
-
-    record.record_streams_to_file(
-        mic_queue,
-        speaker_queue,
-        output_path,
-        samplerate=16000,
-        stop_event=stop_event,
-        block_timeout=0.05,
-        flush_every=1,
-    )
-
-    written, _ = sf.read(str(output_path), dtype="float32")
+    assert parts == ["part0001.wav"]
+    written, _ = sf.read(str(tmp_path / "part0001.wav"), dtype="float32")
     assert len(written) == 2
+
+
+def test_record_streams_to_session_rotates_after_the_sample_budget(tmp_path):
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(4, dtype=np.float32)
+
+    parts = record.record_streams_to_session(
+        _queue_with(block, block, block),
+        _queue_with(block, block, block),
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=4,
+        block_timeout=0.01,
+    )
+
+    # each 4-sample block fills the budget exactly, so every block gets its own part
+    assert parts == ["part0001.wav", "part0002.wav", "part0003.wav"]
+    for name in parts:
+        written, _ = sf.read(str(tmp_path / name), dtype="float32")
+        assert len(written) == 4
+
+
+def test_record_streams_to_session_reports_each_closed_part(tmp_path):
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(4, dtype=np.float32)
+    seen = []
+
+    record.record_streams_to_session(
+        _queue_with(block, block),
+        _queue_with(block, block),
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=4,
+        on_part_closed=lambda parts: seen.append(list(parts)),
+        block_timeout=0.01,
+    )
+
+    assert seen == [["part0001.wav"], ["part0001.wav", "part0002.wav"]]
+
+
+def test_record_streams_to_session_drops_a_trailing_empty_part(tmp_path):
+    # rotation landing exactly on the last block must not leave a 0-sample file
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(4, dtype=np.float32)
+
+    parts = record.record_streams_to_session(
+        _queue_with(block),
+        _queue_with(block),
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=4,
+        block_timeout=0.01,
+    )
+
+    assert parts == ["part0001.wav"]
+    assert not (tmp_path / "part0002.wav").exists()
+
+
+def test_record_streams_to_session_drains_queues_after_stop_requested(tmp_path):
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(2, dtype=np.float32)
+
+    parts = record.record_streams_to_session(
+        _queue_with(block, block),
+        _queue_with(block, block),
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=10_000,
+        block_timeout=0.01,
+    )
+
+    written, _ = sf.read(str(tmp_path / parts[0]), dtype="float32")
+    assert len(written) == 4

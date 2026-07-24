@@ -1,4 +1,5 @@
 import queue
+import shutil
 import sys
 import threading
 from datetime import datetime
@@ -9,6 +10,25 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 
 from src.config import load_config
+from src.segments import (
+    NoAudioRecorded,
+    find_orphan_sessions,
+    finish_session,
+    part_filename,
+    session_dir_for,
+    write_manifest,
+)
+
+ROTATE_SECONDS = 1800
+
+
+def _ffmpeg_error_detail(error: Exception) -> str:
+    stderr = getattr(error, "stderr", None)
+    if not stderr:
+        return str(error)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return f"{error}\n{stderr[-2000:]}"
 
 
 def to_mono(frames: np.ndarray) -> np.ndarray:
@@ -28,8 +48,8 @@ def mix_recordings(mic_frames: np.ndarray, speaker_frames: np.ndarray) -> np.nda
 
 def build_output_filename(name: str | None, now: datetime) -> str:
     if name:
-        return f"{name}-{now.strftime('%H-%M-%S')}.wav"
-    return f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.wav"
+        return f"{name}-{now.strftime('%H-%M-%S')}.ogg"
+    return f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.ogg"
 
 
 def drain_next_block(block_queue: "queue.Queue[np.ndarray]", timeout: float) -> np.ndarray:
@@ -48,30 +68,83 @@ def make_callback(block_queue: "queue.Queue[np.ndarray]", channels: int):
     return callback
 
 
-def record_streams_to_file(
+def record_streams_to_session(
     mic_queue: "queue.Queue[np.ndarray]",
     speaker_queue: "queue.Queue[np.ndarray]",
-    output_path: Path,
+    session_dir: Path,
     samplerate: int,
     stop_event: threading.Event,
+    rotate_samples: int,
+    on_part_closed=None,
     block_timeout: float = 0.5,
     flush_every: int = 60,
-) -> None:
-    with sf.SoundFile(
-        str(output_path), mode="w", samplerate=samplerate, channels=1, subtype="FLOAT"
-    ) as f:
-        blocks_written = 0
+) -> list[str]:
+    # Writes mixed audio into rotating part files and returns their names in order.
+    # Rotating bounds how much a crash can cost and keeps every file far below the
+    # 4GB RIFF ceiling; the parts are concatenated and encoded once, on stop.
+    parts: list[str] = []
+    handle = None
+    samples_in_part = 0
+    blocks_written = 0
+
+    def open_next_part() -> None:
+        nonlocal handle, samples_in_part
+        name = part_filename(len(parts) + 1)
+        parts.append(name)
+        handle = sf.SoundFile(
+            str(session_dir / name),
+            mode="w",
+            samplerate=samplerate,
+            channels=1,
+            subtype="FLOAT",
+        )
+        samples_in_part = 0
+
+    def close_current_part() -> None:
+        nonlocal handle
+        try:
+            handle.flush()
+        finally:
+            handle.close()
+        handle = None
+        if on_part_closed is not None:
+            on_part_closed(list(parts))
+
+    open_next_part()
+    try:
         while not stop_event.is_set() or not mic_queue.empty() or not speaker_queue.empty():
             mic_block = drain_next_block(mic_queue, block_timeout)
             speaker_block = drain_next_block(speaker_queue, block_timeout)
             if len(mic_block) == 0 and len(speaker_block) == 0:
                 continue
             mixed = mix_recordings(mic_block, speaker_block)
-            f.write(mixed)
+            handle.write(mixed)
+            samples_in_part += len(mixed)
             blocks_written += 1
             if blocks_written % flush_every == 0:
-                f.flush()
-        f.flush()
+                handle.flush()
+            # checked only after a whole block is written, so no block is ever split
+            if samples_in_part >= rotate_samples:
+                close_current_part()
+                open_next_part()
+    finally:
+        if handle is not None:
+            # Rotation can land exactly on the final block, leaving a freshly opened
+            # part with nothing in it. Drop that file instead of closing it, and do
+            # NOT fire on_part_closed: the previous close already reported the true
+            # part list, and firing again would report a part that no longer exists.
+            trailing_empty = samples_in_part == 0 and len(parts) > 1
+            try:
+                handle.flush()
+            finally:
+                handle.close()
+            handle = None
+            if trailing_empty:
+                (session_dir / parts[-1]).unlink()
+                parts.pop()
+            elif on_part_closed is not None:
+                on_part_closed(list(parts))
+    return parts
 
 
 def get_wasapi_mic_device(p) -> dict:
@@ -103,11 +176,45 @@ def get_common_samplerate(mic_device: dict, speaker_device: dict) -> int:
     return mic_rate
 
 
+def finish_or_discard(session_dir: Path, inbox_dir: Path) -> Path | None:
+    # A session that captured no audio at all (stopped before the first block was
+    # written) can never be encoded. Keeping it would make every later startup try
+    # to recover it and fail again, forever -- so discard it and report nothing.
+    # A genuine encode failure is the opposite case: those parts hold real audio,
+    # so the error propagates and the directory survives for the next attempt.
+    try:
+        return finish_session(session_dir, inbox_dir)
+    except NoAudioRecorded:
+        shutil.rmtree(session_dir, ignore_errors=True)
+        print("ไม่มีเสียงถูกบันทึกในรอบนี้ (หยุดเร็วเกินไปหรือไมค์ไม่ส่งเสียงมา) ไม่ได้สร้างไฟล์")
+        return None
+
+
+def recover_orphan_sessions(inbox_dir: Path) -> list[Path]:
+    # A leftover session directory means a previous run died before encoding.
+    # Finish what we can; one bad session must not stop the others or the new run.
+    recovered = []
+    for session_dir in find_orphan_sessions(inbox_dir):
+        print(f"พบการอัดค้างจากรอบก่อน กำลังกู้ {session_dir.name} ...")
+        try:
+            destination = finish_session(session_dir, inbox_dir)
+        except Exception as e:
+            print(
+                f"กู้ {session_dir.name} ไม่สำเร็จ ข้ามไปก่อน (ชิ้นส่วนยังอยู่): "
+                f"{_ffmpeg_error_detail(e)}"
+            )
+            continue
+        print(f"กู้สำเร็จ: {destination}")
+        recovered.append(session_dir)
+    return recovered
+
+
 def main() -> None:
     name = sys.argv[1] if len(sys.argv) > 1 else None
 
     config = load_config()
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
+    recover_orphan_sessions(config.inbox_dir)
 
     p = pyaudio.PyAudio()
     recorder_thread = None
@@ -129,7 +236,9 @@ def main() -> None:
 
         mic_queue: "queue.Queue[np.ndarray]" = queue.Queue()
         speaker_queue: "queue.Queue[np.ndarray]" = queue.Queue()
-        output_path = config.inbox_dir / build_output_filename(name, datetime.now())
+        now = datetime.now()
+        stem = Path(build_output_filename(name, now)).stem
+        session_dir = session_dir_for(config.inbox_dir, stem)
 
         try:
             mic_stream = p.open(
@@ -159,10 +268,31 @@ def main() -> None:
             )
             return
 
+        # Only create the session directory (and let the watcher's orphan-recovery
+        # machinery become aware of it) once both streams are confirmed open --
+        # otherwise a stream-open failure above would leave an empty, permanently
+        # unrecoverable .session-* directory behind (find_orphan_sessions requires
+        # at least one part file, so nothing would ever clean it up).
+        session_dir.mkdir(parents=True, exist_ok=True)
+        write_manifest(session_dir, stem, now.isoformat(), samplerate, [], "recording")
+
+        def on_part_closed(parts: list[str]) -> None:
+            write_manifest(
+                session_dir, stem, now.isoformat(), samplerate, parts, "recording"
+            )
+
         try:
             recorder_thread = threading.Thread(
-                target=record_streams_to_file,
-                args=(mic_queue, speaker_queue, output_path, samplerate, stop_event),
+                target=record_streams_to_session,
+                args=(
+                    mic_queue,
+                    speaker_queue,
+                    session_dir,
+                    samplerate,
+                    stop_event,
+                    ROTATE_SECONDS * samplerate,
+                    on_part_closed,
+                ),
             )
             recorder_thread.start()
             thread_started = True
@@ -183,7 +313,18 @@ def main() -> None:
             speaker_stream.stop_stream()
             speaker_stream.close()
 
-        print(f"หยุดอัดแล้ว บันทึกไปที่ {output_path}")
+        print("กำลังบีบอัดไฟล์เสียง...")
+        try:
+            destination = finish_or_discard(session_dir, config.inbox_dir)
+        except Exception as e:
+            print(
+                f"บีบอัดไม่สำเร็จ ชิ้นส่วนเสียงยังอยู่ที่ {session_dir} : "
+                f"{_ffmpeg_error_detail(e)}"
+            )
+            return
+        if destination is None:
+            return
+        print(f"หยุดอัดแล้ว บันทึกไปที่ {destination}")
     finally:
         stop_event.set()
         if thread_started:

@@ -31,6 +31,15 @@ def test_scan_inbox_returns_empty_list_when_dir_missing(tmp_path):
     assert scan_inbox(tmp_path / "does-not-exist") == []
 
 
+def test_scan_inbox_ignores_session_directories_and_accepts_ogg(tmp_path):
+    session = tmp_path / ".session-meet1"
+    session.mkdir()
+    (session / "part0001.wav").write_bytes(b"x")
+    (tmp_path / "done.ogg").write_bytes(b"x")
+
+    assert scan_inbox(tmp_path) == [tmp_path / "done.ogg"]
+
+
 def test_is_file_stable_true_for_unchanging_file(tmp_path):
     audio_path = tmp_path / "sample.mp3"
     audio_path.write_bytes(b"fake audio data")
