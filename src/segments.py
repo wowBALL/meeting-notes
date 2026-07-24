@@ -108,6 +108,30 @@ def audio_parts(session_dir: Path) -> list[str]:
     )
 
 
+def sweep_unrecoverable_sessions(inbox_dir: Path) -> list[Path]:
+    """Delete session directories that can never be finished.
+
+    A session directory without a manifest is either debris from a cleanup whose
+    part file was transiently locked (Explorer preview / AV scan -- observed on
+    every real recording of 2026-07-24), or a crash inside the instant between
+    mkdir and the first manifest write. finish_session cannot run without the
+    manifest, so these can only accumulate; sweep them at startup. A directory
+    whose files are still locked simply survives until the next sweep.
+    """
+    if not inbox_dir.exists():
+        return []
+    swept = []
+    for entry in sorted(inbox_dir.iterdir()):
+        if not entry.is_dir() or not entry.name.startswith(SESSION_PREFIX):
+            continue
+        if (entry / MANIFEST_NAME).exists():
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        if not entry.exists():
+            swept.append(entry)
+    return swept
+
+
 def find_orphan_sessions(inbox_dir: Path) -> list[Path]:
     # A session directory that still exists means the previous run never finished:
     # a successful finish_session() removes it.
@@ -164,10 +188,14 @@ def finish_session(
 
     # The encode+move already succeeded -- the user's audio is safe at
     # `destination`, so nothing below may raise. A lingering handle or an AV
-    # scanner (common on Windows) can make cleanup fail after the fact; deleting
-    # the parts FIRST means whatever survives no longer looks like a recoverable
-    # session, so the next run cannot re-encode it into a duplicate meeting.
-    for name in parts:
+    # scanner (common on Windows) can make ANY of these deletions fail after the
+    # fact -- the first real recording lost both the part unlink and the rmtree
+    # to a transient lock. The manifest goes FIRST because find_orphan_sessions
+    # requires it: once it is gone, whatever else survives can never qualify as
+    # a recoverable session, so the next run cannot re-encode the leftovers into
+    # a duplicate meeting. (A .json is also far less likely to be lock-scanned
+    # than a fresh media file.)
+    for name in [MANIFEST_NAME, "concat.txt", *parts]:
         try:
             (session_dir / name).unlink()
         except OSError:

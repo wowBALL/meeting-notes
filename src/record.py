@@ -16,6 +16,7 @@ from src.segments import (
     finish_session,
     part_filename,
     session_dir_for,
+    sweep_unrecoverable_sessions,
     write_manifest,
 )
 
@@ -193,6 +194,8 @@ def finish_or_discard(session_dir: Path, inbox_dir: Path) -> Path | None:
 def recover_orphan_sessions(inbox_dir: Path) -> list[Path]:
     # A leftover session directory means a previous run died before encoding.
     # Finish what we can; one bad session must not stop the others or the new run.
+    for swept in sweep_unrecoverable_sessions(inbox_dir):
+        print(f"ลบเศษ session ที่ปิดงานไม่หมดจากรอบก่อน: {swept.name}")
     recovered = []
     for session_dir in find_orphan_sessions(inbox_dir):
         print(f"พบการอัดค้างจากรอบก่อน กำลังกู้ {session_dir.name} ...")
