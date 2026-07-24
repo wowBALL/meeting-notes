@@ -5,6 +5,12 @@ from typing import Any
 
 _MODEL_CACHE: dict[str, Any] = {}
 
+# Batch of VAD-segmented chunks decoded in parallel per forward pass -- same
+# large-v3 weights, ~3x faster than sequential. Sized for the RTX 3060 6GB:
+# the model resident at int8_float16 (~3.2GB) plus the pyannote pipeline now
+# also living on the GPU (~1GB) leaves no headroom for a larger batch.
+BATCH_SIZE = 4
+
 
 def _register_cuda_dll_dirs() -> None:
     # faster-whisper's CTranslate2 backend loads CUDA 12 cuBLAS/cuDNN DLLs that
@@ -43,12 +49,11 @@ def _select_device_and_compute() -> tuple[str, str]:
 def load_whisper_model(model_size: str) -> Any:
     if model_size not in _MODEL_CACHE:
         _register_cuda_dll_dirs()
-        from faster_whisper import WhisperModel
+        from faster_whisper import BatchedInferencePipeline, WhisperModel
 
         device, compute_type = _select_device_and_compute()
-        _MODEL_CACHE[model_size] = WhisperModel(
-            model_size, device=device, compute_type=compute_type
-        )
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        _MODEL_CACHE[model_size] = BatchedInferencePipeline(model=model)
     return _MODEL_CACHE[model_size]
 
 
@@ -57,7 +62,9 @@ def transcribe_audio(
 ) -> list[dict]:
     if model is None:
         model = load_whisper_model(model_size)
-    segments, _info = model.transcribe(str(audio_path), language="th", vad_filter=True)
+    segments, _info = model.transcribe(
+        str(audio_path), language="th", vad_filter=True, batch_size=BATCH_SIZE
+    )
     return [
         {"start": seg.start, "end": seg.end, "text": seg.text}
         for seg in segments

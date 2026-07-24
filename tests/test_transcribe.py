@@ -43,6 +43,20 @@ def test_transcribe_audio_calls_model_with_thai_language(tmp_path):
     assert call_args.kwargs["language"] == "th"
 
 
+def test_transcribe_audio_requests_batched_inference(tmp_path):
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake audio data")
+
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([], SimpleNamespace(language="th"))
+
+    transcribe_audio(audio_path, model=mock_model)
+
+    call_args = mock_model.transcribe.call_args
+    assert call_args.kwargs["batch_size"] == transcribe_module.BATCH_SIZE
+    assert transcribe_module.BATCH_SIZE >= 2
+
+
 def test_transcribe_audio_loads_model_by_size_when_none_given(tmp_path):
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"fake audio data")
@@ -77,7 +91,18 @@ def test_select_device_and_compute_falls_back_to_cpu():
     assert compute == "int8"
 
 
-def test_load_whisper_model_loads_and_caches_by_size(monkeypatch):
+def _fake_faster_whisper(ctor):
+    fake_fw = ModuleType("faster_whisper")
+    fake_fw.WhisperModel = MagicMock(side_effect=ctor)
+    # Same weights, batched decoding: the wrapper is what load_whisper_model
+    # must hand back so every transcribe call gets batch parallelism.
+    fake_fw.BatchedInferencePipeline = MagicMock(
+        side_effect=lambda model: f"batched({model})"
+    )
+    return fake_fw
+
+
+def test_load_whisper_model_returns_a_batched_pipeline_and_caches_it(monkeypatch):
     monkeypatch.setattr(transcribe_module, "_MODEL_CACHE", {})
 
     constructed = []
@@ -86,8 +111,7 @@ def test_load_whisper_model_loads_and_caches_by_size(monkeypatch):
         constructed.append((size, device, compute_type))
         return f"model-{size}-{device}-{compute_type}"
 
-    fake_fw = ModuleType("faster_whisper")
-    fake_fw.WhisperModel = MagicMock(side_effect=fake_ctor)
+    fake_fw = _fake_faster_whisper(fake_ctor)
 
     with (
         patch.dict(sys.modules, {"faster_whisper": fake_fw}),
@@ -99,16 +123,18 @@ def test_load_whisper_model_loads_and_caches_by_size(monkeypatch):
         model1 = load_whisper_model("large-v3")
         model2 = load_whisper_model("large-v3")
 
-    assert model1 == "model-large-v3-cuda-int8_float16"
+    assert model1 == "batched(model-large-v3-cuda-int8_float16)"
     assert model2 == model1
     assert constructed == [("large-v3", "cuda", "int8_float16")]  # constructed once
+    fake_fw.BatchedInferencePipeline.assert_called_once_with(
+        model="model-large-v3-cuda-int8_float16"
+    )
 
 
 def test_load_whisper_model_registers_cuda_dll_dirs(monkeypatch):
     monkeypatch.setattr(transcribe_module, "_MODEL_CACHE", {})
 
-    fake_fw = ModuleType("faster_whisper")
-    fake_fw.WhisperModel = MagicMock(return_value="m")
+    fake_fw = _fake_faster_whisper(lambda *a, **k: "m")
 
     with (
         patch.dict(sys.modules, {"faster_whisper": fake_fw}),
