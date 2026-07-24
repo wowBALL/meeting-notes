@@ -17,6 +17,15 @@ def load_diarization_pipeline(hf_token: str) -> Any:
         import torch
 
         if torch.cuda.is_available():
+            # faster-whisper's ctranslate2 loads the cu12 cuDNN DLLs while this
+            # torch build bundles its own cu13 cuDNN under the same basenames.
+            # Windows keeps one DLL per basename per process, so whichever stack
+            # initializes first poisons the other: pyannote's first GPU forward
+            # after whisper died with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH
+            # (observed 2026-07-24). With cuDNN off, torch uses its native CUDA
+            # kernels -- same outputs, still far faster than CPU, and the two
+            # stacks no longer share any cuDNN state.
+            torch.backends.cudnn.enabled = False
             pipeline.to(torch.device("cuda"))
     except Exception:
         pass

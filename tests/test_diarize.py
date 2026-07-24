@@ -17,6 +17,7 @@ def _fake_torch(cuda_available: bool, device_sentinel):
     torch_mod = ModuleType("torch")
     torch_mod.cuda = SimpleNamespace(is_available=lambda: cuda_available)
     torch_mod.device = MagicMock(return_value=device_sentinel)
+    torch_mod.backends = SimpleNamespace(cudnn=SimpleNamespace(enabled=True))
     return torch_mod
 
 
@@ -69,18 +70,38 @@ def test_load_diarization_pipeline_moves_to_gpu_when_available():
     assert result is loaded
 
 
+def test_load_diarization_pipeline_disables_torch_cudnn_on_gpu():
+    # faster-whisper's ctranslate2 loads the cu12 cuDNN DLLs while torch ships
+    # its own cu13 build under the same DLL basenames. Windows dedupes by name,
+    # so mixing them dies with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH the
+    # moment pyannote's first GPU forward runs after whisper (observed on the
+    # real watcher, 2026-07-24). torch must not touch cuDNN at all.
+    loaded = MagicMock()
+    mock_pipeline_cls = MagicMock()
+    mock_pipeline_cls.from_pretrained.return_value = loaded
+    fake_torch = _fake_torch(True, object())
+
+    with patch.dict(sys.modules, {**_fake_pyannote(mock_pipeline_cls), "torch": fake_torch}):
+        load_diarization_pipeline("hf-test-token")
+
+    assert fake_torch.backends.cudnn.enabled is False
+
+
 def test_load_diarization_pipeline_stays_on_cpu_without_cuda():
     loaded = MagicMock()
     mock_pipeline_cls = MagicMock()
     mock_pipeline_cls.from_pretrained.return_value = loaded
+    fake_torch = _fake_torch(False, object())
 
     with patch.dict(
         sys.modules,
-        {**_fake_pyannote(mock_pipeline_cls), "torch": _fake_torch(False, object())},
+        {**_fake_pyannote(mock_pipeline_cls), "torch": fake_torch},
     ):
         result = load_diarization_pipeline("hf-test-token")
 
     loaded.to.assert_not_called()
+    # no GPU -> no DLL clash possible; leave torch's defaults alone
+    assert fake_torch.backends.cudnn.enabled is True
     assert result is loaded
 
 
