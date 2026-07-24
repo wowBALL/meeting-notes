@@ -1,8 +1,11 @@
+import logging
 import re
 
 from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
 from src.render import format_timestamp
 from src.retry import retry_with_backoff
+
+logger = logging.getLogger(__name__)
 
 SINGLE_CALL_THRESHOLD_TOKENS = 20_000
 CHUNK_MAX_TOKENS = 15_000
@@ -56,7 +59,23 @@ def _summarize(client, model: str, system: str, content: str, max_tokens: int) -
         system=system,
         messages=[{"role": "user", "content": content}],
     )
-    return next(block.text for block in response.content if block.type == "text")
+    stop_reason = getattr(response, "stop_reason", None)
+    text = next((block.text for block in response.content if block.type == "text"), None)
+    if text is None:
+        raise RuntimeError(
+            f"Claude returned no text block (stop_reason={stop_reason!r}); "
+            "nothing to use as a summary"
+        )
+    if stop_reason == "max_tokens":
+        # The summary stops mid-sentence but still reads as if it were complete,
+        # so the only way anyone learns about it is this log line.
+        logger.warning(
+            "Summary hit the max_tokens cap (%d) and is truncated; "
+            "stop_reason=max_tokens, %d characters returned",
+            max_tokens,
+            len(text),
+        )
+    return text
 
 
 def _time_range(chunk: dict) -> str:

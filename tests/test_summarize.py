@@ -1,4 +1,7 @@
+import logging
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 import src.summarize as summarize_module
 from src.chunk import parse_transcript_segments, split_into_chunks
@@ -10,12 +13,13 @@ from src.summarize import (
 )
 
 
-def _response(text: str):
+def _response(text: str, stop_reason: str = "end_turn"):
     block = MagicMock()
     block.type = "text"
     block.text = text
     response = MagicMock()
     response.content = [block]
+    response.stop_reason = stop_reason
     return response
 
 
@@ -23,9 +27,9 @@ def _patch_anthropic(client):
     return patch("anthropic.Anthropic", return_value=client)
 
 
-def _single_response_client(text: str):
+def _single_response_client(text: str, stop_reason: str = "end_turn"):
     client = MagicMock()
-    client.messages.create.return_value = _response(text)
+    client.messages.create.return_value = _response(text, stop_reason)
     return client
 
 
@@ -83,6 +87,33 @@ def test_short_transcript_uses_given_model_and_original_prompt():
     assert "transcript" in kwargs["messages"][0]["content"]
     assert kwargs["system"] == summarize_module.SUMMARY_SYSTEM_PROMPT
     assert kwargs["max_tokens"] == summarize_module.MAP_MAX_OUTPUT_TOKENS
+
+
+def test_response_without_a_text_block_raises_a_diagnosable_error():
+    block = MagicMock()
+    block.type = "thinking"
+    response = MagicMock()
+    response.content = [block]
+    response.stop_reason = "end_turn"
+    client = MagicMock()
+    client.messages.create.return_value = response
+
+    with (
+        _patch_anthropic(client),
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="no text block"),
+    ):
+        summarize_transcript("สั้น", api_key="test-key")
+
+
+def test_truncated_summary_is_logged_as_a_warning(caplog):
+    client = _single_response_client("สรุปที่ถูกตัด", stop_reason="max_tokens")
+
+    with _patch_anthropic(client), caplog.at_level(logging.WARNING):
+        result = summarize_transcript("สั้น", api_key="test-key")
+
+    assert result == "สรุปที่ถูกตัด"
+    assert any("max_tokens" in record.getMessage() for record in caplog.records)
 
 
 def test_long_transcript_makes_one_call_per_chunk_plus_one_reduce():
