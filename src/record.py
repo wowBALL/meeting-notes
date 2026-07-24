@@ -10,8 +10,6 @@ import soundfile as sf
 
 from src.config import load_config
 
-DEFAULT_SAMPLERATE = 48000
-
 
 def to_mono(frames: np.ndarray) -> np.ndarray:
     if frames.ndim == 1:
@@ -112,18 +110,25 @@ def main() -> None:
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
 
     p = pyaudio.PyAudio()
+    recorder_thread = None
+    thread_started = False
+    stop_event = threading.Event()
     try:
         try:
             mic_device = get_wasapi_mic_device(p)
             speaker_device = get_wasapi_loopback_device(p)
-            samplerate = get_common_samplerate(mic_device, speaker_device)
         except Exception as e:
             print(f"ไม่พบไมค์/ลำโพง default กรุณาตรวจสอบการตั้งค่าเสียงของ Windows: {e}")
             return
 
+        try:
+            samplerate = get_common_samplerate(mic_device, speaker_device)
+        except RuntimeError as e:
+            print(str(e))
+            return
+
         mic_queue: "queue.Queue[np.ndarray]" = queue.Queue()
         speaker_queue: "queue.Queue[np.ndarray]" = queue.Queue()
-        stop_event = threading.Event()
         output_path = config.inbox_dir / build_output_filename(name, datetime.now())
 
         try:
@@ -154,20 +159,25 @@ def main() -> None:
             )
             return
 
-        recorder_thread = threading.Thread(
-            target=record_streams_to_file,
-            args=(mic_queue, speaker_queue, output_path, samplerate, stop_event),
-        )
-        recorder_thread.start()
-
-        print("กำลังอัดเสียง... กด Ctrl+C เพื่อหยุด")
         try:
+            recorder_thread = threading.Thread(
+                target=record_streams_to_file,
+                args=(mic_queue, speaker_queue, output_path, samplerate, stop_event),
+            )
+            recorder_thread.start()
+            thread_started = True
+
+            print("กำลังอัดเสียง... กด Ctrl+C เพื่อหยุด")
             while recorder_thread.is_alive():
                 recorder_thread.join(timeout=0.2)
         except KeyboardInterrupt:
             stop_event.set()
-            recorder_thread.join()
+            if thread_started:
+                recorder_thread.join()
         finally:
+            stop_event.set()
+            if thread_started:
+                recorder_thread.join()
             mic_stream.stop_stream()
             mic_stream.close()
             speaker_stream.stop_stream()
@@ -175,6 +185,9 @@ def main() -> None:
 
         print(f"หยุดอัดแล้ว บันทึกไปที่ {output_path}")
     finally:
+        stop_event.set()
+        if thread_started:
+            recorder_thread.join()
         p.terminate()
 
 
