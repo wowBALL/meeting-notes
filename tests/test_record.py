@@ -91,6 +91,22 @@ def test_recover_orphan_sessions_keeps_going_when_one_fails(tmp_path):
     assert recovered == [tmp_path / "b"]
 
 
+def test_recover_orphan_sessions_sweeps_manifest_less_debris_first(tmp_path):
+    # Debris left when a locked part blocked cleanup: no manifest, so it can
+    # never be finished -- startup must remove it, not report it forever.
+    debris = tmp_path / ".session-debris"
+    debris.mkdir()
+    (debris / "part0001.wav").write_bytes(b"x" * 4096)
+
+    with (
+        patch("src.record.find_orphan_sessions", return_value=[]),
+        patch("src.record.finish_session"),
+    ):
+        record.recover_orphan_sessions(tmp_path)
+
+    assert not debris.exists()
+
+
 def test_finish_or_discard_returns_the_destination_on_success(tmp_path):
     with patch("src.record.finish_session", return_value=tmp_path / "meet1.ogg"):
         assert record.finish_or_discard(tmp_path / ".session-meet1", tmp_path) == (

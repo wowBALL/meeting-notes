@@ -108,6 +108,30 @@ def audio_parts(session_dir: Path) -> list[str]:
     )
 
 
+def sweep_unrecoverable_sessions(inbox_dir: Path) -> list[Path]:
+    """Delete session directories that can never be finished.
+
+    A session directory without a manifest is either debris from a cleanup whose
+    part file was transiently locked (Explorer preview / AV scan -- observed on
+    every real recording of 2026-07-24), or a crash inside the instant between
+    mkdir and the first manifest write. finish_session cannot run without the
+    manifest, so these can only accumulate; sweep them at startup. A directory
+    whose files are still locked simply survives until the next sweep.
+    """
+    if not inbox_dir.exists():
+        return []
+    swept = []
+    for entry in sorted(inbox_dir.iterdir()):
+        if not entry.is_dir() or not entry.name.startswith(SESSION_PREFIX):
+            continue
+        if (entry / MANIFEST_NAME).exists():
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        if not entry.exists():
+            swept.append(entry)
+    return swept
+
+
 def find_orphan_sessions(inbox_dir: Path) -> list[Path]:
     # A session directory that still exists means the previous run never finished:
     # a successful finish_session() removes it.

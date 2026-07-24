@@ -16,7 +16,12 @@ if not exist ".\.venv\Scripts\python.exe" (
 )
 
 rem --- Start the watcher in its own window, only if not already running ---
-tasklist /fi "windowtitle eq MeetingWatcher" 2>NUL | find /I "cmd.exe" >NUL
+rem Detect by the python command line, not the console window title: on
+rem Windows 11 the title belongs to Windows Terminal rather than cmd.exe, so
+rem the old tasklist/windowtitle check never matched and every run of this
+rem script stacked another watcher (they race for inbox files and the second
+rem one dies loading models into a GPU the first already filled).
+powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -like '*src.main*' }) { exit 0 } exit 1" >NUL 2>&1
 if errorlevel 1 (
     echo Starting watcher...
     start "MeetingWatcher" cmd /k "cd /d %PROJECT_DIR% && set PATH=%FFMPEG1%;%FFMPEG2%;%PATH% && .\.venv\Scripts\python.exe -m src.main"
