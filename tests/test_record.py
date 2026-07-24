@@ -1,6 +1,7 @@
 from datetime import datetime
 import queue
 import threading
+from unittest.mock import patch
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -50,7 +51,7 @@ def test_build_output_filename_with_name():
 
     result = build_output_filename("weekly-standup", now)
 
-    assert result == "weekly-standup-16-30-05.wav"
+    assert result == "weekly-standup-16-30-05.ogg"
 
 
 def test_build_output_filename_without_name():
@@ -58,7 +59,36 @@ def test_build_output_filename_without_name():
 
     result = build_output_filename(None, now)
 
-    assert result == "2026-07-22_16-30-05.wav"
+    assert result == "2026-07-22_16-30-05.ogg"
+
+
+def test_recover_orphan_sessions_finishes_each_leftover_session(tmp_path):
+    finished = []
+
+    with (
+        patch("src.record.find_orphan_sessions", return_value=[tmp_path / "a", tmp_path / "b"]),
+        patch("src.record.finish_session", side_effect=lambda d, inbox: finished.append(d) or d),
+    ):
+        recovered = record.recover_orphan_sessions(tmp_path)
+
+    assert finished == [tmp_path / "a", tmp_path / "b"]
+    assert recovered == [tmp_path / "a", tmp_path / "b"]
+
+
+def test_recover_orphan_sessions_keeps_going_when_one_fails(tmp_path):
+    def flaky(session_dir, inbox_dir):
+        if session_dir.name == "a":
+            raise RuntimeError("ffmpeg boom")
+        return session_dir
+
+    with (
+        patch("src.record.find_orphan_sessions", return_value=[tmp_path / "a", tmp_path / "b"]),
+        patch("src.record.finish_session", side_effect=flaky),
+    ):
+        recovered = record.recover_orphan_sessions(tmp_path)
+
+    # the failure must not block recovery of the others, nor abort the new recording
+    assert recovered == [tmp_path / "b"]
 
 
 class _FakePyAudio:

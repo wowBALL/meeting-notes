@@ -9,7 +9,7 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 
 from src.config import load_config
-from src.segments import part_filename
+from src.segments import find_orphan_sessions, finish_session, part_filename, session_dir_for, write_manifest
 
 ROTATE_SECONDS = 1800
 
@@ -31,8 +31,8 @@ def mix_recordings(mic_frames: np.ndarray, speaker_frames: np.ndarray) -> np.nda
 
 def build_output_filename(name: str | None, now: datetime) -> str:
     if name:
-        return f"{name}-{now.strftime('%H-%M-%S')}.wav"
-    return f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.wav"
+        return f"{name}-{now.strftime('%H-%M-%S')}.ogg"
+    return f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.ogg"
 
 
 def drain_next_block(block_queue: "queue.Queue[np.ndarray]", timeout: float) -> np.ndarray:
@@ -155,11 +155,28 @@ def get_common_samplerate(mic_device: dict, speaker_device: dict) -> int:
     return mic_rate
 
 
+def recover_orphan_sessions(inbox_dir: Path) -> list[Path]:
+    # A leftover session directory means a previous run died before encoding.
+    # Finish what we can; one bad session must not stop the others or the new run.
+    recovered = []
+    for session_dir in find_orphan_sessions(inbox_dir):
+        print(f"พบการอัดค้างจากรอบก่อน กำลังกู้ {session_dir.name} ...")
+        try:
+            destination = finish_session(session_dir, inbox_dir)
+        except Exception as e:
+            print(f"กู้ {session_dir.name} ไม่สำเร็จ ข้ามไปก่อน (ชิ้นส่วนยังอยู่): {e}")
+            continue
+        print(f"กู้สำเร็จ: {destination}")
+        recovered.append(session_dir)
+    return recovered
+
+
 def main() -> None:
     name = sys.argv[1] if len(sys.argv) > 1 else None
 
     config = load_config()
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
+    recover_orphan_sessions(config.inbox_dir)
 
     p = pyaudio.PyAudio()
     recorder_thread = None
@@ -181,7 +198,16 @@ def main() -> None:
 
         mic_queue: "queue.Queue[np.ndarray]" = queue.Queue()
         speaker_queue: "queue.Queue[np.ndarray]" = queue.Queue()
-        output_path = config.inbox_dir / build_output_filename(name, datetime.now())
+        now = datetime.now()
+        stem = Path(build_output_filename(name, now)).stem
+        session_dir = session_dir_for(config.inbox_dir, stem)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        write_manifest(session_dir, stem, now.isoformat(), samplerate, [], "recording")
+
+        def on_part_closed(parts: list[str]) -> None:
+            write_manifest(
+                session_dir, stem, now.isoformat(), samplerate, parts, "recording"
+            )
 
         try:
             mic_stream = p.open(
@@ -213,8 +239,16 @@ def main() -> None:
 
         try:
             recorder_thread = threading.Thread(
-                target=record_streams_to_file,
-                args=(mic_queue, speaker_queue, output_path, samplerate, stop_event),
+                target=record_streams_to_session,
+                args=(
+                    mic_queue,
+                    speaker_queue,
+                    session_dir,
+                    samplerate,
+                    stop_event,
+                    ROTATE_SECONDS * samplerate,
+                    on_part_closed,
+                ),
             )
             recorder_thread.start()
             thread_started = True
@@ -235,7 +269,13 @@ def main() -> None:
             speaker_stream.stop_stream()
             speaker_stream.close()
 
-        print(f"หยุดอัดแล้ว บันทึกไปที่ {output_path}")
+        print("กำลังบีบอัดไฟล์เสียง...")
+        try:
+            destination = finish_session(session_dir, config.inbox_dir)
+        except Exception as e:
+            print(f"บีบอัดไม่สำเร็จ ชิ้นส่วนเสียงยังอยู่ที่ {session_dir} : {e}")
+            return
+        print(f"หยุดอัดแล้ว บันทึกไปที่ {destination}")
     finally:
         stop_event.set()
         if thread_started:
