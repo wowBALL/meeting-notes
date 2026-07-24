@@ -27,8 +27,10 @@ _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 
 
 def _demote_headings(markdown: str, floor: int = 4) -> str:
-    """A chunk summary is nested under a ### timeline entry; any ##-level heading
-    the model returns would outrank it and break the document outline."""
+    """Push every heading down to at least `floor`, leaving deeper ones alone.
+    A chunk summary is nested under a ### timeline entry, so any ##-level heading
+    the model returns would outrank it; the merged summary sits above the ##
+    timeline section, so an H1 there would swallow the timeline into its own."""
     return _HEADING_RE.sub(lambda m: "#" * max(floor, len(m.group(1))) + " ", markdown)
 
 
@@ -177,10 +179,16 @@ def summarize_transcript(
     combined = "\n\n".join(
         f"## ช่วง [{_time_range(chunk)}]\n\n{summary}" for chunk, summary in succeeded
     )
-    overall = retry_with_backoff(
-        lambda: _summarize(
-            client, model, REDUCE_SYSTEM_PROMPT, combined, REDUCE_MAX_OUTPUT_TOKENS
-        )
+    # floor=2: the model likes to open with an H1 title, which would rank above
+    # "## ไทม์ไลน์ตามช่วง" and nest the whole timeline inside the merged summary.
+    # Its own ## and ### structure is left untouched.
+    overall = _demote_headings(
+        retry_with_backoff(
+            lambda: _summarize(
+                client, model, REDUCE_SYSTEM_PROMPT, combined, REDUCE_MAX_OUTPUT_TOKENS
+            )
+        ),
+        floor=2,
     )
 
     timeline = "\n\n".join(

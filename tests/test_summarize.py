@@ -356,6 +356,36 @@ def test_long_transcript_demotes_heading_levels_in_chunk_summaries():
     assert "\n## หัวข้อระดับสอง" not in combined
 
 
+def test_reduce_summary_headings_cannot_outrank_the_timeline_section():
+    transcript = _long_transcript(100)
+    reduce_output = (
+        "# สรุปการประชุม: เรื่องที่คุยกัน\n\n"
+        "## ประเด็นสำคัญ\n\n"
+        "### หัวข้อย่อย\n- ข้อหนึ่ง\n\n"
+        "## Action Items\n- ทำต่อ"
+    )
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            return _response(reduce_output)
+        return _response("- สรุปช่วง")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    # an H1 from the model would swallow "## ไทม์ไลน์ตามช่วง" into its own section
+    assert result.startswith("## สรุปการประชุม: เรื่องที่คุยกัน")
+    assert "# สรุปการประชุม" not in result.replace("## สรุปการประชุม", "")
+    # levels at or below the document's own H2 are left exactly as the model wrote them
+    assert "## ประเด็นสำคัญ" in result
+    assert "### หัวข้อย่อย" in result
+    assert "## Action Items" in result
+    assert "## ไทม์ไลน์ตามช่วง" in result
+
+
 def test_over_threshold_transcript_with_no_parseable_segments_falls_back_to_single_call():
     # Exceeds SINGLE_CALL_THRESHOLD_TOKENS but has no "**speaker** [MM:SS]:" blocks,
     # so parse_transcript_segments returns [] and chunks is [].
