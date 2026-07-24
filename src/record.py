@@ -1,5 +1,8 @@
+import queue
 import sys
+import threading
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -29,6 +32,48 @@ def build_output_filename(name: str | None, now: datetime) -> str:
     if name:
         return f"{name}-{now.strftime('%H-%M-%S')}.wav"
     return f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.wav"
+
+
+def drain_next_block(block_queue: "queue.Queue[np.ndarray]", timeout: float) -> np.ndarray:
+    try:
+        return block_queue.get(timeout=timeout)
+    except queue.Empty:
+        return np.zeros(0, dtype=np.float32)
+
+
+def make_callback(block_queue: "queue.Queue[np.ndarray]", channels: int):
+    def callback(in_data, frame_count, time_info, status):
+        block = np.frombuffer(in_data, dtype=np.float32).reshape(-1, channels)
+        block_queue.put(to_mono(block.copy()))
+        return (None, pyaudio.paContinue)
+
+    return callback
+
+
+def record_streams_to_file(
+    mic_queue: "queue.Queue[np.ndarray]",
+    speaker_queue: "queue.Queue[np.ndarray]",
+    output_path: Path,
+    samplerate: int,
+    stop_event: threading.Event,
+    block_timeout: float = 0.5,
+    flush_every: int = 60,
+) -> None:
+    with sf.SoundFile(
+        str(output_path), mode="w", samplerate=samplerate, channels=1, subtype="FLOAT"
+    ) as f:
+        blocks_written = 0
+        while not stop_event.is_set() or not mic_queue.empty() or not speaker_queue.empty():
+            mic_block = drain_next_block(mic_queue, block_timeout)
+            speaker_block = drain_next_block(speaker_queue, block_timeout)
+            if len(mic_block) == 0 and len(speaker_block) == 0:
+                continue
+            mixed = mix_recordings(mic_block, speaker_block)
+            f.write(mixed)
+            blocks_written += 1
+            if blocks_written % flush_every == 0:
+                f.flush()
+        f.flush()
 
 
 def get_wasapi_mic_device(p) -> dict:

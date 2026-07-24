@@ -1,7 +1,11 @@
 from datetime import datetime
+import queue
+import threading
 
 import numpy as np
+import pyaudiowpatch as pyaudio
 import pytest
+import soundfile as sf
 
 import src.record as record
 from src.record import to_mono, mix_recordings, build_output_filename
@@ -233,3 +237,83 @@ def test_get_common_samplerate_raises_when_rates_differ():
         record.get_common_samplerate(
             {"defaultSampleRate": 44100.0}, {"defaultSampleRate": 48000.0}
         )
+
+
+def test_drain_next_block_returns_item_when_available():
+    q = queue.Queue()
+    block = np.array([0.1, 0.2], dtype=np.float32)
+    q.put(block)
+
+    result = record.drain_next_block(q, timeout=0.1)
+
+    assert np.array_equal(result, block)
+
+
+def test_drain_next_block_returns_empty_array_on_timeout():
+    q = queue.Queue()
+
+    result = record.drain_next_block(q, timeout=0.05)
+
+    assert len(result) == 0
+
+
+def test_make_callback_converts_stereo_block_to_mono_and_queues_it():
+    q = queue.Queue()
+    callback = record.make_callback(q, channels=2)
+    in_data = np.array([[0.0, 1.0], [0.5, 0.5]], dtype=np.float32).tobytes()
+
+    result, flag = callback(in_data, 2, {}, 0)
+
+    assert result is None
+    assert flag == pyaudio.paContinue
+    queued = q.get_nowait()
+    assert np.allclose(queued, [0.5, 0.5])
+
+
+def test_record_streams_to_file_writes_mixed_audio(tmp_path):
+    mic_queue: queue.Queue = queue.Queue()
+    speaker_queue: queue.Queue = queue.Queue()
+    mic_queue.put(np.array([1.0, 1.0], dtype=np.float32))
+    speaker_queue.put(np.array([0.0, 0.0], dtype=np.float32))
+    stop_event = threading.Event()
+    stop_event.set()
+    output_path = tmp_path / "out.wav"
+
+    record.record_streams_to_file(
+        mic_queue,
+        speaker_queue,
+        output_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        block_timeout=0.05,
+        flush_every=1,
+    )
+
+    written, samplerate = sf.read(str(output_path), dtype="float32")
+    assert samplerate == 16000
+    assert np.allclose(written, [0.5, 0.5], atol=1e-4)
+
+
+def test_record_streams_to_file_drains_remaining_blocks_after_stop_requested(tmp_path):
+    mic_queue: queue.Queue = queue.Queue()
+    speaker_queue: queue.Queue = queue.Queue()
+    mic_queue.put(np.array([1.0], dtype=np.float32))
+    mic_queue.put(np.array([1.0], dtype=np.float32))
+    speaker_queue.put(np.array([0.0], dtype=np.float32))
+    speaker_queue.put(np.array([0.0], dtype=np.float32))
+    stop_event = threading.Event()
+    stop_event.set()
+    output_path = tmp_path / "out.wav"
+
+    record.record_streams_to_file(
+        mic_queue,
+        speaker_queue,
+        output_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        block_timeout=0.05,
+        flush_every=1,
+    )
+
+    written, _ = sf.read(str(output_path), dtype="float32")
+    assert len(written) == 2
