@@ -15,6 +15,7 @@ if os.name == "nt":
                 pass
 
 from src.config import load_config
+from src.diarize import load_diarization_pipeline
 from src.transcribe import load_whisper_model
 from src.watcher import watch_loop
 
@@ -30,12 +31,8 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
 
     # Load both models once at startup, then reuse them for every file,
     # instead of reloading from disk on each meeting.
-    from pyannote.audio import Pipeline
-
     logging.info("Loading speaker-diarization model...")
-    diarization_pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1", token=config.hf_token
-    )
+    diarization_pipeline = load_diarization_pipeline(config.hf_token)
 
     logging.info("Loading Whisper model (%s)...", config.whisper_model)
     whisper_model = load_whisper_model(config.whisper_model)
