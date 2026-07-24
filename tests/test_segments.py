@@ -50,6 +50,30 @@ def test_part_filename_is_four_digit_and_one_based():
     assert part_filename(1234) == "part1234.wav"
 
 
+def test_manifest_records_the_devices_that_were_captured(tmp_path):
+    # Which mic and which loopback a meeting was captured from is the difference
+    # between "the far end was silent" and "we tapped the wrong speaker" -- and
+    # it is unknowable after the fact unless it is written down here.
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    devices = {"mic": "Microphone (Realtek)", "loopback": "Speakers (NX-S2) [Loopback]"}
+
+    write_manifest(
+        session_dir, "meet1", "t", 48000, [], "recording", devices=devices
+    )
+
+    assert read_manifest(session_dir)["devices"] == devices
+
+
+def test_manifest_defaults_devices_to_empty(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    write_manifest(session_dir, "meet1", "t", 48000, [], "recording")
+
+    assert read_manifest(session_dir)["devices"] == {}
+
+
 def test_manifest_round_trips_every_field(tmp_path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -65,6 +89,7 @@ def test_manifest_round_trips_every_field(tmp_path):
         "samplerate": 48000,
         "parts": ["part0001.wav"],
         "status": "recording",
+        "devices": {},
     }
 
 

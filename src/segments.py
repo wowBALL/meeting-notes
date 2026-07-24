@@ -38,6 +38,7 @@ def write_manifest(
     samplerate: int,
     parts: list[str],
     status: str,
+    devices: dict | None = None,
 ) -> None:
     manifest = {
         "stem": stem,
@@ -45,6 +46,10 @@ def write_manifest(
         "samplerate": samplerate,
         "parts": list(parts),
         "status": status,
+        # Which mic and which loopback this meeting was captured from. Nothing in
+        # the audio itself reveals whether the right speaker was tapped, so a
+        # recording with a silent far end is otherwise impossible to diagnose.
+        "devices": dict(devices or {}),
     }
     (session_dir / MANIFEST_NAME).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
