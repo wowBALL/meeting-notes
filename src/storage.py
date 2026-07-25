@@ -46,9 +46,13 @@ def save_transcript(meeting_dir: Path, transcript_markdown: str) -> Path:
     return path
 
 
-def save_summary(meeting_dir: Path, summary_markdown: str) -> Path:
+def save_summary(meeting_dir: Path, summary_markdown: str, model: str) -> Path:
+    # `model` is required, not optional: the point of choosing a model per meeting
+    # is being able to judge afterwards whether the pricier one was worth it, and
+    # a summary.md with no attribution cannot be judged at all.
     path = meeting_dir / "summary.md"
-    path.write_text(summary_markdown, encoding="utf-8")
+    body = summary_markdown.rstrip("\n")
+    path.write_text(f"{body}\n\n---\nสรุปด้วย {model}\n", encoding="utf-8")
     return path
 
 

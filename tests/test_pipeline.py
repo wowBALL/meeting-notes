@@ -52,7 +52,9 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
     expected_dir = config.meetings_dir / f"{date.today().isoformat()}_weekly-standup"
     assert meeting_dir == expected_dir
     assert (meeting_dir / "transcript.md").exists()
-    assert (meeting_dir / "summary.md").read_text(encoding="utf-8") == "## ประเด็นสำคัญ\n- ทดสอบ"
+    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
+    assert summary.startswith("## ประเด็นสำคัญ\n- ทดสอบ")
+    assert summary.endswith(f"---\nสรุปด้วย {config.claude_model}\n")
     assert (meeting_dir / "weekly-standup.mp3").exists()
     assert not audio_path.exists()
 

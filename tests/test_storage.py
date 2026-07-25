@@ -56,14 +56,27 @@ def test_save_transcript_writes_the_transcript_file(tmp_path):
     assert path.read_text(encoding="utf-8") == "# Transcript"
 
 
-def test_save_summary_writes_the_summary_file(tmp_path):
+def test_save_summary_writes_the_summary_file_with_the_model_footer(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
-    path = save_summary(meeting_dir, "# Summary")
+    path = save_summary(meeting_dir, "# Summary", "claude-sonnet-5")
 
     assert path == meeting_dir / "summary.md"
-    assert path.read_text(encoding="utf-8") == "# Summary"
+    assert path.read_text(encoding="utf-8") == (
+        "# Summary\n\n---\nสรุปด้วย claude-sonnet-5\n"
+    )
+
+
+def test_save_summary_does_not_stack_blank_lines_before_the_footer(tmp_path):
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, "# Summary\n\n\n", "claude-opus-5")
+
+    assert path.read_text(encoding="utf-8") == (
+        "# Summary\n\n---\nสรุปด้วย claude-opus-5\n"
+    )
 
 
 def test_archive_audio_moves_the_recording_into_the_meeting_folder(tmp_path):

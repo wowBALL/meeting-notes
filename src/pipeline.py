@@ -97,7 +97,7 @@ def process_file(
         raise
 
     try:
-        save_summary(meeting_dir, summary_markdown)
+        save_summary(meeting_dir, summary_markdown, claude_model)
         archive_audio(meeting_dir, audio_path)
         discard_job(audio_path)
     except Exception as e:
