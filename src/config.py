@@ -4,6 +4,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# preflight อ่านค่านี้ด้วย โดยไม่ผ่าน load_config -- จึงต้องอยู่ตรงนี้ ไม่ใช่ฝังใน default
+# ของ dataclass ที่แห่งเดียว
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
+
 
 @dataclass
 class Config:
@@ -13,7 +17,7 @@ class Config:
     meetings_dir: Path
     anthropic_api_key: str
     hf_token: str
-    claude_model: str = "claude-opus-5"
+    claude_model: str = DEFAULT_CLAUDE_MODEL
     whisper_model: str = "small"
 
 
@@ -23,7 +27,7 @@ def load_config(base_dir: Path | None = None) -> Config:
 
     anthropic_api_key = os.environ["ANTHROPIC_API_KEY"]
     hf_token = os.environ["HF_TOKEN"]
-    claude_model = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
+    claude_model = os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
     whisper_model = os.environ.get("WHISPER_MODEL", "small")
 
     return Config(

@@ -1,20 +1,28 @@
-"""ตรวจความพร้อมของเสียงก่อนเริ่มอัดประชุม
+"""ตรวจความพร้อมก่อนเริ่มอัดประชุม
 
-ประชุมจริงย้อนกลับไม่ได้ -- อัดพลาดคือเสียเลย โมดูลนี้ตอบคำถามสองข้อที่เคยทำให้
-transcript ออกมาว่างเปล่าโดยไม่มีใครรู้ตัวจนสายเกินไป:
+ประชุมจริงย้อนกลับไม่ได้ -- อัดพลาดคือเสียเลย โมดูลนี้ตอบคำถามที่เคยทำให้ผลลัพธ์
+ออกมาว่างเปล่าโดยไม่มีใครรู้ตัวจนสายเกินไป:
 
 1. ไมค์ส่งสัญญาณเข้ามาจริงไหม (ปลั๊กหลวม / volume ต่ำ / เสียบผิดช่อง)
 2. เสียงคู่สนทนาไหลผ่าน default output ตัวที่ recorder ดักฟังอยู่จริงไหม
    (เครื่องที่มีลำโพงหลายตัวสลับ default ไปมา แอปประชุมอาจส่งเสียงออกอีกตัว
    ทำให้ได้ยินแต่ฝั่งเราเอง)
+3. key ที่จะใช้สรุปยังเรียกได้จริงไหม -- รู้ตอนนี้ ดีกว่ารู้ตอนประชุมเลิกแล้ว
+
+ข้อ 1-2 เป็น "ไม่ผ่าน" ได้ เพราะเสียงที่ไม่ได้อัดหายถาวร ข้อ 3 เป็นได้แค่ "เตือน"
+เพราะ transcript ยังได้ครบอยู่ดี เอาไปให้ Claude สรุปทีหลังได้
 """
 
 import math
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+from dotenv import load_dotenv
 
+from src.config import DEFAULT_CLAUDE_MODEL
 from src.record import get_wasapi_loopback_device, get_wasapi_mic_device
 
 # ระดับ peak ของเสียงพูดปกติอยู่ราว -20 ถึง -6 dBFS
@@ -25,6 +33,11 @@ MIC_WEAK_DBFS = -45.0
 LOOPBACK_SILENT_DBFS = -50.0
 
 MEASURE_SECONDS = 8
+
+API_CHECK_NAME = "Claude API key"
+# ตัดสั้นกว่า default ของ SDK (10 นาที) มาก -- นี่คือการตรวจก่อนอัด ไม่ใช่การเรียกจริง
+# เน็ตอืดจนเกินนี้ให้รายงานเป็นคำเตือนแล้วเดินหน้าต่อ ดีกว่าค้างคาหน้าจอก่อนประชุม
+API_PROBE_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass
@@ -72,6 +85,97 @@ def evaluate_loopback(db: float, device_name: str) -> CheckResult:
         "warn",
         f"ไม่มีเสียงผ่าน {device_name} -- ถ้าตอนนี้เปิดเสียงอยู่ แปลว่าแอปส่งเสียง "
         "ออกอุปกรณ์อื่น ให้ตั้ง output ของแอปประชุมให้ตรงกับ default ของ Windows",
+    )
+
+
+def read_api_settings(base_dir: Path | None = None) -> tuple[str, str]:
+    """(API key, โมเดลที่ตั้งไว้) อ่านจาก .env ตรง ๆ ไม่ผ่าน load_config
+
+    load_config โยน KeyError เมื่อไม่มี ANTHROPIC_API_KEY -- ซึ่งเป็นหนึ่งในกรณีที่
+    หน้าที่ของโมดูลนี้คือรายงานให้อ่านรู้เรื่อง ไม่ใช่พังคาหน้าจอด้วย traceback
+    """
+    load_dotenv((base_dir or Path.cwd()) / ".env")
+    return (
+        os.environ.get("ANTHROPIC_API_KEY", ""),
+        os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL),
+    )
+
+
+def probe_claude(api_key: str, model: str) -> None:
+    """ยิงคำขอที่เล็กที่สุดเท่าที่ยิงได้ ผ่าน = ไม่โยนอะไรออกมา
+
+    ต้องเรียกจริงเพราะ Anthropic ไม่มี endpoint ให้ถามสถานะ key หรือยอดเครดิตคงเหลือ
+    ทั้งสองอย่างอ่านได้จาก error ที่ตอบกลับมาเท่านั้น max_tokens=1 ทำให้ค่าใช้จ่ายต่อ
+    การตรวจหนึ่งครั้งอยู่ในหลักเศษสตางค์
+    """
+    from anthropic import Anthropic
+
+    client = Anthropic(
+        api_key=api_key, timeout=API_PROBE_TIMEOUT_SECONDS, max_retries=0
+    )
+    client.messages.create(
+        model=model,
+        max_tokens=1,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+
+def classify_probe_error(error: Exception, model: str) -> CheckResult:
+    status_code = getattr(error, "status_code", None)
+    message = str(error)
+    if status_code == 429:
+        # ผ่าน auth และมีเครดิตแล้วเท่านั้นถึงจะโดนจำกัดอัตรา -- ไม่ใช่ปัญหาของ key
+        return CheckResult(
+            API_CHECK_NAME,
+            "ok",
+            "key ใช้ได้ (ตอนนี้ชนลิมิตอัตราการเรียก แต่ตอนสรุปมี retry รออยู่แล้ว)",
+        )
+    if status_code == 401:
+        return CheckResult(
+            API_CHECK_NAME,
+            "warn",
+            "key ใช้ไม่ได้ (401) -- หมดอายุ ถูกเพิกถอน หรือพิมพ์ผิด "
+            "ออก key ใหม่แล้วแก้ ANTHROPIC_API_KEY ใน .env",
+        )
+    if status_code in (400, 403) and "credit balance" in message.lower():
+        return CheckResult(
+            API_CHECK_NAME,
+            "warn",
+            "เครดิตไม่พอ -- เติมที่หน้า Plans & Billing ใน Anthropic Console "
+            "ไม่งั้นประชุมนี้จะได้แค่ transcript",
+        )
+    if status_code == 403:
+        return CheckResult(
+            API_CHECK_NAME,
+            "warn",
+            f"key ไม่มีสิทธิ์เรียก {model} (403) -- ตรวจสิทธิ์ของ key หรือแก้ CLAUDE_MODEL",
+        )
+    return CheckResult(API_CHECK_NAME, "warn", f"ตรวจไม่สำเร็จ: {message}")
+
+
+def check_api_key(api_key: str, model: str, probe=None) -> CheckResult:
+    """สถานะของ key ที่จะใช้สรุป -- คืน "ok" หรือ "warn" เท่านั้น ไม่มี "fail"
+
+    เพราะ start-meeting.bat ถามยกเลิกการอัดเมื่อเจอ "ไม่ผ่าน" และ key เสียไม่ใช่เหตุ
+    ให้ไม่อัด: transcript ยังได้ครบ เอาไปให้ Claude สรุปทีหลังได้ ส่วนประชุมที่ไม่ได้อัด
+    นั้นหายถาวร
+    """
+    if not api_key.strip():
+        return CheckResult(
+            API_CHECK_NAME,
+            "warn",
+            "ไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env -- อัดและถอดเสียงได้ปกติ "
+            "แต่จะไม่ได้สรุปอัตโนมัติ",
+        )
+    try:
+        (probe or probe_claude)(api_key, model)
+    except Exception as e:
+        return classify_probe_error(e, model)
+    return CheckResult(
+        API_CHECK_NAME,
+        "ok",
+        f"เรียก {model} ได้ปกติ เครดิตพอ "
+        "(Anthropic ไม่มี API บอกยอดคงเหลือ ดูตัวเลขได้ที่หน้า Plans & Billing)",
     )
 
 
@@ -165,8 +269,12 @@ def run_preflight(seconds: int = MEASURE_SECONDS) -> list[CheckResult]:
 
 
 def main() -> int:
+    api_key, claude_model = read_api_settings()
+    print(f"กำลังตรวจ key ที่จะใช้สรุป ({claude_model}) ...")
+    api_result = check_api_key(api_key, claude_model)
+
     print(f"กำลังตรวจเสียง {MEASURE_SECONDS} วินาที -- พูดใส่ไมค์ และเปิดเสียงอะไรก็ได้ออกลำโพง")
-    results = run_preflight()
+    results = [*run_preflight(), api_result]
     print()
     print(format_report(results))
     return 1 if any(r.status == "fail" for r in results) else 0
