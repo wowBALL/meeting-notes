@@ -70,7 +70,9 @@ echo.
 if "%MEETING_NAME%"=="" (
     .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID%
 ) else (
-    .\.venv\Scripts\python.exe -m src.record "%MEETING_NAME%" --model %MODEL_ID%
+    rem "--" ends argparse option parsing, so a meeting name starting with "-"
+    rem (e.g. "-standup") is taken as the positional name instead of an option.
+    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID% -- "%MEETING_NAME%"
 )
 
 endlocal

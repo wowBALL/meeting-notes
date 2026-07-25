@@ -488,3 +488,13 @@ def test_parse_args_defaults_both_to_none():
 def test_parse_args_treats_an_empty_name_as_no_name():
     # start-meeting.bat passes "" through when the user skips the name prompt
     assert parse_args([""]) == (None, None)
+
+
+def test_parse_args_accepts_a_name_starting_with_a_dash_after_the_separator():
+    # Without "--", argparse takes "-standup" for an unrecognized option and
+    # exits with an error instead of recording. start-meeting.bat relies on the
+    # "--" end-of-options separator to keep such names working.
+    assert parse_args(["--model", "claude-opus-5", "--", "-standup"]) == (
+        "-standup",
+        "claude-opus-5",
+    )

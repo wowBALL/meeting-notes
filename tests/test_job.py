@@ -77,6 +77,23 @@ def test_move_job_is_a_no_op_when_there_is_no_job_file(tmp_path):
     assert not failed.exists()
 
 
+def test_move_job_does_not_raise_when_the_destination_cannot_be_created(tmp_path):
+    # move_job is called from move_to_failed, which itself runs inside
+    # process_file's except blocks -- a raise here would mask the original
+    # pipeline error the user actually needs to see. A plain file sitting where
+    # the destination directory should go makes mkdir fail in a way that
+    # reproduces the same on every platform.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    failed = tmp_path / "failed"
+    failed.write_text("not a directory", encoding="utf-8")
+    write_job(inbox, "meet1", "claude-sonnet-5")
+
+    move_job(inbox / "meet1.ogg", failed)
+
+    assert (inbox / f"meet1{JOB_SUFFIX}").exists()
+
+
 def test_read_model_returns_none_when_the_job_file_contains_null(tmp_path):
     # Valid JSON but not an object; must not raise AttributeError
     (tmp_path / f"meet1{JOB_SUFFIX}").write_text("null", encoding="utf-8")

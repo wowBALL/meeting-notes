@@ -61,8 +61,8 @@ def move_job(audio_path: Path, destination_dir: Path) -> None:
     path = job_path_for(audio_path)
     if not path.exists():
         return
-    destination_dir.mkdir(parents=True, exist_ok=True)
     try:
+        destination_dir.mkdir(parents=True, exist_ok=True)
         path.replace(destination_dir / path.name)
     except OSError:
         pass
