@@ -2,10 +2,22 @@
 chcp 65001 >nul
 setlocal
 
-set "PROJECT_DIR=D:\COWORK\meeting-notes"
-set "FFMPEG1=C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin"
-set "FFMPEG2=C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Shared_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build-shared\bin"
-set "PATH=%FFMPEG1%;%FFMPEG2%;%PATH%"
+rem %~dp0 is the folder this script sits in, so the project can live anywhere.
+rem It always ends with a backslash; strip it so the paths below read normally.
+set "PROJECT_DIR=%~dp0"
+if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
+
+rem ffmpeg encodes the recording when the meeting ends. Checking for it now
+rem rather than then matters: a meeting cannot be re-recorded, and the audio
+rem parts would sit unencoded in inbox/ waiting for a tool nobody installed.
+where ffmpeg >NUL 2>&1
+if errorlevel 1 (
+    echo [Error] ffmpeg not found on PATH.
+    echo         Install it, then open a NEW terminal so PATH picks it up:
+    echo             winget install Gyan.FFmpeg
+    pause
+    exit /b 1
+)
 
 cd /d "%PROJECT_DIR%"
 
@@ -24,7 +36,7 @@ rem one dies loading models into a GPU the first already filled).
 powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -like '*src.main*' }) { exit 0 } exit 1" >NUL 2>&1
 if errorlevel 1 (
     echo Starting watcher...
-    start "MeetingWatcher" cmd /k "cd /d %PROJECT_DIR% && set PATH=%FFMPEG1%;%FFMPEG2%;%PATH% && .\.venv\Scripts\python.exe -m src.main"
+    start "MeetingWatcher" cmd /k "cd /d %PROJECT_DIR% && .\.venv\Scripts\python.exe -m src.main"
     timeout /t 3 /nobreak >nul
 ) else (
     echo Watcher is already running.
