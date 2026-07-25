@@ -120,7 +120,7 @@ def _summarize_chunk(
 
 def summarize_transcript(
     transcript_markdown: str,
-    model: str = "claude-opus-4-8",
+    model: str = "claude-opus-5",
     api_key: str | None = None,
 ) -> str:
     from anthropic import Anthropic

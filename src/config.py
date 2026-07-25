@@ -13,7 +13,7 @@ class Config:
     meetings_dir: Path
     anthropic_api_key: str
     hf_token: str
-    claude_model: str = "claude-opus-4-8"
+    claude_model: str = "claude-opus-5"
     whisper_model: str = "small"
 
 
@@ -23,7 +23,7 @@ def load_config(base_dir: Path | None = None) -> Config:
 
     anthropic_api_key = os.environ["ANTHROPIC_API_KEY"]
     hf_token = os.environ["HF_TOKEN"]
-    claude_model = os.environ.get("CLAUDE_MODEL", "claude-opus-4-8")
+    claude_model = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
     whisper_model = os.environ.get("WHISPER_MODEL", "small")
 
     return Config(
