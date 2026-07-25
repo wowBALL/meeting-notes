@@ -1,3 +1,5 @@
+import ast
+from pathlib import Path
 from unittest.mock import patch
 
 from src.main import main
@@ -63,3 +65,47 @@ def test_main_loads_whisper_model_once_and_passes_to_watch_loop(tmp_path, monkey
 
     mock_load_whisper.assert_called_once_with("medium")
     assert mock_watch_loop.call_args.kwargs["whisper_model"] is loaded_whisper_model
+
+
+# โมดูลที่ import pyaudiowpatch ซึ่งเป็น fork เฉพาะ Windows ของ PyAudio
+WINDOWS_ONLY_MODULES = {"record", "preflight"}
+
+
+def _src_imports_of(module_name: str) -> set[str]:
+    tree = ast.parse(
+        (Path(__file__).parent.parent / "src" / f"{module_name}.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("src."):
+            found.add(node.module.split(".")[1])
+        elif isinstance(node, ast.Import):
+            found.update(
+                alias.name.split(".")[1]
+                for alias in node.names
+                if alias.name.startswith("src.")
+            )
+    return found
+
+
+def test_the_watcher_never_reaches_the_windows_only_modules():
+    """src.main ต้องนำเข้าเฉพาะโมดูลที่รันได้ทุกระบบปฏิบัติการ
+
+    ครึ่งประมวลผล (ถอดเสียง แยกผู้พูด สรุป) เป็น Python ล้วนและใช้บน macOS/Linux ได้
+    ส่วนครึ่งอัดเสียงผูกกับ WASAPI ของ Windows ถ้าวันหนึ่งมีใคร import ข้ามฝั่งมา
+    การติดตั้งบนเครื่องที่ไม่ใช่ Windows จะพังทันทีโดยไม่มีอะไรเตือน -- เทสนี้คือตัวเตือน
+    """
+    reachable, pending = set(), ["main"]
+    while pending:
+        module = pending.pop()
+        if module in reachable:
+            continue
+        reachable.add(module)
+        pending.extend(_src_imports_of(module))
+
+    assert WINDOWS_ONLY_MODULES.isdisjoint(reachable), (
+        f"src.main ไปถึง {sorted(WINDOWS_ONLY_MODULES & reachable)} "
+        "ซึ่งต้องใช้ pyaudiowpatch (Windows เท่านั้น)"
+    )

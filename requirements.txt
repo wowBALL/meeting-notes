@@ -4,5 +4,10 @@ pyannote.audio>=3.1.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
 numpy>=1.26.0
-pyaudiowpatch>=0.2.12.8
 soundfile>=0.13.0
+
+# ตัวอัดเสียงเท่านั้นที่ใช้ตัวนี้ -- เป็น fork ของ PyAudio ที่เติม WASAPI loopback
+# มาให้ จึงมี wheel เฉพาะ Windows ตัว marker ทำให้ pip ข้ามบรรทัดนี้บนระบบอื่น
+# แทนที่จะล้มทั้งชุด ส่วนถอดเสียง/แยกผู้พูด/สรุปไม่ได้พึ่งมันเลย จึงติดตั้งและ
+# ใช้งานบน macOS/Linux ได้ (ดูหัวข้อ "ใช้บน macOS / Linux" ใน README)
+pyaudiowpatch>=0.2.12.8; sys_platform == "win32"

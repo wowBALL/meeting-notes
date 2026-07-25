@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| ระบบปฏิบัติการ | **Windows เท่านั้น** — ใช้ WASAPI loopback ในการดักเสียงลำโพง ซึ่งมีเฉพาะบน Windows |
+| ระบบปฏิบัติการ | **อัดประชุมได้เฉพาะ Windows** — ใช้ WASAPI loopback ดักเสียงลำโพง ซึ่งมีเฉพาะบน Windows ส่วนการประมวลผลไฟล์เสียงที่มีอยู่แล้วใช้ได้ทุกระบบ (ดู [ใช้บน macOS / Linux](#ใช้บน-macos--linux)) |
 | Python | 3.12 ขึ้นไป |
 | ffmpeg | ต้องเรียกจาก PATH ได้ |
 | Anthropic API key | สำหรับสรุป — เสียเงินตามการใช้งาน |
@@ -117,6 +117,24 @@ meetings/2026-07-25_14-30-ชื่อประชุม/
 ```
 
 `start-meeting.bat` เปิด watcher ให้อัตโนมัติอยู่แล้วถ้ายังไม่มีตัวไหนรัน
+
+### ใช้บน macOS / Linux
+
+**อัดประชุมไม่ได้** — ตัวอัดใช้ WASAPI loopback ซึ่งเป็น API ของ Windows ล้วน บน macOS การดักเสียงลำโพงต้องผ่าน virtual audio device (BlackHole, Loopback) หรือ ScreenCaptureKit ซึ่งเป็นคนละกลไกและยังไม่ได้เขียนไว้
+
+**แต่ประมวลผลไฟล์เสียงที่มีอยู่แล้วได้ครบ** — ถอดข้อความ แยกผู้พูด สรุปด้วย Claude ทำงานเหมือนกันทุกอย่าง ใช้กับไฟล์ที่อัดจากมือถือ จาก Zoom หรือจากเครื่อง Windows อีกเครื่องได้
+
+```bash
+python -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt   # ข้าม pyaudiowpatch ให้เอง
+brew install ffmpeg                                     # หรือ apt install ffmpeg
+cp .env.example .env                                    # แล้วใส่ค่าจริง
+./.venv/bin/python -m src.main                          # เฝ้า inbox/
+```
+
+จากนั้นวางไฟล์เสียงลงใน `inbox/` ได้เลย ผลลัพธ์ไปโผล่ที่ `meetings/` เหมือนกัน
+
+ข้อควรรู้: การเลือกอุปกรณ์เร่งความเร็วดูแค่ CUDA ([transcribe.py](src/transcribe.py), [diarize.py](src/diarize.py)) เครื่อง Mac จึงตกไปใช้ CPU เสมอ แม้เป็น Apple Silicon ที่มี MPS ก็ตาม แนะนำให้อยู่ที่ `WHISPER_MODEL=small` ไปก่อน ถ้าจะดัน `large-v3` บน CPU จะช้ามาก
 
 ## ระบบทำงานยังไง
 
