@@ -7,9 +7,11 @@
 2. เสียงคู่สนทนาไหลผ่าน default output ตัวที่ recorder ดักฟังอยู่จริงไหม
    (เครื่องที่มีลำโพงหลายตัวสลับ default ไปมา แอปประชุมอาจส่งเสียงออกอีกตัว
    ทำให้ได้ยินแต่ฝั่งเราเอง)
-3. key ที่จะใช้สรุปยังเรียกได้จริงไหม -- รู้ตอนนี้ ดีกว่ารู้ตอนประชุมเลิกแล้ว
+3. ไมค์กับลำโพงตั้ง sample rate ตรงกันไหม -- ไม่ตรง = ตัวอัดปฏิเสธการทำงาน
+   แต่จะบอกก็ต่อเมื่อหน้าจอขึ้นคำว่าเริ่มอัดไปแล้ว
+4. key ที่จะใช้สรุปยังเรียกได้จริงไหม -- รู้ตอนนี้ ดีกว่ารู้ตอนประชุมเลิกแล้ว
 
-ข้อ 1-2 เป็น "ไม่ผ่าน" ได้ เพราะเสียงที่ไม่ได้อัดหายถาวร ข้อ 3 เป็นได้แค่ "เตือน"
+ข้อ 1-3 เป็น "ไม่ผ่าน" ได้ เพราะเสียงที่ไม่ได้อัดหายถาวร ข้อ 4 เป็นได้แค่ "เตือน"
 เพราะ transcript ยังได้ครบอยู่ดี เอาไปให้ Claude สรุปทีหลังได้
 """
 
@@ -23,7 +25,11 @@ import numpy as np
 from dotenv import load_dotenv
 
 from src.config import DEFAULT_CLAUDE_MODEL
-from src.record import get_wasapi_loopback_device, get_wasapi_mic_device
+from src.record import (
+    get_common_samplerate,
+    get_wasapi_loopback_device,
+    get_wasapi_mic_device,
+)
 
 # ระดับ peak ของเสียงพูดปกติอยู่ราว -20 ถึง -6 dBFS
 MIC_GOOD_DBFS = -30.0
@@ -34,6 +40,7 @@ LOOPBACK_SILENT_DBFS = -50.0
 
 MEASURE_SECONDS = 8
 
+SAMPLERATE_CHECK_NAME = "sample rate"
 API_CHECK_NAME = "Claude API key"
 # ตัดสั้นกว่า default ของ SDK (10 นาที) มาก -- นี่คือการตรวจก่อนอัด ไม่ใช่การเรียกจริง
 # เน็ตอืดจนเกินนี้ให้รายงานเป็นคำเตือนแล้วเดินหน้าต่อ ดีกว่าค้างคาหน้าจอก่อนประชุม
@@ -86,6 +93,23 @@ def evaluate_loopback(db: float, device_name: str) -> CheckResult:
         f"ไม่มีเสียงผ่าน {device_name} -- ถ้าตอนนี้เปิดเสียงอยู่ แปลว่าแอปส่งเสียง "
         "ออกอุปกรณ์อื่น ให้ตั้ง output ของแอปประชุมให้ตรงกับ default ของ Windows",
     )
+
+
+def evaluate_samplerate(mic_device: dict, loopback_device: dict) -> CheckResult:
+    """ไมค์กับลำโพงคุยกันที่ sample rate เดียวกันไหม
+
+    ถามผ่าน get_common_samplerate ตัวเดียวกับที่ record.py เรียกตอนเริ่มอัด แทนที่จะ
+    เขียนเงื่อนไขเทียบเอง -- คำตอบของ preflight จึงไม่มีทางขัดกับสิ่งที่ตัวอัดยอมรับจริง
+    แม้เงื่อนไขนั้นจะเปลี่ยนไปในอนาคต
+
+    เป็น "fail" ได้ ต่างจากผลตรวจ API key: ค่าไม่ตรงกันแปลว่าอัดไม่ได้เลย ไม่ใช่แค่
+    ได้ผลลัพธ์ไม่ครบ
+    """
+    try:
+        rate = get_common_samplerate(mic_device, loopback_device)
+    except RuntimeError as e:
+        return CheckResult(SAMPLERATE_CHECK_NAME, "fail", str(e))
+    return CheckResult(SAMPLERATE_CHECK_NAME, "ok", f"ตรงกันที่ {rate} Hz")
 
 
 def read_api_settings(base_dir: Path | None = None) -> tuple[str, str]:
@@ -262,6 +286,7 @@ def run_preflight(seconds: int = MEASURE_SECONDS) -> list[CheckResult]:
     return [
         evaluate_mic(peak_dbfs(mic_peak)),
         evaluate_loopback(peak_dbfs(loopback_peak), loopback_device["name"]),
+        evaluate_samplerate(mic_device, loopback_device),
     ]
 
 

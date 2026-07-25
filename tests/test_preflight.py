@@ -14,6 +14,7 @@ from src.preflight import (
     check_api_key,
     evaluate_loopback,
     evaluate_mic,
+    evaluate_samplerate,
     format_report,
     peak_dbfs,
     read_api_settings,
@@ -85,8 +86,34 @@ def test_format_report_verdict_is_ready_only_when_nothing_failed():
     assert "พร้อมอัด" not in failed_report
 
 
-def test_run_preflight_measures_both_devices_and_returns_two_checks():
-    mic_device = {"name": "Microphone (Realtek)", "maxInputChannels": 2, "index": 1}
+def test_evaluate_samplerate_passes_when_both_devices_agree():
+    result = evaluate_samplerate(
+        {"defaultSampleRate": 48000.0}, {"defaultSampleRate": 48000.0}
+    )
+
+    assert result.status == "ok"
+    assert "48000" in result.detail
+
+
+def test_evaluate_samplerate_fails_when_the_two_rates_differ():
+    # record.py ปฏิเสธการอัดในกรณีนี้ ถ้า preflight บอกว่าผ่าน คนใช้จะเสียเวลาตรวจเสียง
+    # เลือกโมเดล ใส่ชื่อประชุม แล้วค่อยเจอ error ตอนที่จอขึ้นคำว่าเริ่มอัดไปแล้ว
+    result = evaluate_samplerate(
+        {"defaultSampleRate": 44100.0}, {"defaultSampleRate": 48000.0}
+    )
+
+    assert result.status == "fail"
+    assert "44100" in result.detail and "48000" in result.detail
+    assert "mmsys.cpl" in result.detail
+
+
+def test_run_preflight_measures_both_devices_and_checks_the_samplerate():
+    mic_device = {
+        "name": "Microphone (Realtek)",
+        "maxInputChannels": 2,
+        "index": 1,
+        "defaultSampleRate": 48000.0,
+    }
     loopback_device = {
         "name": "Speakers (NX-S2) [Loopback]",
         "maxInputChannels": 2,
@@ -102,9 +129,10 @@ def test_run_preflight_measures_both_devices_and_returns_two_checks():
     ):
         results = run_preflight(seconds=1)
 
-    assert [r.name for r in results] == ["ไมค์", "ลำโพง (คู่สนทนา)"]
+    assert [r.name for r in results] == ["ไมค์", "ลำโพง (คู่สนทนา)", "sample rate"]
     assert results[0].status == "ok"  # -14 dB
     assert results[1].status == "warn"  # -60 dB
+    assert results[2].status == "ok"  # ทั้งคู่ 48000 Hz
 
 
 def test_run_preflight_reports_a_missing_device_as_a_failure():
