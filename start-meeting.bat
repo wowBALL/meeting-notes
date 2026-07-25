@@ -45,6 +45,22 @@ if errorlevel 1 (
 )
 
 echo.
+echo เลือกโมเดลสรุป:
+echo   [1] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
+echo   [2] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
+rem Anything that is not "2" lands on Opus 5, so a typo cannot reach Python as an
+rem invalid model id. set /p rather than choice: choice takes a single keypress
+rem and ignores Enter, and pressing Enter for the default is the point here.
+set "MODEL_CHOICE=1"
+set /p MODEL_CHOICE=เลือก [1/2] (Enter=1):
+if "%MODEL_CHOICE%"=="2" (
+    set "MODEL_ID=claude-sonnet-5"
+) else (
+    set "MODEL_ID=claude-opus-5"
+)
+echo ใช้โมเดล: %MODEL_ID%
+
+echo.
 set /p MEETING_NAME=Meeting name (optional, press Enter to skip):
 
 echo.
@@ -52,9 +68,9 @@ echo Recording started. Press Ctrl+C when the meeting ends.
 echo.
 
 if "%MEETING_NAME%"=="" (
-    .\.venv\Scripts\python.exe -m src.record
+    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID%
 ) else (
-    .\.venv\Scripts\python.exe -m src.record "%MEETING_NAME%"
+    .\.venv\Scripts\python.exe -m src.record "%MEETING_NAME%" --model %MODEL_ID%
 )
 
 endlocal
