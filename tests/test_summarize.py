@@ -10,6 +10,7 @@ from src.chunk import parse_transcript_segments, split_into_chunks
 from src.summarize import (
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
+    REDUCE_FAILURE_NOTICE,
     SUMMARY_SYSTEM_PROMPT,
     is_retryable,
     summarize_transcript,
@@ -451,21 +452,51 @@ def test_map_stage_sends_one_request_per_chunk_when_credit_runs_out():
     mock_sleep.assert_not_called()
 
 
-def test_reduce_stage_stops_after_one_attempt_when_the_key_is_rejected():
-    # chunk ผ่านหมดแต่ reduce โดนปฏิเสธ -- เป็นคนละ call site กับ map จึงต้องมีเทสของตัวเอง
-    transcript = _long_transcript(100)
+def _reduce_fails_client(status_code: int = 401):
+    """map สำเร็จทุก chunk แต่ reduce โดนปฏิเสธ -- สภาพตอนเครดิตหมดกลางคัน"""
 
     def create(**kwargs):
         if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
-            raise FakeAPIError(401)
+            raise FakeAPIError(status_code)
         return _response("สรุปช่วงนี้")
 
     client = MagicMock()
     client.messages.create.side_effect = create
+    return client
+
+
+def test_reduce_stage_stops_after_one_attempt_when_the_key_is_rejected():
+    # reduce เป็นคนละ call site กับ map จึงต้องมีเทสของตัวเอง
+    transcript = _long_transcript(100)
+    client = _reduce_fails_client()
 
     with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
-        with pytest.raises(FakeAPIError):
-            summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, api_key="test-key")
 
     assert client.messages.create.call_count == _expected_chunk_count(transcript) + 1
     mock_sleep.assert_not_called()
+
+
+def test_reduce_failure_keeps_the_chunk_summaries_that_were_already_paid_for():
+    # เดิม reduce พังแล้วโยน exception ออกไปเลย ทิ้งสรุปย่อยทุกช่วงที่เรียกสำเร็จ
+    # (และจ่ายเงินไปแล้ว) ทั้งหมด
+    transcript = _long_transcript(100)
+    client = _reduce_fails_client()
+
+    with _patch_anthropic(client), patch("time.sleep"):
+        result = summarize_transcript(transcript, api_key="test-key")
+
+    assert REDUCE_FAILURE_NOTICE in result
+    assert "## ไทม์ไลน์ตามช่วง" in result
+    assert result.count("สรุปช่วงนี้") == _expected_chunk_count(transcript)
+
+
+def test_reduce_failure_still_raises_when_no_chunk_ever_succeeded():
+    # ไม่มีอะไรให้เก็บ -- ปล่อยให้ pipeline ย้ายไฟล์ไป failed/ ตามเดิม
+    transcript = _long_transcript(100)
+    client = MagicMock()
+    client.messages.create.side_effect = FakeAPIError(401)
+
+    with _patch_anthropic(client), patch("time.sleep"):
+        with pytest.raises(RuntimeError, match="Every one of the"):
+            summarize_transcript(transcript, api_key="test-key")

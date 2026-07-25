@@ -22,6 +22,14 @@ MAP_MAX_CONCURRENCY = 4
 # chunks' summaries still reach the reader and the gap is visible in the timeline.
 CHUNK_FAILURE_PLACEHOLDER = "> ⚠️ สรุปช่วงนี้ล้มเหลว (เรียก Claude ไม่สำเร็จหลังลองใหม่ครบทุกครั้ง)"
 
+# ใช้แทนบทสรุปรวมเมื่อ reduce ล้มเหลว สรุปรายช่วงด้านล่างเรียกสำเร็จและจ่ายเงินไปแล้ว
+# การโยน exception ทิ้งทั้งหมดจึงแพงกว่าการส่งงานที่ยังไม่ได้ยุบรวมให้คนอ่าน
+REDUCE_FAILURE_NOTICE = (
+    "> ⚠️ รวมเป็นสรุปฉบับเดียวไม่สำเร็จ (เรียก Claude ไม่ผ่านหลังลองใหม่ครบทุกครั้ง)\n"
+    ">\n"
+    "> ด้านล่างคือสรุปรายช่วงที่ทำสำเร็จแล้ว ยังไม่ได้ยุบรวมและยังไม่ได้แยก Action Items"
+)
+
 # ^ requires whitespace so "#1 ..." in prose is not mangled
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 
@@ -201,15 +209,28 @@ def summarize_transcript(
     # floor=2: the model likes to open with an H1 title, which would rank above
     # "## ไทม์ไลน์ตามช่วง" and nest the whole timeline inside the merged summary.
     # Its own ## and ### structure is left untouched.
-    overall = _demote_headings(
-        retry_with_backoff(
-            lambda: _summarize(
-                client, model, REDUCE_SYSTEM_PROMPT, combined, REDUCE_MAX_OUTPUT_TOKENS
+    try:
+        overall = _demote_headings(
+            retry_with_backoff(
+                lambda: _summarize(
+                    client, model, REDUCE_SYSTEM_PROMPT, combined, REDUCE_MAX_OUTPUT_TOKENS
+                ),
+                should_retry=is_retryable,
             ),
-            should_retry=is_retryable,
-        ),
-        floor=2,
-    )
+            floor=2,
+        )
+    except Exception as e:
+        # Every chunk summary below this line already succeeded and was already
+        # billed. Letting the reduce failure propagate would throw all of them
+        # away and send the recording to failed/, so the map stage would have to
+        # be paid for a second time. The timeline alone is worth reading.
+        logger.error(
+            "Reduce stage failed after every retry, returning the %d chunk "
+            "summaries without a merged summary: %s",
+            len(succeeded),
+            e,
+        )
+        overall = REDUCE_FAILURE_NOTICE
 
     timeline = "\n\n".join(
         f"### [{_time_range(chunk)}]\n\n"
