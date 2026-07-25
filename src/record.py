@@ -1,3 +1,4 @@
+import argparse
 import queue
 import shutil
 import sys
@@ -253,8 +254,19 @@ def recover_orphan_sessions(inbox_dir: Path) -> list[Path]:
     return recovered
 
 
+def parse_args(argv: list[str]) -> tuple[str | None, str | None]:
+    """(meeting name, chosen Claude model) from the command line."""
+    parser = argparse.ArgumentParser(prog="src.record")
+    parser.add_argument("name", nargs="?", default=None)
+    parser.add_argument("--model", default=None)
+    args = parser.parse_args(argv)
+    # start-meeting.bat passes an empty string through when the user skips the
+    # prompt, and an empty meeting name must behave exactly like no name at all.
+    return (args.name or None), args.model
+
+
 def main() -> None:
-    name = sys.argv[1] if len(sys.argv) > 1 else None
+    name, claude_model = parse_args(sys.argv[1:])
 
     config = load_config()
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -320,12 +332,26 @@ def main() -> None:
         session_dir.mkdir(parents=True, exist_ok=True)
         devices = {"mic": mic_device["name"], "loopback": speaker_device["name"]}
         write_manifest(
-            session_dir, stem, now.isoformat(), samplerate, [], "recording", devices
+            session_dir,
+            stem,
+            now.isoformat(),
+            samplerate,
+            [],
+            "recording",
+            devices,
+            claude_model=claude_model,
         )
 
         def on_part_closed(parts: list[str]) -> None:
             write_manifest(
-                session_dir, stem, now.isoformat(), samplerate, parts, "recording", devices
+                session_dir,
+                stem,
+                now.isoformat(),
+                samplerate,
+                parts,
+                "recording",
+                devices,
+                claude_model=claude_model,
             )
 
         def warn_output_changed(old_name: str, new_name: str) -> None:

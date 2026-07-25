@@ -13,7 +13,7 @@ def test_load_config_reads_required_env_vars(tmp_path, monkeypatch):
 
     assert config.anthropic_api_key == "sk-ant-test"
     assert config.hf_token == "hf-test-token"
-    assert config.claude_model == "claude-opus-4-8"
+    assert config.claude_model == "claude-opus-5"
     assert config.whisper_model == "small"
     assert config.inbox_dir == tmp_path / "inbox"
     assert config.failed_dir == tmp_path / "failed"

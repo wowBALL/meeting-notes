@@ -1,5 +1,6 @@
 from datetime import date
 
+from src.job import JOB_SUFFIX, read_model, write_job
 from src.storage import (
     archive_audio,
     create_meeting_folder,
@@ -55,14 +56,27 @@ def test_save_transcript_writes_the_transcript_file(tmp_path):
     assert path.read_text(encoding="utf-8") == "# Transcript"
 
 
-def test_save_summary_writes_the_summary_file(tmp_path):
+def test_save_summary_writes_the_summary_file_with_the_model_footer(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
-    path = save_summary(meeting_dir, "# Summary")
+    path = save_summary(meeting_dir, "# Summary", "claude-sonnet-5")
 
     assert path == meeting_dir / "summary.md"
-    assert path.read_text(encoding="utf-8") == "# Summary"
+    assert path.read_text(encoding="utf-8") == (
+        "# Summary\n\n---\nสรุปด้วย claude-sonnet-5\n"
+    )
+
+
+def test_save_summary_does_not_stack_blank_lines_before_the_footer(tmp_path):
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, "# Summary\n\n\n", "claude-opus-5")
+
+    assert path.read_text(encoding="utf-8") == (
+        "# Summary\n\n---\nสรุปด้วย claude-opus-5\n"
+    )
 
 
 def test_archive_audio_moves_the_recording_into_the_meeting_folder(tmp_path):
@@ -94,3 +108,30 @@ def test_move_to_failed_moves_file_and_writes_error_log(tmp_path):
     assert not audio_path.exists()
     error_log = failed_dir / "broken.error.log"
     assert error_log.read_text(encoding="utf-8") == "Transcription failed: network error"
+
+
+def test_move_to_failed_takes_the_job_file_along(tmp_path):
+    # the next attempt must summarize with the model the user actually picked
+    failed_dir = tmp_path / "failed"
+    inbox_dir = tmp_path / "inbox"
+    inbox_dir.mkdir()
+    audio_path = inbox_dir / "broken.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(inbox_dir, "broken", "claude-sonnet-5")
+
+    move_to_failed(audio_path, failed_dir, "Summarization failed: boom")
+
+    assert not (inbox_dir / f"broken{JOB_SUFFIX}").exists()
+    assert read_model(failed_dir / "broken.mp3") == "claude-sonnet-5"
+
+
+def test_move_to_failed_works_when_there_is_no_job_file(tmp_path):
+    failed_dir = tmp_path / "failed"
+    inbox_dir = tmp_path / "inbox"
+    inbox_dir.mkdir()
+    audio_path = inbox_dir / "dropped.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    destination = move_to_failed(audio_path, failed_dir, "Transcription failed: boom")
+
+    assert destination.exists()

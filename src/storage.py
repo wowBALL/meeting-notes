@@ -3,6 +3,8 @@ import shutil
 from datetime import date
 from pathlib import Path
 
+from src.job import move_job
+
 # Stems produced by record.build_output_filename:
 #   named:   "<topic>-HH-MM-SS"
 #   unnamed: "YYYY-MM-DD_HH-MM-SS"
@@ -44,9 +46,13 @@ def save_transcript(meeting_dir: Path, transcript_markdown: str) -> Path:
     return path
 
 
-def save_summary(meeting_dir: Path, summary_markdown: str) -> Path:
+def save_summary(meeting_dir: Path, summary_markdown: str, model: str) -> Path:
+    # `model` is required, not optional: the point of choosing a model per meeting
+    # is being able to judge afterwards whether the pricier one was worth it, and
+    # a summary.md with no attribution cannot be judged at all.
     path = meeting_dir / "summary.md"
-    path.write_text(summary_markdown, encoding="utf-8")
+    body = summary_markdown.rstrip("\n")
+    path.write_text(f"{body}\n\n---\nสรุปด้วย {model}\n", encoding="utf-8")
     return path
 
 
@@ -62,4 +68,9 @@ def move_to_failed(audio_path: Path, failed_dir: Path, error_message: str) -> Pa
     shutil.move(str(audio_path), str(destination))
     error_log = failed_dir / f"{audio_path.stem}.error.log"
     error_log.write_text(error_message, encoding="utf-8")
+    # The job file follows the recording so a later retry summarizes with the
+    # model the user actually picked. Handled here rather than at each of
+    # process_file's six failure branches, where a seventh would eventually
+    # forget it.
+    move_job(audio_path, failed_dir)
     return destination

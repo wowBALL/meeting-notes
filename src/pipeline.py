@@ -6,6 +6,7 @@ from typing import Any
 from src.audio_convert import convert_to_wav
 from src.config import Config
 from src.diarize import diarize_audio
+from src.job import discard_job, read_model
 from src.merge import merge_transcript_and_speakers
 from src.render import render_transcript_markdown
 from src.retry import retry_with_backoff
@@ -28,6 +29,10 @@ def process_file(
     diarization_pipeline: Any = None,
     whisper_model: Any = None,
 ) -> Path:
+    # The recorder wrote this next to the audio; the watcher's own config was read
+    # once at startup and cannot know what this meeting asked for.
+    claude_model = read_model(audio_path) or config.claude_model
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
         try:
@@ -81,7 +86,7 @@ def process_file(
     # (8 chunks, ~27 calls) because of one permanently failing chunk.
     try:
         summary_markdown = summarize_transcript(
-            transcript_markdown, model=config.claude_model, api_key=config.anthropic_api_key
+            transcript_markdown, model=claude_model, api_key=config.anthropic_api_key
         )
     except Exception as e:
         move_to_failed(
@@ -92,8 +97,9 @@ def process_file(
         raise
 
     try:
-        save_summary(meeting_dir, summary_markdown)
+        save_summary(meeting_dir, summary_markdown, claude_model)
         archive_audio(meeting_dir, audio_path)
+        discard_job(audio_path)
     except Exception as e:
         move_to_failed(audio_path, config.failed_dir, f"Save failed: {e}")
         raise

@@ -4,6 +4,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from src.job import write_job
+
 # A session directory lives inside inbox/ so the finished file can be moved with a
 # same-volume os.replace(). watcher.scan_inbox() only looks at files, so a directory
 # sitting here is invisible to it and cannot be picked up half-recorded.
@@ -39,6 +41,7 @@ def write_manifest(
     parts: list[str],
     status: str,
     devices: dict | None = None,
+    claude_model: str | None = None,
 ) -> None:
     manifest = {
         "stem": stem,
@@ -50,6 +53,11 @@ def write_manifest(
         # the audio itself reveals whether the right speaker was tapped, so a
         # recording with a silent far end is otherwise impossible to diagnose.
         "devices": dict(devices or {}),
+        # Which model the user picked for THIS meeting at record time. The watcher
+        # is a separate long-lived process that read CLAUDE_MODEL once at its own
+        # startup, so the choice cannot live in .env -- it has to travel with the
+        # recording. finish_session turns this into the inbox job file.
+        "claude_model": claude_model,
     }
     (session_dir / MANIFEST_NAME).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -166,6 +174,9 @@ def finish_session(
     if not parts:
         raise NoAudioRecorded(f"ไม่พบชิ้นส่วนเสียงใน {session_dir}")
 
+    # Carry the metadata forward: this rewrite is only here to record the
+    # "encoding" status, and dropping fields it did not set would lose the model
+    # choice that the job file below is built from.
     write_manifest(
         session_dir,
         stem,
@@ -173,6 +184,8 @@ def finish_session(
         manifest["samplerate"],
         parts,
         "encoding",
+        devices=manifest.get("devices"),
+        claude_model=manifest.get("claude_model"),
     )
 
     concat_list_path = session_dir / "concat.txt"
@@ -186,6 +199,14 @@ def finish_session(
         check=True,
         capture_output=True,
     )
+
+    # BEFORE the audio is published, not after: os.replace below is the moment the
+    # watcher can first see this recording, and it must already be able to find
+    # the model choice by then. .get() because a manifest written before this
+    # feature existed has no such key.
+    claude_model = manifest.get("claude_model")
+    if claude_model:
+        write_job(inbox_dir, stem, claude_model)
 
     destination = inbox_dir / f"{stem}.ogg"
     # Atomic within the volume: the watcher never sees a partially written file.

@@ -1,0 +1,6 @@
+# cmd.exe mis-parses a batch file with LF-only line endings: statements lose
+# their leading keyword, `set /p` breaks, and variables come out empty -- so
+# start-meeting.bat would launch the recorder with an empty --model and the
+# recording would never start. core.autocrlf already fixes this for anyone who
+# has it on; this makes the working tree correct regardless of that setting.
+*.bat text eol=crlf
