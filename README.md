@@ -161,4 +161,6 @@ start-meeting.bat
 .\.venv\Scripts\python -m pytest
 ```
 
-เอกสารออกแบบและแผนการพัฒนาแต่ละฟีเจอร์อยู่ใน `docs/superpowers/`
+โครงสร้างโค้ดแบ่งเป็นโมดูลตามขั้นตอนของ pipeline — `record` อัด, `segments` รวมและเข้ารหัสไฟล์,
+`watcher` เฝ้า `inbox/`, `transcribe` / `diarize` / `merge` ทำ transcript, `summarize` เรียก Claude,
+`storage` เขียนผลลัพธ์ แต่ละโมดูลมีชุดเทสต์ของตัวเองใน `tests/`

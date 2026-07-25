@@ -8,3 +8,7 @@ __pycache__/
 venv/
 .worktrees/
 watcher_*.log
+
+# Design specs and implementation plans: kept on disk for the workflow that
+# writes them, but out of version control so they are not published.
+docs/superpowers/
