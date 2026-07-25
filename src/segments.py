@@ -39,6 +39,7 @@ def write_manifest(
     parts: list[str],
     status: str,
     devices: dict | None = None,
+    claude_model: str | None = None,
 ) -> None:
     manifest = {
         "stem": stem,
@@ -50,6 +51,11 @@ def write_manifest(
         # the audio itself reveals whether the right speaker was tapped, so a
         # recording with a silent far end is otherwise impossible to diagnose.
         "devices": dict(devices or {}),
+        # Which model the user picked for THIS meeting at record time. The watcher
+        # is a separate long-lived process that read CLAUDE_MODEL once at its own
+        # startup, so the choice cannot live in .env -- it has to travel with the
+        # recording. finish_session turns this into the inbox job file.
+        "claude_model": claude_model,
     }
     (session_dir / MANIFEST_NAME).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"

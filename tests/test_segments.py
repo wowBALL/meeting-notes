@@ -90,7 +90,34 @@ def test_manifest_round_trips_every_field(tmp_path):
         "parts": ["part0001.wav"],
         "status": "recording",
         "devices": {},
+        "claude_model": None,
     }
+
+
+def test_manifest_records_the_model_chosen_for_this_meeting(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    write_manifest(
+        session_dir,
+        "meet1",
+        "t",
+        48000,
+        [],
+        "recording",
+        claude_model="claude-sonnet-5",
+    )
+
+    assert read_manifest(session_dir)["claude_model"] == "claude-sonnet-5"
+
+
+def test_manifest_defaults_the_model_to_none(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    write_manifest(session_dir, "meet1", "t", 48000, [], "recording")
+
+    assert read_manifest(session_dir)["claude_model"] is None
 
 
 def test_manifest_is_written_where_read_manifest_looks(tmp_path):
