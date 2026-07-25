@@ -29,7 +29,15 @@ def read_model(audio_path: Path) -> str | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("claude_model")
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+        # Guard against JSON that is not an object (null, arrays, primitives)
+        if not isinstance(parsed, dict):
+            return None
+        model = parsed.get("claude_model")
+        # Guard against non-string values to honor the return type annotation
+        if isinstance(model, str):
+            return model
+        return None
     except (OSError, ValueError) as e:
         # By the time this is read, the transcript already exists -- a full GPU
         # pass over the recording. Failing the run over a few unreadable bytes is

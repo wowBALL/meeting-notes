@@ -75,3 +75,24 @@ def test_move_job_is_a_no_op_when_there_is_no_job_file(tmp_path):
     move_job(tmp_path / "dropped.mp3", failed)
 
     assert not failed.exists()
+
+
+def test_read_model_returns_none_when_the_job_file_contains_null(tmp_path):
+    # Valid JSON but not an object; must not raise AttributeError
+    (tmp_path / f"meet1{JOB_SUFFIX}").write_text("null", encoding="utf-8")
+
+    assert read_model(tmp_path / "meet1.ogg") is None
+
+
+def test_read_model_returns_none_when_the_job_file_is_a_json_array(tmp_path):
+    # Valid JSON but not an object; must not raise AttributeError
+    (tmp_path / f"meet1{JOB_SUFFIX}").write_text("[1, 2]", encoding="utf-8")
+
+    assert read_model(tmp_path / "meet1.ogg") is None
+
+
+def test_read_model_returns_none_when_claude_model_value_is_not_a_string(tmp_path):
+    # claude_model is a number instead of string; must not return wrong type
+    (tmp_path / f"meet1{JOB_SUFFIX}").write_text('{"claude_model": 5}', encoding="utf-8")
+
+    assert read_model(tmp_path / "meet1.ogg") is None
