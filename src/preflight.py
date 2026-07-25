@@ -171,12 +171,9 @@ def check_api_key(api_key: str, model: str, probe=None) -> CheckResult:
         (probe or probe_claude)(api_key, model)
     except Exception as e:
         return classify_probe_error(e, model)
-    return CheckResult(
-        API_CHECK_NAME,
-        "ok",
-        f"เรียก {model} ได้ปกติ เครดิตพอ "
-        "(Anthropic ไม่มี API บอกยอดคงเหลือ ดูตัวเลขได้ที่หน้า Plans & Billing)",
-    )
+    # ไม่ต้องบอกชื่อโมเดล (บรรทัด "กำลังตรวจ..." บอกไปแล้ว) และไม่ต้องอธิบายว่าทำไม
+    # ถึงไม่มีตัวเลขเครดิต -- คนอ่านบรรทัดนี้ตอนกำลังจะเข้าประชุม ผ่านคือผ่าน จบ
+    return CheckResult(API_CHECK_NAME, "ok", "ใช้งานได้ปกติ")
 
 
 def format_report(results: list[CheckResult]) -> str:

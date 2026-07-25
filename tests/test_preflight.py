@@ -179,9 +179,12 @@ def test_check_api_key_reports_a_missing_key_without_calling_the_api():
 
 
 def test_check_api_key_passes_when_the_probe_succeeds():
+    # บรรทัดเดียวสั้น ๆ -- รายงานนี้พิมพ์ลง console กว้าง 80 คอลัมน์ ข้อความยาวจะตัดบรรทัด
+    # จนอ่านยาก และกรณีผ่านคือกรณีที่ไม่ต้องให้ใครอ่านอะไรเพิ่ม
     result = check_api_key("sk-ant-test", "claude-opus-5", probe=lambda k, m: None)
 
     assert result.status == "ok"
+    assert result.detail == "ใช้งานได้ปกติ"
 
 
 def test_check_api_key_reports_an_expired_key():
