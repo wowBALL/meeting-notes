@@ -9,7 +9,7 @@ import pytest
 import soundfile as sf
 
 import src.record as record
-from src.record import to_mono, mix_recordings, build_output_filename
+from src.record import to_mono, mix_recordings, build_output_filename, parse_args
 
 
 def test_to_mono_returns_input_unchanged_when_already_mono():
@@ -468,3 +468,23 @@ def test_record_streams_to_session_drains_queues_after_stop_requested(tmp_path):
 
     written, _ = sf.read(str(tmp_path / parts[0]), dtype="float32")
     assert len(written) == 4
+
+
+def test_parse_args_reads_the_name_and_the_model():
+    assert parse_args(["weekly-standup", "--model", "claude-sonnet-5"]) == (
+        "weekly-standup",
+        "claude-sonnet-5",
+    )
+
+
+def test_parse_args_allows_a_model_with_no_name():
+    assert parse_args(["--model", "claude-opus-5"]) == (None, "claude-opus-5")
+
+
+def test_parse_args_defaults_both_to_none():
+    assert parse_args([]) == (None, None)
+
+
+def test_parse_args_treats_an_empty_name_as_no_name():
+    # start-meeting.bat passes "" through when the user skips the name prompt
+    assert parse_args([""]) == (None, None)
