@@ -1,10 +1,12 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from src.job import JOB_SUFFIX, read_model
 from src.segments import (
     MANIFEST_NAME,
     OPUS_BITRATE,
@@ -28,7 +30,13 @@ from src.segments import (
 _FAKE_WAV_BYTES = b"fake wav bytes " * (WAV_HEADER_ALLOWANCE // 16 + 2)
 
 
-def _make_session(inbox: Path, stem: str, part_count: int, status: str = "recording") -> Path:
+def _make_session(
+    inbox: Path,
+    stem: str,
+    part_count: int,
+    status: str = "recording",
+    claude_model: str | None = None,
+) -> Path:
     session_dir = session_dir_for(inbox, stem)
     session_dir.mkdir(parents=True)
     parts = []
@@ -36,7 +44,15 @@ def _make_session(inbox: Path, stem: str, part_count: int, status: str = "record
         name = part_filename(index)
         (session_dir / name).write_bytes(_FAKE_WAV_BYTES)
         parts.append(name)
-    write_manifest(session_dir, stem, "2026-07-24T14:30:05", 48000, parts, status)
+    write_manifest(
+        session_dir,
+        stem,
+        "2026-07-24T14:30:05",
+        48000,
+        parts,
+        status,
+        claude_model=claude_model,
+    )
     return session_dir
 
 
@@ -457,3 +473,60 @@ def test_finish_session_marks_the_manifest_encoding_before_running_ffmpeg(tmp_pa
 
 def test_opus_bitrate_default_is_48k():
     assert OPUS_BITRATE == "48k"
+
+
+def test_finish_session_writes_the_job_file_with_the_chosen_model(tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1, claude_model="claude-sonnet-5")
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        destination = finish_session(session_dir, inbox)
+
+    assert read_model(destination) == "claude-sonnet-5"
+
+
+def test_finish_session_writes_the_job_file_before_publishing_the_audio(tmp_path):
+    # The .ogg landing in inbox/ is the moment the watcher can see the job. If the
+    # job file were written after that, the watcher could pick the recording up and
+    # summarize it with the default model before the choice ever reached disk.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1, claude_model="claude-sonnet-5")
+    seen = {}
+    real_replace = os.replace
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    def spy_replace(src, dst):
+        seen["job_existed_at_publish"] = (inbox / f"meet1{JOB_SUFFIX}").exists()
+        real_replace(src, dst)
+
+    with (
+        patch("src.segments.subprocess.run", side_effect=fake_run),
+        patch("src.segments.os.replace", side_effect=spy_replace),
+    ):
+        finish_session(session_dir, inbox)
+
+    assert seen["job_existed_at_publish"] is True
+
+
+def test_finish_session_writes_no_job_file_when_no_model_was_chosen(tmp_path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1)
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        finish_session(session_dir, inbox)
+
+    assert not (inbox / f"meet1{JOB_SUFFIX}").exists()
