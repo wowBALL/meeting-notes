@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.config import Config
-from src.job import JOB_SUFFIX, read_model, write_job
+from src.job import JOB_SUFFIX, read_model, read_transcript, record_transcript, write_job
 from src.pipeline import process_file
 from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, session_dir_for, write_manifest
 
@@ -513,3 +513,95 @@ def test_the_recorded_model_choice_survives_from_manifest_to_summary(tmp_path):
     summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
     assert summary.endswith("---\nสรุปด้วย claude-sonnet-5\n")
     assert not (inbox / f"weekly-standup{JOB_SUFFIX}").exists()
+
+
+def _saved_transcript(config: Config, name: str, text: str) -> Path:
+    """สภาพที่รอบก่อนทิ้งไว้: transcript เขียนครบแล้ว แต่ขั้นสรุปล้ม"""
+    meeting_dir = config.meetings_dir / name
+    meeting_dir.mkdir(parents=True)
+    transcript_path = meeting_dir / "transcript.md"
+    transcript_path.write_text(text, encoding="utf-8")
+    return transcript_path
+
+
+def test_process_file_reuses_the_transcript_saved_by_an_earlier_run(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    transcript_path = _saved_transcript(
+        config, "2026-07-25_09-00-weekly-standup", "# Transcript\n\nของเดิม"
+    )
+    record_transcript(audio_path, transcript_path)
+
+    with (
+        _mock_convert_to_wav() as convert,
+        patch("src.pipeline.transcribe_audio") as transcribe,
+        patch("src.pipeline.diarize_audio") as diarize,
+        patch(
+            "src.pipeline.summarize_transcript", return_value="## ประเด็นสำคัญ\n- ใหม่"
+        ) as summarize,
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    # ถอดเสียงคือขั้นที่แพงที่สุดของ pipeline และผลลัพธ์ก็จะเหมือนเดิมเป๊ะ
+    convert.assert_not_called()
+    transcribe.assert_not_called()
+    diarize.assert_not_called()
+    assert meeting_dir == transcript_path.parent
+    assert summarize.call_args.args[0] == "# Transcript\n\nของเดิม"
+    assert (meeting_dir / "summary.md").exists()
+
+
+def test_process_file_transcribes_again_when_the_saved_transcript_is_gone(tmp_path):
+    # ผู้ใช้ลบหรือย้ายโฟลเดอร์ประชุมทิ้ง -- ต้องถอยกลับไปทำแบบเต็มไม่ใช่ล้ม
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    transcript_path = _saved_transcript(config, "2026-07-25_09-00-weekly-standup", "เดิม")
+    record_transcript(audio_path, transcript_path)
+    transcript_path.unlink()
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "ถอดใหม่"}],
+        ) as transcribe,
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", return_value="## ประเด็นสำคัญ"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    transcribe.assert_called_once()
+    assert "ถอดใหม่" in (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+
+
+def test_process_file_records_the_transcript_path_for_a_later_retry(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch(
+            "src.pipeline.summarize_transcript",
+            side_effect=RuntimeError("เครดิตไม่พอ"),
+        ),
+    ):
+        with pytest.raises(RuntimeError):
+            process_file(audio_path, config)
+
+    # ตัวชี้เดินทางไปพร้อมไฟล์เสียง คนกู้จึงลากทั้งคู่กลับ inbox/ แล้วได้ของเดิมต่อ
+    moved_audio = config.failed_dir / "weekly-standup.mp3"
+    assert moved_audio.exists()
+    assert read_transcript(moved_audio) == config.meetings_dir.joinpath(
+        f"{date.today().isoformat()}_weekly-standup", "transcript.md"
+    )

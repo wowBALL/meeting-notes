@@ -6,6 +6,8 @@ from src.job import (
     job_path_for,
     move_job,
     read_model,
+    read_transcript,
+    record_transcript,
     write_job,
 )
 
@@ -113,3 +115,62 @@ def test_read_model_returns_none_when_claude_model_value_is_not_a_string(tmp_pat
     (tmp_path / f"meet1{JOB_SUFFIX}").write_text('{"claude_model": 5}', encoding="utf-8")
 
     assert read_model(tmp_path / "meet1.ogg") is None
+
+
+def _transcript_at(tmp_path: Path) -> Path:
+    meeting_dir = tmp_path / "meetings" / "2026-07-25_14-30"
+    meeting_dir.mkdir(parents=True)
+    transcript = meeting_dir / "transcript.md"
+    transcript.write_text("# Transcript\n", encoding="utf-8")
+    return transcript
+
+
+def test_record_transcript_then_read_transcript_round_trips(tmp_path):
+    audio_path = tmp_path / "meet1.ogg"
+    transcript = _transcript_at(tmp_path)
+
+    record_transcript(audio_path, transcript)
+
+    assert read_transcript(audio_path) == transcript
+
+
+def test_record_transcript_keeps_the_model_already_in_the_job_file(tmp_path):
+    # the model choice and the transcript pointer share one file; writing either
+    # one must not erase the other
+    write_job(tmp_path, "meet1", "claude-sonnet-5")
+    audio_path = tmp_path / "meet1.ogg"
+
+    record_transcript(audio_path, _transcript_at(tmp_path))
+
+    assert read_model(audio_path) == "claude-sonnet-5"
+
+
+def test_record_transcript_creates_the_job_file_when_there_is_none(tmp_path):
+    # a file dropped into inbox/ by hand never had a job file written for it
+    audio_path = tmp_path / "meet1.ogg"
+
+    record_transcript(audio_path, _transcript_at(tmp_path))
+
+    assert read_transcript(audio_path) is not None
+    assert read_model(audio_path) is None
+
+
+def test_read_transcript_returns_none_when_there_is_no_job_file(tmp_path):
+    assert read_transcript(tmp_path / "meet1.ogg") is None
+
+
+def test_read_transcript_returns_none_when_the_transcript_was_deleted(tmp_path):
+    # the pointer outlives the file it points at, so existence has to be checked
+    audio_path = tmp_path / "meet1.ogg"
+    transcript = _transcript_at(tmp_path)
+    record_transcript(audio_path, transcript)
+    transcript.unlink()
+
+    assert read_transcript(audio_path) is None
+
+
+def test_read_transcript_returns_none_when_the_value_is_not_a_string(tmp_path):
+    audio_path = tmp_path / "meet1.ogg"
+    job_path_for(audio_path).write_text('{"transcript_path": 42}', encoding="utf-8")
+
+    assert read_transcript(audio_path) is None

@@ -23,27 +23,64 @@ def write_job(inbox_dir: Path, stem: str, claude_model: str) -> Path:
     return path
 
 
-def read_model(audio_path: Path) -> str | None:
-    """The model chosen for this recording, or None to fall back to the config default."""
+def _load(audio_path: Path) -> dict:
+    """The job file's contents, or {} when it is missing, unreadable, or not an object.
+
+    Every field in here is an optimisation -- which model to summarize with, where
+    an earlier run left the transcript. Losing one costs a re-run of work that is
+    cheap next to the recording itself, so a few unreadable bytes must never fail
+    the run; the callers fall back to their defaults instead.
+    """
     path = job_path_for(audio_path)
     if not path.exists():
-        return None
+        return {}
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
-        # Guard against JSON that is not an object (null, arrays, primitives)
-        if not isinstance(parsed, dict):
-            return None
-        model = parsed.get("claude_model")
-        # Guard against non-string values to honor the return type annotation
-        if isinstance(model, str):
-            return model
-        return None
     except (OSError, ValueError) as e:
-        # By the time this is read, the transcript already exists -- a full GPU
-        # pass over the recording. Failing the run over a few unreadable bytes is
-        # never the right trade, so fall back to the configured default instead.
         logger.warning("Ignoring unreadable job file %s: %s", path.name, e)
+        return {}
+    # Guard against JSON that is not an object (null, arrays, primitives)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def read_model(audio_path: Path) -> str | None:
+    """The model chosen for this recording, or None to fall back to the config default."""
+    model = _load(audio_path).get("claude_model")
+    # Guard against non-string values to honor the return type annotation
+    return model if isinstance(model, str) else None
+
+
+def record_transcript(audio_path: Path, transcript_path: Path) -> None:
+    """Remember where this recording's transcript was written.
+
+    Read back by a later run so that a recording returning from failed/ is
+    summarized against the transcript that already exists rather than being put
+    through the GPU a second time for an identical result.
+    """
+    path = job_path_for(audio_path)
+    data = _load(audio_path)
+    data["transcript_path"] = str(transcript_path)
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError as e:
+        # Forgetting the pointer only costs a re-transcription on the next
+        # attempt; the summary this run is about to produce is unaffected.
+        logger.warning("Could not record the transcript path in %s: %s", path.name, e)
+
+
+def read_transcript(audio_path: Path) -> Path | None:
+    """The transcript an earlier run saved for this recording, if it is still there.
+
+    The pointer outlives the file it names -- meetings/ is the user's folder and
+    they may have moved or deleted it -- so the file is checked, not just the path.
+    """
+    value = _load(audio_path).get("transcript_path")
+    if not isinstance(value, str):
         return None
+    path = Path(value)
+    return path if path.is_file() else None
 
 
 def discard_job(audio_path: Path) -> None:

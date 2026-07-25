@@ -6,7 +6,7 @@ from typing import Any
 from src.audio_convert import convert_to_wav
 from src.config import Config
 from src.diarize import diarize_audio
-from src.job import discard_job, read_model
+from src.job import discard_job, read_model, read_transcript, record_transcript
 from src.merge import merge_transcript_and_speakers
 from src.render import render_transcript_markdown
 from src.retry import retry_with_backoff
@@ -23,6 +23,36 @@ from src.transcribe import transcribe_audio
 logger = logging.getLogger(__name__)
 
 
+def _reuse_saved_transcript(audio_path: Path) -> tuple[Path, Path, str] | None:
+    """(meeting dir, transcript path, transcript) left by an earlier run, or None.
+
+    A recording only comes back through here after a run that got as far as saving
+    the transcript and then failed -- almost always at the summary. Transcribing it
+    again would spend another full GPU pass to reproduce a file that is already on
+    disk, byte for byte. Anything unexpected returns None and the caller does the
+    whole pipeline, which is exactly the old behaviour.
+    """
+    transcript_path = read_transcript(audio_path)
+    if transcript_path is None:
+        return None
+    try:
+        transcript_markdown = transcript_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning(
+            "Cannot read the saved transcript %s, transcribing again: %s",
+            transcript_path,
+            e,
+        )
+        return None
+    if not transcript_markdown.strip():
+        logger.warning(
+            "The saved transcript %s is empty, transcribing again", transcript_path
+        )
+        return None
+    logger.info("Reusing the transcript from an earlier run: %s", transcript_path)
+    return transcript_path.parent, transcript_path, transcript_markdown
+
+
 def process_file(
     audio_path: Path,
     config: Config,
@@ -32,6 +62,18 @@ def process_file(
     # The recorder wrote this next to the audio; the watcher's own config was read
     # once at startup and cannot know what this meeting asked for.
     claude_model = read_model(audio_path) or config.claude_model
+
+    reused = _reuse_saved_transcript(audio_path)
+    if reused is not None:
+        meeting_dir, transcript_path, transcript_markdown = reused
+        return _summarize_and_store(
+            audio_path,
+            config,
+            claude_model,
+            meeting_dir,
+            transcript_path,
+            transcript_markdown,
+        )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
@@ -81,6 +123,31 @@ def process_file(
         move_to_failed(audio_path, config.failed_dir, f"Save failed: {e}")
         raise
 
+    # Saving it is not enough to reuse it: a retry has to be able to find it. The
+    # folder name cannot be recomputed for a named recording, whose date comes
+    # from the day the folder was made rather than from the file, so the path is
+    # written down next to the audio and travels with it into failed/.
+    record_transcript(audio_path, transcript_path)
+
+    return _summarize_and_store(
+        audio_path,
+        config,
+        claude_model,
+        meeting_dir,
+        transcript_path,
+        transcript_markdown,
+    )
+
+
+def _summarize_and_store(
+    audio_path: Path,
+    config: Config,
+    claude_model: str,
+    meeting_dir: Path,
+    transcript_path: Path,
+    transcript_markdown: str,
+) -> Path:
+    """The half of the pipeline that runs whether or not the transcript is new."""
     # No retry here on purpose: summarize_transcript retries every API call it
     # makes, per chunk. Wrapping it again would re-run a whole map-reduce
     # (8 chunks, ~27 calls) because of one permanently failing chunk.
