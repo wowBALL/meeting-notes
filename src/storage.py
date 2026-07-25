@@ -1,15 +1,36 @@
+import re
 import shutil
 from datetime import date
 from pathlib import Path
+
+# Stems produced by record.build_output_filename:
+#   named:   "<topic>-HH-MM-SS"
+#   unnamed: "YYYY-MM-DD_HH-MM-SS"
+# A ':' is illegal in a Windows path, so the requested HH:MM separator between
+# hour and minute is written as HH-MM.
+_UNNAMED_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-\d{2}$")
+_NAMED_RE = re.compile(r"^(?P<topic>.+)-(\d{2})-(\d{2})-\d{2}$")
+
+
+def meeting_folder_name(stem: str, today: date) -> str:
+    """Build 'YYYY-MM-DD_HH-MM-<topic>' from a recording's file stem."""
+    unnamed = _UNNAMED_RE.match(stem)
+    if unnamed:
+        day, hh, mm = unnamed.groups()
+        return f"{day}_{hh}-{mm}"
+    named = _NAMED_RE.match(stem)
+    if named:
+        return f"{today.isoformat()}_{named.group(2)}-{named.group(3)}-{named.group('topic')}"
+    # A file the user dropped into inbox/ themselves carries no recorder
+    # timestamp to parse, so keep the whole name and just date-stamp it.
+    return f"{today.isoformat()}_{stem}"
 
 
 def create_meeting_folder(
     audio_path: Path, meetings_dir: Path, today: date | None = None
 ) -> Path:
     today = today or date.today()
-    slug = audio_path.stem
-    folder_name = f"{today.isoformat()}-{slug}"
-    meeting_dir = meetings_dir / folder_name
+    meeting_dir = meetings_dir / meeting_folder_name(audio_path.stem, today)
     meeting_dir.mkdir(parents=True, exist_ok=True)
     return meeting_dir
 

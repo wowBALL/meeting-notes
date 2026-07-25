@@ -48,7 +48,7 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
     ):
         meeting_dir = process_file(audio_path, config)
 
-    expected_dir = config.meetings_dir / f"{date.today().isoformat()}-weekly-standup"
+    expected_dir = config.meetings_dir / f"{date.today().isoformat()}_weekly-standup"
     assert meeting_dir == expected_dir
     assert (meeting_dir / "transcript.md").exists()
     assert (meeting_dir / "summary.md").read_text(encoding="utf-8") == "## ประเด็นสำคัญ\n- ทดสอบ"
@@ -173,7 +173,7 @@ def test_process_file_keeps_the_transcript_when_summarization_fails(tmp_path):
     # the transcript costs a GPU pass over the whole recording; a failed summary
     # must never be what throws it away
     transcript_path = (
-        config.meetings_dir / f"{date.today().isoformat()}-broken" / "transcript.md"
+        config.meetings_dir / f"{date.today().isoformat()}_broken" / "transcript.md"
     )
     assert "สวัสดีครับ" in transcript_path.read_text(encoding="utf-8")
     assert (config.failed_dir / "broken.mp3").exists()
