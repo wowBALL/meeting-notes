@@ -63,6 +63,23 @@ REDUCE_SYSTEM_PROMPT = """ข้อความที่ให้มาคือ
 ถ้าพอเดาชื่อจริงของผู้พูดได้จากบริบท ให้ใช้ชื่อจริงแทน label "ผู้พูด N" เก็บเนื้อหาสำคัญให้ครบ อย่าตัดทิ้งเพียงเพราะอยากให้สั้น"""
 
 
+# ชุดเดียวกับที่ Anthropic SDK ถือว่าลองใหม่ได้: ต่อไม่ติด, 408, 409, 429 และ 5xx
+_RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
+
+
+def is_retryable(error: Exception) -> bool:
+    """เรียกซ้ำแล้วมีโอกาสได้คำตอบต่างจากเดิมไหม
+
+    4xx ที่เหลือเป็นคำตอบเรื่องคำขอหรือบัญชี -- key หมดอายุ เครดิตไม่พอ โมเดลผิด
+    คำขอใหญ่เกิน ยิงซ้ำอีกกี่ครั้งก็ได้คำตอบเดิม เสียแค่เวลารอกับโควตา ไม่มี status_code
+    แปลว่าไปไม่ถึง API (เน็ตหลุด หมดเวลา) ซึ่งเป็นอาการที่หายเองได้
+    """
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        return True
+    return status_code in _RETRYABLE_STATUS_CODES or status_code >= 500
+
+
 def _summarize(client, model: str, system: str, content: str, max_tokens: int) -> str:
     response = client.messages.create(
         model=model,
@@ -104,7 +121,8 @@ def _summarize_chunk(
             retry_with_backoff(
                 lambda: _summarize(
                     client, model, CHUNK_SYSTEM_PROMPT, chunk["text"], MAP_MAX_OUTPUT_TOKENS
-                )
+                ),
+                should_retry=is_retryable,
             )
         )
     except Exception as e:
@@ -140,7 +158,8 @@ def summarize_transcript(
                 SUMMARY_SYSTEM_PROMPT,
                 transcript_markdown,
                 MAP_MAX_OUTPUT_TOKENS,
-            )
+            ),
+            should_retry=is_retryable,
         )
 
     if estimate_tokens(transcript_markdown) <= SINGLE_CALL_THRESHOLD_TOKENS:
@@ -186,7 +205,8 @@ def summarize_transcript(
         retry_with_backoff(
             lambda: _summarize(
                 client, model, REDUCE_SYSTEM_PROMPT, combined, REDUCE_MAX_OUTPUT_TOKENS
-            )
+            ),
+            should_retry=is_retryable,
         ),
         floor=2,
     )

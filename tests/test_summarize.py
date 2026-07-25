@@ -11,8 +11,17 @@ from src.summarize import (
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
     SUMMARY_SYSTEM_PROMPT,
+    is_retryable,
     summarize_transcript,
 )
+
+
+class FakeAPIError(Exception):
+    """รูปร่างเดียวกับ anthropic.APIStatusError: exception ที่พก .status_code มาด้วย"""
+
+    def __init__(self, status_code: int):
+        super().__init__(f"Error code: {status_code}")
+        self.status_code = status_code
 
 
 def _response(text: str, stop_reason: str = "end_turn"):
@@ -399,3 +408,64 @@ def test_over_threshold_transcript_with_no_parseable_segments_falls_back_to_sing
     assert client.messages.create.call_count == 1
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["system"] == SUMMARY_SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("status_code", [408, 409, 429, 500, 529])
+def test_is_retryable_accepts_failures_that_can_clear_on_their_own(status_code):
+    assert is_retryable(FakeAPIError(status_code)) is True
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 413])
+def test_is_retryable_rejects_failures_that_answer_the_same_every_time(status_code):
+    assert is_retryable(FakeAPIError(status_code)) is False
+
+
+def test_is_retryable_accepts_an_error_that_never_reached_the_api():
+    # ไม่มี status_code = ต่อไม่ติด / หมดเวลา ซึ่งเป็นอาการที่หายเองได้
+    assert is_retryable(OSError("connection reset by peer")) is True
+
+
+def test_single_call_stops_after_one_attempt_when_the_key_is_rejected():
+    client = MagicMock()
+    client.messages.create.side_effect = FakeAPIError(401)
+
+    with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
+        with pytest.raises(FakeAPIError):
+            summarize_transcript("**ผู้พูด 1** [00:00]: สวัสดี", api_key="test-key")
+
+    assert client.messages.create.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+def test_map_stage_sends_one_request_per_chunk_when_credit_runs_out():
+    # เดิมเครดิตหมดในประชุมยาวทำให้ยิงไป 3 เท่าของจำนวน chunk ทั้งที่รู้คำตอบตั้งแต่ครั้งแรก
+    transcript = _long_transcript(100)
+    client = MagicMock()
+    client.messages.create.side_effect = FakeAPIError(400)
+
+    with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
+        with pytest.raises(RuntimeError, match="Every one of the"):
+            summarize_transcript(transcript, api_key="test-key")
+
+    assert client.messages.create.call_count == _expected_chunk_count(transcript)
+    mock_sleep.assert_not_called()
+
+
+def test_reduce_stage_stops_after_one_attempt_when_the_key_is_rejected():
+    # chunk ผ่านหมดแต่ reduce โดนปฏิเสธ -- เป็นคนละ call site กับ map จึงต้องมีเทสของตัวเอง
+    transcript = _long_transcript(100)
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            raise FakeAPIError(401)
+        return _response("สรุปช่วงนี้")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
+        with pytest.raises(FakeAPIError):
+            summarize_transcript(transcript, api_key="test-key")
+
+    assert client.messages.create.call_count == _expected_chunk_count(transcript) + 1
+    mock_sleep.assert_not_called()
