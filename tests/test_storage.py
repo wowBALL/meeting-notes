@@ -1,5 +1,6 @@
 from datetime import date
 
+from src.job import JOB_SUFFIX, read_model, write_job
 from src.storage import (
     archive_audio,
     create_meeting_folder,
@@ -94,3 +95,30 @@ def test_move_to_failed_moves_file_and_writes_error_log(tmp_path):
     assert not audio_path.exists()
     error_log = failed_dir / "broken.error.log"
     assert error_log.read_text(encoding="utf-8") == "Transcription failed: network error"
+
+
+def test_move_to_failed_takes_the_job_file_along(tmp_path):
+    # the next attempt must summarize with the model the user actually picked
+    failed_dir = tmp_path / "failed"
+    inbox_dir = tmp_path / "inbox"
+    inbox_dir.mkdir()
+    audio_path = inbox_dir / "broken.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(inbox_dir, "broken", "claude-sonnet-5")
+
+    move_to_failed(audio_path, failed_dir, "Summarization failed: boom")
+
+    assert not (inbox_dir / f"broken{JOB_SUFFIX}").exists()
+    assert read_model(failed_dir / "broken.mp3") == "claude-sonnet-5"
+
+
+def test_move_to_failed_works_when_there_is_no_job_file(tmp_path):
+    failed_dir = tmp_path / "failed"
+    inbox_dir = tmp_path / "inbox"
+    inbox_dir.mkdir()
+    audio_path = inbox_dir / "dropped.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    destination = move_to_failed(audio_path, failed_dir, "Transcription failed: boom")
+
+    assert destination.exists()

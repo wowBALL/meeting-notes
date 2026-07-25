@@ -3,6 +3,8 @@ import shutil
 from datetime import date
 from pathlib import Path
 
+from src.job import move_job
+
 # Stems produced by record.build_output_filename:
 #   named:   "<topic>-HH-MM-SS"
 #   unnamed: "YYYY-MM-DD_HH-MM-SS"
@@ -62,4 +64,9 @@ def move_to_failed(audio_path: Path, failed_dir: Path, error_message: str) -> Pa
     shutil.move(str(audio_path), str(destination))
     error_log = failed_dir / f"{audio_path.stem}.error.log"
     error_log.write_text(error_message, encoding="utf-8")
+    # The job file follows the recording so a later retry summarizes with the
+    # model the user actually picked. Handled here rather than at each of
+    # process_file's six failure branches, where a seventh would eventually
+    # forget it.
+    move_job(audio_path, failed_dir)
     return destination

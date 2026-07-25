@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.config import Config
+from src.job import JOB_SUFFIX, read_model, write_job
 from src.pipeline import process_file
 
 
@@ -339,3 +340,115 @@ def test_process_file_threads_whisper_model_to_transcribe_audio(tmp_path):
 
     assert mock_transcribe.call_args.kwargs["model"] is sentinel_model
     assert mock_transcribe.call_args.kwargs["model_size"] == config.whisper_model
+
+
+def test_process_file_uses_the_model_from_the_job_file(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(config.inbox_dir, "weekly-standup", "claude-sonnet-5")
+    summarize = MagicMock(return_value="## สรุป")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", summarize),
+    ):
+        process_file(audio_path, config)
+
+    assert summarize.call_args.kwargs["model"] == "claude-sonnet-5"
+
+
+def test_process_file_falls_back_to_the_config_model_without_a_job_file(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "dropped.mp3"
+    audio_path.write_bytes(b"fake audio")
+    summarize = MagicMock(return_value="## สรุป")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", summarize),
+    ):
+        process_file(audio_path, config)
+
+    assert summarize.call_args.kwargs["model"] == config.claude_model
+
+
+def test_process_file_falls_back_when_the_job_file_is_corrupt(tmp_path):
+    # the transcript costs a full GPU pass -- unreadable job bytes must not
+    # throw that away
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    (config.inbox_dir / f"weekly-standup{JOB_SUFFIX}").write_text("{oops", encoding="utf-8")
+    summarize = MagicMock(return_value="## สรุป")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", summarize),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    assert summarize.call_args.kwargs["model"] == config.claude_model
+    assert (meeting_dir / "summary.md").exists()
+
+
+def test_process_file_removes_the_job_file_when_it_succeeds(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(config.inbox_dir, "weekly-standup", "claude-sonnet-5")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    assert not (config.inbox_dir / f"weekly-standup{JOB_SUFFIX}").exists()
+
+
+def test_process_file_sends_the_job_file_to_failed_when_summarizing_fails(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(config.inbox_dir, "weekly-standup", "claude-sonnet-5")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError),
+    ):
+        process_file(audio_path, config)
+
+    assert not (config.inbox_dir / f"weekly-standup{JOB_SUFFIX}").exists()
+    assert read_model(config.failed_dir / "weekly-standup.mp3") == "claude-sonnet-5"
