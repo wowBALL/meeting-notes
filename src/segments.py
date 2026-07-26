@@ -1,10 +1,15 @@
 import json
+import logging
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 from src.job import write_job
+from src.retry import retry_with_backoff
+
+logger = logging.getLogger(__name__)
 
 # A session directory lives inside inbox/ so the finished file can be moved with a
 # same-volume os.replace(). watcher.scan_inbox() only looks at files, so a directory
@@ -12,6 +17,15 @@ from src.job import write_job
 SESSION_PREFIX = ".session-"
 MANIFEST_NAME = "session.json"
 OPUS_BITRATE = "48k"
+
+# Something outside this process opens each freshly written part file the moment
+# ffmpeg is done with it and holds it for around a second (measured 2026-07-26:
+# WinError 32, released after ~900 ms). One immediate delete attempt therefore
+# lost that race on every real recording. Four attempts at 0.5s doubling waits
+# out ~3.5s, which covers the observed delay with room to spare while still
+# bounding how long the user waits at the console after a meeting.
+CLEANUP_ATTEMPTS = 4
+CLEANUP_BASE_DELAY = 0.5
 
 # A libsndfile WAV header is well under this; anything larger holds real samples.
 # A part left behind by a killed process still has its audio on disk even though
@@ -125,11 +139,15 @@ def sweep_unrecoverable_sessions(inbox_dir: Path) -> list[Path]:
     """Delete session directories that can never be finished.
 
     A session directory without a manifest is either debris from a cleanup whose
-    part file was transiently locked (Explorer preview / AV scan -- observed on
-    every real recording of 2026-07-24), or a crash inside the instant between
-    mkdir and the first manifest write. finish_session cannot run without the
-    manifest, so these can only accumulate; sweep them at startup. A directory
-    whose files are still locked simply survives until the next sweep.
+    part file stayed locked for longer than finish_session was willing to retry,
+    or a crash inside the instant between mkdir and the first manifest write.
+    finish_session cannot run without the manifest, so these can only accumulate;
+    sweep them at startup. A directory whose files are still locked simply
+    survives until the next sweep.
+
+    Until 2026-07-26 this ran on every single recording, because the cleanup made
+    one delete attempt into a lock that takes about a second to clear. It is a
+    genuine last resort again now that finish_session waits that lock out.
     """
     if not inbox_dir.exists():
         return []
@@ -222,12 +240,30 @@ def finish_session(
     # a duplicate meeting. (A .json is also far less likely to be lock-scanned
     # than a fresh media file.)
     for name in [MANIFEST_NAME, "concat.txt", *parts]:
-        try:
-            (session_dir / name).unlink()
-        except OSError:
-            pass
-    try:
-        shutil.rmtree(session_dir)
-    except OSError:
-        pass
+        _remove_with_retry(lambda p=session_dir / name: p.unlink(missing_ok=True), name)
+    _remove_with_retry(lambda: shutil.rmtree(session_dir), session_dir.name)
     return destination
+
+
+def _remove_with_retry(remove: Callable[[], None], target: str) -> None:
+    """Delete something a scanner may still be holding, without ever failing the run.
+
+    Nothing here may raise: by this point the encode and the move have succeeded and
+    the user's audio is already safe in inbox/, so a deletion that cannot happen must
+    not turn a finished recording into an error. What it must NOT do is stay quiet
+    about it -- the previous single attempt swallowed the failure, so leftovers piled
+    up in inbox/ from 2026-07-24 with nothing anywhere saying why. Whatever survives
+    is cleared by sweep_unrecoverable_sessions on the next startup.
+    """
+    try:
+        retry_with_backoff(
+            remove, max_retries=CLEANUP_ATTEMPTS, base_delay=CLEANUP_BASE_DELAY
+        )
+    except OSError as e:
+        logger.warning(
+            "Could not remove %s after %d attempts, leaving it for the next startup "
+            "sweep: %s",
+            target,
+            CLEANUP_ATTEMPTS,
+            e,
+        )

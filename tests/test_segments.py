@@ -249,6 +249,7 @@ def test_finish_session_leaves_nothing_recoverable_when_cleanup_fails(tmp_path):
     with (
         patch("src.segments.subprocess.run", side_effect=fake_run),
         patch("src.segments.shutil.rmtree", side_effect=OSError("file in use")),
+        patch("time.sleep"),  # cleanup now backs off between attempts
     ):
         destination = finish_session(session_dir, inbox)
 
@@ -306,7 +307,10 @@ def test_finish_session_survives_a_genuinely_locked_part_file(tmp_path):
         return subprocess.CompletedProcess(command, 0)
 
     with open(session_dir / part_filename(1), "rb"):  # the Explorer/AV lock
-        with patch("src.segments.subprocess.run", side_effect=fake_run):
+        with (
+            patch("src.segments.subprocess.run", side_effect=fake_run),
+            patch("time.sleep"),  # cleanup now backs off between attempts
+        ):
             destination = finish_session(session_dir, inbox)
 
         assert destination.read_bytes() == b"fake opus"
@@ -315,6 +319,73 @@ def test_finish_session_survives_a_genuinely_locked_part_file(tmp_path):
         assert (session_dir / part_filename(1)).exists()
         assert not (session_dir / MANIFEST_NAME).exists()
         assert find_orphan_sessions(inbox) == []
+
+
+def test_finish_session_retries_a_part_file_held_by_a_scanner(tmp_path):
+    # Measured on this machine 2026-07-26: after ffmpeg reads the fresh part file,
+    # something outside our process holds it open and releases it ~900 ms later
+    # (WinError 32). A single delete attempt loses that race on EVERY real
+    # recording, which is why inbox/ kept filling with multi-hundred-MB leftovers.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1)
+    part = session_dir / part_filename(1)
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    real_unlink = Path.unlink
+    attempts = {"count": 0}
+
+    def flaky_unlink(self, *args, **kwargs):
+        if self == part and attempts["count"] < 2:
+            attempts["count"] += 1
+            raise OSError(32, "The process cannot access the file because it is being used by another process")
+        return real_unlink(self, *args, **kwargs)
+
+    with (
+        patch("src.segments.subprocess.run", side_effect=fake_run),
+        patch.object(Path, "unlink", flaky_unlink),
+        patch("time.sleep"),
+    ):
+        destination = finish_session(session_dir, inbox)
+
+    assert destination == inbox / "meet1.ogg"
+    assert attempts["count"] == 2
+    # the whole point: the leftover that the old code left behind is gone
+    assert not session_dir.exists()
+
+
+def test_finish_session_reports_a_part_file_it_could_never_delete(tmp_path, caplog):
+    # A holder that never lets go must still not fail the run -- the recording is
+    # already safe in inbox/ by now. But it must stop being SILENT: the swallowed
+    # error is the reason this went unexplained from 2026-07-24 to 2026-07-26.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1)
+    part = session_dir / part_filename(1)
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    # a REAL open handle, not a patched unlink: rmtree goes through os.unlink and
+    # would sail past a patch on Path.unlink, so only a genuine lock makes both
+    # the unlink and the rmtree fail the way they do on Windows
+    with (
+        open(part, "rb"),
+        patch("src.segments.subprocess.run", side_effect=fake_run),
+        patch("time.sleep"),
+        caplog.at_level("WARNING"),
+    ):
+        destination = finish_session(session_dir, inbox)
+
+    assert destination.read_bytes() == b"fake opus"
+    assert part.exists()
+    assert "part0001.wav" in caplog.text
+    # and it still must not look recoverable, or the next startup re-encodes it
+    assert find_orphan_sessions(inbox) == []
 
 
 def test_finish_session_encodes_moves_and_cleans_up(tmp_path):
