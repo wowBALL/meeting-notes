@@ -60,17 +60,28 @@ echo.
 echo เลือกโมเดลสรุป:
 echo   [1] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
 echo   [2] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
-rem Anything that is not "2" lands on Opus 5, so a typo cannot reach Python as an
-rem invalid model id. set /p rather than choice: choice takes a single keypress
-rem and ignores Enter, and pressing Enter for the default is the point here.
+echo   [3] ถอดเสียงอย่างเดียว - ไม่สรุป (ไม่เสียเงิน)
+rem Anything that is not "2" or "3" lands on Opus 5, so a typo cannot reach Python
+rem as an invalid model id. set /p rather than choice: choice takes a single
+rem keypress and ignores Enter, and pressing Enter for the default is the point here.
 set "MODEL_CHOICE=1"
-set /p MODEL_CHOICE=เลือก [1/2] (Enter=1):
+set /p MODEL_CHOICE=เลือก [1/2/3] (Enter=1):
 if "%MODEL_CHOICE%"=="2" (
     set "MODEL_ID=claude-sonnet-5"
+) else if "%MODEL_CHOICE%"=="3" (
+    rem Must stay byte-identical to job.NO_SUMMARY_MODEL: the pipeline decides
+    rem whether to skip summarizing by comparing against this exact string.
+    set "MODEL_ID=transcript-only"
 ) else (
     set "MODEL_ID=claude-opus-5"
 )
-echo ใช้โมเดล: %MODEL_ID%
+rem "ใช้โมเดล: transcript-only" would name a model that does not exist, so the
+rem confirmation line follows the mode rather than the value.
+if "%MODEL_ID%"=="transcript-only" (
+    echo โหมด: ถอดเสียงอย่างเดียว ไม่ส่งสรุป
+) else (
+    echo ใช้โมเดล: %MODEL_ID%
+)
 
 echo.
 set /p MEETING_NAME=Meeting name (optional, press Enter to skip):
