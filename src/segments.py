@@ -18,12 +18,18 @@ SESSION_PREFIX = ".session-"
 MANIFEST_NAME = "session.json"
 OPUS_BITRATE = "48k"
 
-# Something outside this process opens each freshly written part file the moment
-# ffmpeg is done with it and holds it for around a second (measured 2026-07-26:
-# WinError 32, released after ~900 ms). One immediate delete attempt therefore
-# lost that race on every real recording. Four attempts at 0.5s doubling waits
-# out ~3.5s, which covers the observed delay with room to spare while still
-# bounding how long the user waits at the console after a meeting.
+# Something outside this process opens each freshly written part file and holds it
+# briefly (WinError 32). One immediate delete attempt lost that race on every real
+# recording. Measured 2026-07-26 across recording lengths:
+#
+#     10s -> 1.5s     20s -> 1.5s     45s -> 0.5s     180s -> no lock at all
+#
+# SHORT recordings are the bad case, not long ones: the holder starts when the part
+# is closed and runs while ffmpeg encodes, so a long recording takes long enough to
+# encode that the holder is finished before we ever try to delete. Part size is
+# capped at 330 MB by rotation (record.ROTATE_SECONDS) and does not make this worse.
+# Four attempts at 0.5s doubling gives up at 3.5s -- one whole attempt past the
+# worst case seen -- while bounding how long the user waits at the console.
 CLEANUP_ATTEMPTS = 4
 CLEANUP_BASE_DELAY = 0.5
 
