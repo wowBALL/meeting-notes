@@ -6,7 +6,13 @@ from typing import Any
 from src.audio_convert import convert_to_wav
 from src.config import Config
 from src.diarize import diarize_audio
-from src.job import discard_job, read_model, read_transcript, record_transcript
+from src.job import (
+    NO_SUMMARY_MODEL,
+    discard_job,
+    read_model,
+    read_transcript,
+    record_transcript,
+)
 from src.merge import merge_transcript_and_speakers
 from src.render import render_transcript_markdown
 from src.retry import retry_with_backoff
@@ -66,7 +72,7 @@ def process_file(
     reused = _reuse_saved_transcript(audio_path)
     if reused is not None:
         meeting_dir, transcript_path, transcript_markdown = reused
-        return _summarize_and_store(
+        return _finish_meeting(
             audio_path,
             config,
             claude_model,
@@ -129,7 +135,7 @@ def process_file(
     # written down next to the audio and travels with it into failed/.
     record_transcript(audio_path, transcript_path)
 
-    return _summarize_and_store(
+    return _finish_meeting(
         audio_path,
         config,
         claude_model,
@@ -139,7 +145,7 @@ def process_file(
     )
 
 
-def _summarize_and_store(
+def _finish_meeting(
     audio_path: Path,
     config: Config,
     claude_model: str,
@@ -151,20 +157,27 @@ def _summarize_and_store(
     # No retry here on purpose: summarize_transcript retries every API call it
     # makes, per chunk. Wrapping it again would re-run a whole map-reduce
     # (8 chunks, ~27 calls) because of one permanently failing chunk.
-    try:
-        summary_markdown = summarize_transcript(
-            transcript_markdown, model=claude_model, api_key=config.anthropic_api_key
-        )
-    except Exception as e:
-        move_to_failed(
-            audio_path,
-            config.failed_dir,
-            f"Summarization failed: {e}\nTranscript was saved to {transcript_path}",
-        )
-        raise
+    summary_markdown = None
+    if claude_model != NO_SUMMARY_MODEL:
+        try:
+            summary_markdown = summarize_transcript(
+                transcript_markdown, model=claude_model, api_key=config.anthropic_api_key
+            )
+        except Exception as e:
+            move_to_failed(
+                audio_path,
+                config.failed_dir,
+                f"Summarization failed: {e}\nTranscript was saved to {transcript_path}",
+            )
+            raise
 
     try:
-        save_summary(meeting_dir, summary_markdown, claude_model)
+        # save_summary stamps the model name into the file's footer, so calling it
+        # in transcript-only mode would write "สรุปด้วย transcript-only" under a
+        # summary nobody asked for. Everything else below still runs: the meeting
+        # is finished, just without that one file.
+        if summary_markdown is not None:
+            save_summary(meeting_dir, summary_markdown, claude_model)
         archive_audio(meeting_dir, audio_path)
         discard_job(audio_path)
     except Exception as e:

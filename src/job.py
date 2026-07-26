@@ -9,6 +9,14 @@ logger = logging.getLogger(__name__)
 # never be mistaken for a recording waiting to be processed.
 JOB_SUFFIX = ".job.json"
 
+# The value start-meeting.bat sends for menu option [3]. It rides the same
+# claude_model field as a real model id, so no hop between the recorder and the
+# pipeline has to learn about it -- only the one place that resolves the value
+# compares against it. Spelled as a mode rather than "none" so a session.json
+# read while debugging says what it is instead of looking like a field somebody
+# forgot to set.
+NO_SUMMARY_MODEL = "transcript-only"
+
 
 def job_path_for(audio_path: Path) -> Path:
     return audio_path.with_name(f"{audio_path.stem}{JOB_SUFFIX}")

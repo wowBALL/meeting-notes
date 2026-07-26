@@ -9,6 +9,7 @@ import pytest
 import soundfile as sf
 
 import src.record as record
+from src.job import NO_SUMMARY_MODEL
 from src.record import to_mono, mix_recordings, build_output_filename, parse_args
 
 
@@ -483,6 +484,12 @@ def test_parse_args_allows_a_model_with_no_name():
 
 def test_parse_args_defaults_both_to_none():
     assert parse_args([]) == (None, None)
+
+
+def test_parse_args_passes_the_transcript_only_sentinel_through_untouched():
+    # ตัวอัดไม่ควรรู้จักโหมดนี้เลย -- มันแค่ส่งต่อสิ่งที่ .bat ให้มา เทสต์นี้จับกรณี
+    # ที่มีคนเผลอไปเพิ่ม validation ชื่อโมเดลใน record แล้วโหมดนี้ตายเงียบ
+    assert parse_args(["--model", NO_SUMMARY_MODEL]) == (None, NO_SUMMARY_MODEL)
 
 
 def test_parse_args_treats_an_empty_name_as_no_name():
