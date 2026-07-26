@@ -721,3 +721,28 @@ def test_transcript_only_survives_from_the_manifest_to_the_meeting_folder(tmp_pa
     assert (meeting_dir / "transcript.md").exists()
     assert not (meeting_dir / "summary.md").exists()
     assert not (inbox / f"weekly-standup{JOB_SUFFIX}").exists()
+
+
+def test_transcript_only_can_come_from_the_config_default(tmp_path):
+    # README บอกว่าตั้ง CLAUDE_MODEL=transcript-only ใน .env แล้วไฟล์ที่ลากใส่
+    # inbox/ เองจะไม่ถูกสรุป -- ได้มาฟรีเพราะเช็คที่ค่าหลัง resolve ไม่ใช่ที่ job file
+    config = make_config(tmp_path)
+    config.claude_model = NO_SUMMARY_MODEL
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "dropped.mp3"
+    audio_path.write_bytes(b"fake audio")
+    summarize = MagicMock(return_value="## สรุป")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", summarize),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    summarize.assert_not_called()
+    assert not (meeting_dir / "summary.md").exists()
