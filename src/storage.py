@@ -1,6 +1,7 @@
 import re
 import shutil
 from datetime import date
+from itertools import count
 from pathlib import Path
 
 from src.job import move_job
@@ -31,10 +32,25 @@ def meeting_folder_name(stem: str, today: date) -> str:
 def create_meeting_folder(
     audio_path: Path, meetings_dir: Path, today: date | None = None
 ) -> Path:
+    """Make a folder of this recording's own, never one another recording owns.
+
+    The name carries no seconds, so two recordings of the same meeting started
+    within one minute ask for the same folder -- and the second one's
+    transcript.md would land on top of the first one's. Adding the seconds back
+    is not the fix: the COWORK Desktop widget parses "<date>_HH-MM-<topic>" and
+    would read a third number as the start of the meeting title. Only the actual
+    collision gets a suffix, which that parser still reads as a title ("test-2").
+    """
     today = today or date.today()
-    meeting_dir = meetings_dir / meeting_folder_name(audio_path.stem, today)
-    meeting_dir.mkdir(parents=True, exist_ok=True)
-    return meeting_dir
+    base = meeting_folder_name(audio_path.stem, today)
+    for attempt in count(1):
+        candidate = meetings_dir / (base if attempt == 1 else f"{base}-{attempt}")
+        try:
+            candidate.mkdir(parents=True)
+        except FileExistsError:
+            continue
+        return candidate
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 # Saved separately because the pipeline writes them at different moments: the
