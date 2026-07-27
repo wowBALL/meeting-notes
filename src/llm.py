@@ -183,10 +183,6 @@ def _openai_compat_completer(
     def complete(system: str, content: str, max_tokens: int) -> Completion:
         api_key = _require_key(key_env, model_id)
         base_url = os.environ.get(base_url_env, "").strip() or default_base_url
-        # เรียกด้วย LLM_TIMEOUT_SECONDS เสมอ -- งานสรุปทั้ง chunk ใช้เวลาได้นาน
-        # ไม่ต้องมี retry ให้ปิดที่นี่ เพราะ urlopen ไม่ retry เองอยู่แล้ว
-        # (retry เป็นหน้าที่ของ is_retryable ใน summarize.py ที่ชั้นเหนือขึ้นไป)
-        request_timeout = LLM_TIMEOUT_SECONDS
         # ensure_ascii=False คือหัวใจ: transcript เป็นภาษาไทยทั้งไฟล์ ถ้า escape เป็น
         # \uXXXX ขนาด payload บวมและ proxy บางตัวส่งต่อเป็น ???? -- ทดสอบไว้แล้วว่า
         # แบบนี้ภาษาไทยกลับมาตรงทุกตัวอักษร
@@ -210,8 +206,11 @@ def _openai_compat_completer(
             },
         )
         try:
+            # งานสรุปทั้ง chunk ใช้เวลาได้นาน จึงเป็น LLM_TIMEOUT_SECONDS เต็ม ๆ
+            # ไม่ต้องปิด retry ที่นี่: urlopen ไม่ retry เองอยู่แล้ว การลองใหม่เป็นหน้าที่
+            # ของ is_retryable ใน summarize.py ที่ชั้นเหนือขึ้นไป
             with urllib.request.urlopen(
-                request, timeout=request_timeout
+                request, timeout=LLM_TIMEOUT_SECONDS
             ) as response:
                 try:
                     raw_body = response.read().decode("utf-8")
