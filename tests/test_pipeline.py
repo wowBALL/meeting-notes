@@ -14,6 +14,7 @@ from src.job import (
     record_transcript,
     write_job,
 )
+from src.llm import UnknownModelError
 from src.pipeline import process_file
 from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, session_dir_for, write_manifest
 
@@ -28,7 +29,6 @@ def make_config(tmp_path: Path) -> Config:
         inbox_dir=tmp_path / "inbox",
         failed_dir=tmp_path / "failed",
         meetings_dir=tmp_path / "meetings",
-        anthropic_api_key="sk-ant-test",
         hf_token="hf-test-token",
         claude_model="claude-opus-4-8",
         whisper_model="small",
@@ -160,6 +160,37 @@ def test_process_file_moves_to_failed_when_summarization_fails(tmp_path):
     assert (config.failed_dir / "broken.mp3").exists()
     error_log = config.failed_dir / "broken.error.log"
     assert "Summarization failed" in error_log.read_text(encoding="utf-8")
+
+
+def test_process_file_moves_to_failed_when_the_configured_model_is_not_registered(tmp_path):
+    """ล็อกพฤติกรรมของ regression ที่พบจาก review: make_config ตั้ง claude_model เป็น
+    "claude-opus-4-8" ซึ่งไม่อยู่ใน src.llm.PROVIDERS -- เดิม CLAUDE_MODEL ถูกส่งตรงเข้า
+    Anthropic API โดยไม่ผ่าน registry นี้เลย ตอนนี้ summarize_transcript เรียกผ่าน
+    resolve() ก่อนเสมอ id ที่ resolve ไม่ได้จึงโยน UnknownModelError กลางท่อ -- หลังถอด
+    เสียงเสร็จไปแล้ว (ขั้นที่แพงที่สุด) ไม่ได้ mock summarize_transcript ในเทสต์นี้โดย
+    ตั้งใจ เพื่อให้ resolve() ตัวจริงทำงาน แต่ resolve() ล้มก่อนมี network call ใด ๆ
+    เกิดขึ้น จึงยังไม่แตะเน็ตเวิร์กจริง"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        pytest.raises(UnknownModelError),
+    ):
+        process_file(audio_path, config)
+
+    assert not audio_path.exists()
+    assert (config.failed_dir / "weekly-standup.mp3").exists()
+    error_log = (config.failed_dir / "weekly-standup.error.log").read_text(encoding="utf-8")
+    assert "Summarization failed" in error_log
+    assert config.claude_model in error_log
 
 
 def test_process_file_keeps_the_transcript_when_summarization_fails(tmp_path):
@@ -398,6 +429,29 @@ def test_process_file_falls_back_to_the_config_model_without_a_job_file(tmp_path
         process_file(audio_path, config)
 
     assert summarize.call_args.kwargs["model"] == config.claude_model
+
+
+def test_summarize_is_called_without_an_api_key(tmp_path):
+    """key เป็นเรื่องของ provider -- pipeline ต้องไม่ส่ง key ของ Anthropic เข้าไปใน
+    เส้นทางที่อาจไปจบที่ provider อื่น"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    summarize = MagicMock(return_value="## สรุป")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", summarize),
+    ):
+        process_file(audio_path, config)
+
+    assert "api_key" not in summarize.call_args.kwargs
 
 
 def test_process_file_falls_back_when_the_job_file_is_corrupt(tmp_path):

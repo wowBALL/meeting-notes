@@ -53,7 +53,7 @@ MESSAGES = {
         "check_mic": "ไมค์",
         "check_loopback": "ลำโพง (คู่สนทนา)",
         "check_samplerate": "sample rate",
-        "check_api": "Claude API key",
+        "check_model": "โมเดลที่ใช้สรุป",
         "peak_silent": "เงียบสนิท",
         "peak_level": "peak {db} dB",
         "passthrough": "{error}",
@@ -72,33 +72,22 @@ MESSAGES = {
             "ออกอุปกรณ์อื่น ให้ตั้ง output ของแอปประชุมให้ตรงกับ default ของ Windows"
         ),
         "samplerate_ok": "ตรงกันที่ {rate} Hz",
-        "api_ok": "ใช้งานได้ปกติ",
-        "api_no_key": (
-            "ไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env -- อัดและถอดเสียงได้ปกติ "
-            "แต่จะไม่ได้สรุปอัตโนมัติ"
+        "model_ok": "รองรับ",
+        "model_transcript_only": (
+            "ตั้งใจปิดการสรุปไว้ (CLAUDE_MODEL={model}) -- อัดและถอดเสียงได้ปกติ "
+            "จะไม่มี summary.md เกิดขึ้น เพราะเป็นโหมดที่เลือกไว้เอง ไม่ใช่การตั้งค่าที่ผิด"
         ),
-        "api_rate_limited": (
-            "key ใช้ได้ (ตอนนี้ชนลิมิตอัตราการเรียก แต่ตอนสรุปมี retry รออยู่แล้ว)"
+        "model_unresolvable": (
+            "ไม่รู้จักโมเดล {model} -- ที่รองรับตอนนี้: {known} -- อัดและถอดเสียงได้ปกติ "
+            "แต่จะสรุปไม่สำเร็จ แก้ CLAUDE_MODEL ใน .env ให้เป็นหนึ่งในรายชื่อนี้"
         ),
-        "api_unauthorized": (
-            "key ใช้ไม่ได้ (401) -- หมดอายุ ถูกเพิกถอน หรือพิมพ์ผิด "
-            "ออก key ใหม่แล้วแก้ ANTHROPIC_API_KEY ใน .env"
-        ),
-        "api_no_credit": (
-            "เครดิตไม่พอ -- เติมที่หน้า Plans & Billing ใน Anthropic Console "
-            "ไม่งั้นประชุมนี้จะได้แค่ transcript"
-        ),
-        "api_model_forbidden": (
-            "key ไม่มีสิทธิ์เรียก {model} (403) -- ตรวจสิทธิ์ของ key หรือแก้ CLAUDE_MODEL"
-        ),
-        "api_probe_failed": "ตรวจไม่สำเร็จ: {error}",
         "mark_ok": "[ ผ่าน ]",
         "mark_warn": "[ เตือน ]",
         "mark_fail": "[ ไม่ผ่าน ]",
         "report_fail": "สรุป: ยังไม่ควรเริ่มอัด -- แก้ข้อที่ไม่ผ่านก่อน",
         "report_warn": "สรุป: พร้อมอัด แต่มีข้อเตือน อ่านให้ครบก่อนเริ่ม",
         "report_ok": "สรุป: พร้อมอัดประชุมได้เลย",
-        "preflight_checking_key": "กำลังตรวจ key ที่จะใช้สรุป ({model}) ...",
+        "preflight_checking_model": "กำลังตรวจว่าโมเดลที่จะใช้สรุปใช้งานได้ไหม ({model}) ...",
         "preflight_checking_audio": (
             "กำลังตรวจเสียง {seconds} วินาที -- พูดใส่ไมค์ และเปิดเสียงอะไรก็ได้ออกลำโพง"
         ),
@@ -152,7 +141,7 @@ MESSAGES = {
         "check_mic": "Microphone",
         "check_loopback": "Speaker (far end)",
         "check_samplerate": "sample rate",
-        "check_api": "Claude API key",
+        "check_model": "Summary model",
         "peak_silent": "completely silent",
         "peak_level": "peak {db} dB",
         "passthrough": "{error}",
@@ -172,34 +161,24 @@ MESSAGES = {
             "match the Windows default"
         ),
         "samplerate_ok": "both at {rate} Hz",
-        "api_ok": "working",
-        "api_no_key": (
-            "ANTHROPIC_API_KEY is not set in .env -- recording and transcription "
-            "still work, but there will be no automatic summary"
+        "model_ok": "supported",
+        "model_transcript_only": (
+            "Summarizing is switched off on purpose (CLAUDE_MODEL={model}) -- "
+            "recording and transcription still work as normal. No summary.md will be "
+            "produced, because this is a deliberate choice, not a broken setting"
         ),
-        "api_rate_limited": (
-            "key works (rate-limited right now, but summarizing already retries)"
+        "model_unresolvable": (
+            "unknown model {model} -- supported right now: {known} -- recording and "
+            "transcription still work, but summarizing will fail. Fix CLAUDE_MODEL in "
+            ".env to one of these"
         ),
-        "api_unauthorized": (
-            "key rejected (401) -- expired, revoked, or mistyped. Issue a new one "
-            "and update ANTHROPIC_API_KEY in .env"
-        ),
-        "api_no_credit": (
-            "not enough credit -- top up under Plans & Billing in the Anthropic "
-            "Console, otherwise this meeting only gets a transcript"
-        ),
-        "api_model_forbidden": (
-            "the key may not call {model} (403) -- check the key's permissions or "
-            "change CLAUDE_MODEL"
-        ),
-        "api_probe_failed": "check failed: {error}",
         "mark_ok": "[ PASS ]",
         "mark_warn": "[ WARN ]",
         "mark_fail": "[ FAIL ]",
         "report_fail": "Verdict: do not start recording yet -- fix what failed first",
         "report_warn": "Verdict: ready to record, but read the warnings first",
         "report_ok": "Verdict: ready to record",
-        "preflight_checking_key": "Checking the key used for summarizing ({model}) ...",
+        "preflight_checking_model": "Checking whether the summary model is usable ({model}) ...",
         "preflight_checking_audio": (
             "Checking audio for {seconds} seconds -- talk into the mic, and play "
             "anything through the speakers"

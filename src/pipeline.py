@@ -135,7 +135,7 @@ def process_file(
     # Written before summarizing: the transcript is the expensive artifact of
     # this pipeline (a full GPU pass over the recording), and summarization is
     # the step most likely to fail. Persisting it first means a failed summary
-    # costs one Claude call to redo, not another transcription.
+    # costs one summarizer call to redo, not another transcription.
     try:
         meeting_dir = create_meeting_folder(audio_path, config.meetings_dir)
         transcript_path = save_transcript(meeting_dir, transcript_markdown)
@@ -171,7 +171,9 @@ def _finish_meeting(
     """The half of the pipeline that runs whether or not the transcript is new."""
     # No retry here on purpose: summarize_transcript retries every API call it
     # makes, per chunk. Wrapping it again would re-run a whole map-reduce
-    # (8 chunks, ~27 calls) because of one permanently failing chunk.
+    # (8 chunks + 1 reduce, up to 54 calls at worst -- see MAP_MAX_CONCURRENCY's
+    # comment in src/summarize.py for how that bound is derived) because of one
+    # permanently failing chunk.
     job = audio_path.stem
     summary_markdown = None
     if claude_model != NO_SUMMARY_MODEL:
@@ -180,7 +182,7 @@ def _finish_meeting(
         )
         try:
             summary_markdown = summarize_transcript(
-                transcript_markdown, model=claude_model, api_key=config.anthropic_api_key
+                transcript_markdown, model=claude_model
             )
         except Exception as e:
             activity.append(

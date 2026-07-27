@@ -1,12 +1,25 @@
+import contextlib
+import inspect
 import logging
+import socket
 import threading
 import time
 from unittest.mock import MagicMock, patch
+from urllib.error import URLError
 
 import pytest
 
 import src.summarize as summarize_module
 from src.chunk import parse_transcript_segments, split_into_chunks
+from src.llm import (
+    CLAUDE_MAP_MAX_TOKENS,
+    CLAUDE_REDUCE_MAX_TOKENS,
+    HttpStatusError,
+    MissingSettingError,
+    Provider,
+    UnusableAnswerError,
+    _anthropic_completer,
+)
 from src.summarize import (
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
@@ -35,13 +48,32 @@ def _response(text: str, stop_reason: str = "end_turn"):
     return response
 
 
+@contextlib.contextmanager
 def _patch_anthropic(client):
-    return patch("anthropic.Anthropic", return_value=client)
+    """patch ทั้ง SDK และ env var เพราะ llm._require_setting อ่าน ANTHROPIC_API_KEY จริง
+
+    เดิมโค้ดรับ api_key มาเป็น argument จึงไม่ต้องมี env ตอนเทส ตอนนี้ key เป็นเรื่อง
+    ของ provider ซึ่งอ่านจาก environment -- ใส่ให้ที่นี่ที่เดียวแทนการเติม 24 ที่
+    """
+    with (
+        patch("anthropic.Anthropic", return_value=client),
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
+    ):
+        yield
 
 
 def _single_response_client(text: str, stop_reason: str = "end_turn"):
     client = MagicMock()
     client.messages.create.return_value = _response(text, stop_reason)
+    return client
+
+
+def _truncating_client(texts_and_reasons):
+    """ตอบตามลำดับที่กำหนด เพื่อ assert ได้ว่าการลองใหม่เกิดขึ้นกี่ครั้งและด้วย budget เท่าไร"""
+    client = MagicMock()
+    client.messages.create.side_effect = [
+        _response(text, reason) for text, reason in texts_and_reasons
+    ]
     return client
 
 
@@ -85,12 +117,44 @@ def _expected_chunk_count(transcript: str) -> int:
     return len(_chunk_texts(transcript))
 
 
+def test_map_budget_comes_from_the_provider_not_a_module_constant():
+    """ค่า budget ต้องเดินทางมาจาก provider ที่ resolve() คืนมาโดยตรง ไม่ใช่จากค่าคงที่
+    ในโมดูลนี้หรือใน llm.py -- แพตช์ resolve() ให้คืน budget ที่ไม่ตรงกับค่าคงที่ตัวไหน
+    ในโค้ดเลย (ไม่ใช่ CLAUDE_MAP_MAX_TOKENS หรือ CLAUDE_REDUCE_MAX_TOKENS) ถ้า max_tokens
+    ที่ไปถึง wire ยังตรงกับค่านี้ แปลว่ามันเดินทางมาจาก provider จริง ไม่ใช่ค่าตายตัวที่
+    บังเอิญเท่ากัน (ก่อนหน้านี้เทสต์เทียบกับ CLAUDE_MAP_MAX_TOKENS ซึ่งบังเอิญเท่ากับค่า
+    module constant เดิมที่ถูกลบไปแล้ว จึงผ่านได้แม้ก่อน refactor และจะผ่านต่อไปแม้มีคน
+    เพิ่ม module constant กลับมาใหม่)"""
+    distinct_map_budget = 1234
+    assert distinct_map_budget not in (CLAUDE_MAP_MAX_TOKENS, CLAUDE_REDUCE_MAX_TOKENS)
+    fake_provider = Provider(
+        model_id="claude-opus-5",
+        map_max_tokens=distinct_map_budget,
+        reduce_max_tokens=distinct_map_budget * 2,
+        complete=_anthropic_completer("claude-opus-5", "ANTHROPIC_API_KEY"),
+    )
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client), patch.object(
+        summarize_module, "resolve", return_value=fake_provider
+    ):
+        summarize_transcript("transcript", model="claude-opus-5")
+
+    assert client.messages.create.call_args.kwargs["max_tokens"] == distinct_map_budget
+
+
+def test_summarize_transcript_no_longer_accepts_an_api_key():
+    """key เป็นเรื่องของ provider ไม่ใช่ของผู้เรียก การส่ง key ของ Anthropic เข้า
+    เส้นทางที่อาจไปจบที่ provider อื่นเป็นสิ่งที่ต้องเป็นไปไม่ได้"""
+    assert "api_key" not in inspect.signature(summarize_transcript).parameters
+
+
 def test_short_transcript_returns_the_single_response_verbatim():
     client = _single_response_client("## ประเด็นสำคัญ\n- ทดสอบระบบ")
 
     with _patch_anthropic(client):
         result = summarize_transcript(
-            "# Transcript\n\n**ผู้พูด 1** [00:00]: สั้นมาก", api_key="test-key"
+            "# Transcript\n\n**ผู้พูด 1** [00:00]: สั้นมาก", model="claude-opus-5"
         )
 
     assert result == "## ประเด็นสำคัญ\n- ทดสอบระบบ"
@@ -102,13 +166,13 @@ def test_short_transcript_uses_given_model_and_original_prompt():
     client = _single_response_client("สรุป")
 
     with _patch_anthropic(client):
-        summarize_transcript("transcript", model="claude-sonnet-5", api_key="test-key")
+        summarize_transcript("transcript", model="claude-sonnet-5")
 
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["model"] == "claude-sonnet-5"
     assert "transcript" in kwargs["messages"][0]["content"]
     assert kwargs["system"] == summarize_module.SUMMARY_SYSTEM_PROMPT
-    assert kwargs["max_tokens"] == summarize_module.MAP_MAX_OUTPUT_TOKENS
+    assert kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
 
 
 def test_response_without_a_text_block_raises_a_diagnosable_error():
@@ -125,17 +189,163 @@ def test_response_without_a_text_block_raises_a_diagnosable_error():
         patch("time.sleep"),
         pytest.raises(RuntimeError, match="no text block"),
     ):
-        summarize_transcript("สั้น", api_key="test-key")
+        summarize_transcript("สั้น", model="claude-opus-5")
 
 
-def test_truncated_summary_is_logged_as_a_warning(caplog):
-    client = _single_response_client("สรุปที่ถูกตัด", stop_reason="max_tokens")
+def test_a_truncated_answer_is_logged_as_a_warning(caplog):
+    """log ยังต้องมี เพราะการลองใหม่คือค่าใช้จ่ายที่ควรมองเห็นย้อนหลังได้"""
+    client = _truncating_client([("ขาด", "max_tokens"), ("จบ", "end_turn")])
 
     with _patch_anthropic(client), caplog.at_level(logging.WARNING):
-        result = summarize_transcript("สั้น", api_key="test-key")
+        result = summarize_transcript("สั้น", model="claude-opus-5")
 
-    assert result == "สรุปที่ถูกตัด"
-    assert any("max_tokens" in record.getMessage() for record in caplog.records)
+    assert result == "จบ"
+    assert any("truncated" in record.getMessage().lower() for record in caplog.records)
+
+
+def test_a_truncated_answer_is_retried_once_with_double_the_budget():
+    from src.llm import CLAUDE_MAP_MAX_TOKENS
+
+    client = _truncating_client(
+        [("ขาดกลางประโยค", "max_tokens"), ("เต็มแล้ว", "end_turn")]
+    )
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert result == "เต็มแล้ว"
+    assert client.messages.create.call_count == 2
+    budgets = [c.kwargs["max_tokens"] for c in client.messages.create.call_args_list]
+    assert budgets == [CLAUDE_MAP_MAX_TOKENS, CLAUDE_MAP_MAX_TOKENS * 2]
+
+
+def test_still_truncated_after_the_retry_keeps_the_text_and_appends_a_notice():
+    """ลองใหม่แค่ครั้งเดียว: การเรียกซ้ำแพงและช้า (GLM หนึ่ง call ถึง 155 วินาที)
+    ข้อความที่ได้มาแล้วมีค่ากว่าการทิ้ง แต่คนอ่านต้องรู้ว่ามันไม่จบ"""
+    client = _truncating_client(
+        [("ท่อนแรก", "max_tokens"), ("ท่อนแรกที่ยาวขึ้นแต่ยังไม่จบ", "max_tokens")]
+    )
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert client.messages.create.call_count == 2
+    assert "ท่อนแรกที่ยาวขึ้นแต่ยังไม่จบ" in result
+    assert summarize_module.TRUNCATION_NOTICE in result
+
+
+def _client_whose_second_call_raises(first_text, first_reason, error):
+    client = MagicMock()
+    client.messages.create.side_effect = [_response(first_text, first_reason), error]
+    return client
+
+
+def test_a_truncated_answer_whose_doubled_budget_retry_raises_keeps_the_first_calls_text():
+    """ถ้า call ที่สอง (budget สองเท่า) เจอ UnusableAnswerError -- เช่น reasoning model
+    ได้ budget เพิ่มแล้วยิ่งใช้ไปกับ reasoning จน content ว่างเปล่า -- ต้องไม่โยนทิ้ง
+    ข้อความที่ call แรกได้มาแล้วไปเฉยๆ ต้องคืนข้อความนั้นพร้อม TRUNCATION_NOTICE
+    เหมือนกรณีที่ retry สำเร็จแต่ยังขาดอยู่ดี ไม่ใช่แย่ลงกว่าเดิม"""
+    client = _client_whose_second_call_raises(
+        "ท่อนแรกที่ได้มาแล้ว", "max_tokens", UnusableAnswerError("no text")
+    )
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert client.messages.create.call_count == 2
+    assert "ท่อนแรกที่ได้มาแล้ว" in result
+    assert summarize_module.TRUNCATION_NOTICE in result
+
+
+def test_a_truncated_answer_whose_doubled_budget_retry_raises_400_keeps_the_first_calls_text():
+    """เหมือนเทสต์ข้างบนแต่เป็น HttpStatusError(400) -- proxy บางตัวปฏิเสธ max_tokens
+    ที่ใหญ่เกินเพดานต่อคำขอ (24576 × 2 = 49152) ด้วย 400 ซึ่งไม่ retryable เหมือนกัน"""
+    client = _client_whose_second_call_raises(
+        "ท่อนแรกที่ได้มาแล้ว", "max_tokens", HttpStatusError(400, "max_tokens too large")
+    )
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert client.messages.create.call_count == 2
+    assert "ท่อนแรกที่ได้มาแล้ว" in result
+    assert summarize_module.TRUNCATION_NOTICE in result
+
+
+def test_a_doubled_budget_retry_that_raises_inside_a_chunk_keeps_the_first_calls_text():
+    """เหมือนสองเทสต์ข้างบนแต่เกิดใน chunk หนึ่งของ map stage -- chunk นั้นต้องยังได้
+    ข้อความบางส่วนไปต่อในไทม์ไลน์ ไม่ใช่กลายเป็น CHUNK_FAILURE_PLACEHOLDER ซึ่งเป็น
+    ผลลัพธ์ที่แย่กว่าของเดิมที่ branch นี้ตั้งใจแก้"""
+    transcript = _long_transcript(100)
+    target_chunk = _chunk_texts(transcript)[0]
+    lock = threading.Lock()
+    calls_for_target = {"n": 0}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            return _response("สรุปรวมทั้งประชุม")
+        if kwargs["messages"][0]["content"] == target_chunk:
+            with lock:
+                calls_for_target["n"] += 1
+                n = calls_for_target["n"]
+            if n == 1:
+                return _response("ท่อนแรกของช่วงนี้", "max_tokens")
+            raise UnusableAnswerError("GLM-5.2 returned no text (finish_reason='length')")
+        return _response("สรุปช่วงปกติ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, model="claude-opus-5")
+
+    assert calls_for_target["n"] == 2
+    assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
+    assert "ท่อนแรกของช่วงนี้" in result
+    timeline_start = result.index("## ไทม์ไลน์ตามช่วง")
+    assert summarize_module.TRUNCATION_NOTICE in result[timeline_start:]
+
+
+def test_a_doubled_budget_retry_that_raises_400_inside_a_chunk_keeps_the_first_calls_text():
+    transcript = _long_transcript(100)
+    target_chunk = _chunk_texts(transcript)[0]
+    lock = threading.Lock()
+    calls_for_target = {"n": 0}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            return _response("สรุปรวมทั้งประชุม")
+        if kwargs["messages"][0]["content"] == target_chunk:
+            with lock:
+                calls_for_target["n"] += 1
+                n = calls_for_target["n"]
+            if n == 1:
+                return _response("ท่อนแรกของช่วงนี้", "max_tokens")
+            raise HttpStatusError(400, "max_tokens too large")
+        return _response("สรุปช่วงปกติ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, model="claude-opus-5")
+
+    assert calls_for_target["n"] == 2
+    assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
+    assert "ท่อนแรกของช่วงนี้" in result
+    timeline_start = result.index("## ไทม์ไลน์ตามช่วง")
+    assert summarize_module.TRUNCATION_NOTICE in result[timeline_start:]
+
+
+def test_an_answer_that_fits_is_not_retried():
+    client = _single_response_client("พอดี")
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert result == "พอดี"
+    assert client.messages.create.call_count == 1
+    assert summarize_module.TRUNCATION_NOTICE not in result
 
 
 def test_long_transcript_makes_one_call_per_chunk_plus_one_reduce():
@@ -143,7 +353,7 @@ def test_long_transcript_makes_one_call_per_chunk_plus_one_reduce():
     client = _prompt_aware_client()
 
     with _patch_anthropic(client):
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
     assert client.messages.create.call_count == _expected_chunk_count(transcript) + 1
 
@@ -153,7 +363,7 @@ def test_long_transcript_output_has_merged_summary_then_timeline():
     client = _prompt_aware_client()
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert result.startswith("สรุปรวมทั้งประชุม")
     assert "## ไทม์ไลน์ตามช่วง" in result
@@ -166,11 +376,11 @@ def test_long_transcript_chunk_calls_use_the_chunk_prompt():
     client = _prompt_aware_client()
 
     with _patch_anthropic(client):
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
     first_kwargs = client.messages.create.call_args_list[0].kwargs
     assert first_kwargs["system"] == summarize_module.CHUNK_SYSTEM_PROMPT
-    assert first_kwargs["max_tokens"] == summarize_module.MAP_MAX_OUTPUT_TOKENS
+    assert first_kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
 
 
 def test_long_transcript_reduce_call_uses_reduce_prompt_and_larger_cap():
@@ -178,11 +388,11 @@ def test_long_transcript_reduce_call_uses_reduce_prompt_and_larger_cap():
     client = _prompt_aware_client()
 
     with _patch_anthropic(client):
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
     reduce_kwargs = client.messages.create.call_args_list[-1].kwargs
     assert reduce_kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT
-    assert reduce_kwargs["max_tokens"] == summarize_module.REDUCE_MAX_OUTPUT_TOKENS
+    assert reduce_kwargs["max_tokens"] == CLAUDE_REDUCE_MAX_TOKENS
 
 
 def test_a_failing_chunk_is_retried_individually():
@@ -207,7 +417,7 @@ def test_a_failing_chunk_is_retried_individually():
     client.messages.create.side_effect = flaky
 
     with _patch_anthropic(client), patch("time.sleep"):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert "ok" in result
     assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
@@ -229,7 +439,7 @@ def test_short_path_is_retried_inside_summarize():
     client.messages.create.side_effect = flaky
 
     with _patch_anthropic(client), patch("time.sleep"):
-        result = summarize_transcript("สั้น", api_key="test-key")
+        result = summarize_transcript("สั้น", model="claude-opus-5")
 
     # the pipeline no longer wraps this call, so the retry has to live here
     assert result == "สรุปสั้น"
@@ -253,7 +463,7 @@ def test_a_permanently_failing_chunk_becomes_a_placeholder():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client), patch("time.sleep"):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     # the healthy chunks still reach the user instead of the whole meeting failing
     assert result.startswith("สรุปรวมทั้งประชุม")
@@ -275,7 +485,7 @@ def test_every_chunk_failing_still_raises():
         patch("time.sleep"),
         pytest.raises(RuntimeError, match="permanent api error"),
     ):
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
 
 def test_map_calls_run_concurrently():
@@ -302,7 +512,7 @@ def test_map_calls_run_concurrently():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert state["peak"] >= 2
     assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
@@ -326,7 +536,7 @@ def test_chunk_summaries_keep_transcript_order_under_concurrency():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     positions = [result.index(f"สรุปช่วง {i}") for i in range(len(chunk_texts))]
     assert positions == sorted(positions)
@@ -351,7 +561,7 @@ def test_long_transcript_demotes_heading_levels_in_chunk_summaries():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     # ## and ### are demoted to the floor (####); ##### is left alone
     assert "#### หัวข้อระดับสอง" in result
@@ -384,7 +594,7 @@ def test_reduce_summary_headings_cannot_outrank_the_timeline_section():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     # an H1 from the model would swallow "## ไทม์ไลน์ตามช่วง" into its own section
     assert result.startswith("## สรุปการประชุม: เรื่องที่คุยกัน")
@@ -396,6 +606,71 @@ def test_reduce_summary_headings_cannot_outrank_the_timeline_section():
     assert "## ไทม์ไลน์ตามช่วง" in result
 
 
+def test_a_doubly_truncated_chunk_reaches_the_timeline_but_not_the_reduce_input():
+    """chunk หนึ่งขาดทั้งสองครั้ง -- หมายเหตุต้องโผล่ในไทม์ไลน์ให้คนอ่านเห็น
+    แต่ต้องไม่หลุดเข้าไปในข้อความที่ส่งให้ reduce call (นั่นคือสิ่งที่ finding
+    ตัวนี้จับได้: reduce เห็นสรุปจริงเท่านั้น ไม่ใช่หมายเหตุเรื่อง call ที่ขาด)"""
+    transcript = _long_transcript(100)
+    assert _expected_chunk_count(transcript) >= 2
+    target_chunk = _chunk_texts(transcript)[0]
+    reduce_input_holder = {}
+    lock = threading.Lock()
+    calls_for_target = {"n": 0}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            reduce_input_holder["content"] = kwargs["messages"][0]["content"]
+            return _response("สรุปรวมทั้งประชุม")
+        if kwargs["messages"][0]["content"] == target_chunk:
+            with lock:
+                calls_for_target["n"] += 1
+                n = calls_for_target["n"]
+            return _response(f"ท่อนที่ {n} ของช่วงนี้", "max_tokens")
+        return _response("สรุปช่วงปกติ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, model="claude-opus-5")
+
+    # the retry-once-at-double-budget escalation actually ran for this chunk
+    assert calls_for_target["n"] == 2
+
+    assert summarize_module.TRUNCATION_NOTICE not in reduce_input_holder["content"]
+
+    timeline_start = result.index("## ไทม์ไลน์ตามช่วง")
+    assert summarize_module.TRUNCATION_NOTICE in result[timeline_start:]
+
+
+def test_reduce_truncated_twice_notice_appears_above_the_timeline_separator():
+    """reduce เองก็ขาดทั้งสองครั้งได้เหมือนกัน -- หมายเหตุต้องอยู่ในสรุปรวม
+    (เหนือ --- ที่คั่นก่อนไทม์ไลน์) ไม่ใช่แค่ในสรุปรายช่วง"""
+    transcript = _long_transcript(100)
+    reduce_calls = {"n": 0}
+    lock = threading.Lock()
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            with lock:
+                reduce_calls["n"] += 1
+            return _response("สรุปที่ยังไม่จบ", "max_tokens")
+        return _response("สรุปช่วงปกติ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, model="claude-opus-5")
+
+    # the retry-once-at-double-budget escalation ran for the reduce call too
+    assert reduce_calls["n"] == 2
+
+    before_separator, _, after_separator = result.partition("\n\n---\n\n")
+    assert summarize_module.TRUNCATION_NOTICE in before_separator
+    assert "## ไทม์ไลน์ตามช่วง" in after_separator
+
+
 def test_over_threshold_transcript_with_no_parseable_segments_falls_back_to_single_call():
     # Exceeds SINGLE_CALL_THRESHOLD_TOKENS but has no "**speaker** [MM:SS]:" blocks,
     # so parse_transcript_segments returns [] and chunks is [].
@@ -403,7 +678,7 @@ def test_over_threshold_transcript_with_no_parseable_segments_falls_back_to_sing
     client = _single_response_client("สรุปแบบเดียว")
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert result == "สรุปแบบเดียว"
     assert client.messages.create.call_count == 1
@@ -426,13 +701,43 @@ def test_is_retryable_accepts_an_error_that_never_reached_the_api():
     assert is_retryable(OSError("connection reset by peer")) is True
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        URLError("nodename nor servname provided, or not known"),
+        TimeoutError("timed out"),
+        URLError(socket.timeout()),
+    ],
+    ids=["urlerror_dns", "bare_timeout", "urlerror_wrapping_socket_timeout"],
+)
+def test_is_retryable_accepts_timeout_and_dns_failures(error):
+    # จุดที่แพงที่สุดถ้าเดาผิด: ที่ LLM_TIMEOUT_SECONDS = 900 การตัดสินผิดที่นี่คือ
+    # 900 วินาที คูณด้วยจำนวนรอบ retry ต่อ chunk -- ปลายทางที่ต่อไม่ติดหรือหมดเวลา
+    # ต้องลองใหม่ได้เสมอ ไม่มีข้อยกเว้น
+    assert is_retryable(error) is True
+
+
+def test_is_retryable_by_exception_shape():
+    """สี่รูปแบบที่ is_retryable ต้องแยกออกจากกัน:
+
+    UnusableAnswerError และ MissingSettingError เป็นคำตอบที่แน่นอนแล้ว -- ยิงซ้ำก็ได้
+    ผลเดิม HttpStatusError(429) ยังลองใหม่ได้เหมือน 4xx/5xx ทั่วไป ส่วน RuntimeError
+    ธรรมดา (ไม่มี status_code, ไม่ใช่สองชนิดข้างต้น) ยังต้องลองใหม่ได้เหมือนเดิม --
+    นี่คือกรณีที่กฎเดิม (ทุก RuntimeError ที่ไม่มี status_code ไม่ retryable) จับพลาด
+    """
+    assert is_retryable(UnusableAnswerError("no text")) is False
+    assert is_retryable(MissingSettingError("no key")) is False
+    assert is_retryable(HttpStatusError(429, "slow down")) is True
+    assert is_retryable(RuntimeError("transient")) is True
+
+
 def test_single_call_stops_after_one_attempt_when_the_key_is_rejected():
     client = MagicMock()
     client.messages.create.side_effect = FakeAPIError(401)
 
     with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
         with pytest.raises(FakeAPIError):
-            summarize_transcript("**ผู้พูด 1** [00:00]: สวัสดี", api_key="test-key")
+            summarize_transcript("**ผู้พูด 1** [00:00]: สวัสดี", model="claude-opus-5")
 
     assert client.messages.create.call_count == 1
     mock_sleep.assert_not_called()
@@ -446,7 +751,7 @@ def test_map_stage_sends_one_request_per_chunk_when_credit_runs_out():
 
     with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
         with pytest.raises(RuntimeError, match="Every one of the"):
-            summarize_transcript(transcript, api_key="test-key")
+            summarize_transcript(transcript, model="claude-opus-5")
 
     assert client.messages.create.call_count == _expected_chunk_count(transcript)
     mock_sleep.assert_not_called()
@@ -471,7 +776,7 @@ def test_reduce_stage_stops_after_one_attempt_when_the_key_is_rejected():
     client = _reduce_fails_client()
 
     with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
     assert client.messages.create.call_count == _expected_chunk_count(transcript) + 1
     mock_sleep.assert_not_called()
@@ -484,7 +789,7 @@ def test_reduce_failure_keeps_the_chunk_summaries_that_were_already_paid_for():
     client = _reduce_fails_client()
 
     with _patch_anthropic(client), patch("time.sleep"):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert REDUCE_FAILURE_NOTICE in result
     assert "## ไทม์ไลน์ตามช่วง" in result
@@ -499,4 +804,29 @@ def test_reduce_failure_still_raises_when_no_chunk_ever_succeeded():
 
     with _patch_anthropic(client), patch("time.sleep"):
         with pytest.raises(RuntimeError, match="Every one of the"):
-            summarize_transcript(transcript, api_key="test-key")
+            summarize_transcript(transcript, model="claude-opus-5")
+
+
+def test_a_provider_that_returns_no_text_is_not_retried():
+    calls = {"n": 0}
+
+    def complete(system, content, max_tokens):
+        calls["n"] += 1
+        raise UnusableAnswerError(
+            "GLM-5.2 returned no text (finish_reason='length')"
+        )
+
+    provider = MagicMock()
+    provider.model_id = "GLM-5.2"
+    provider.map_max_tokens = 100
+    provider.reduce_max_tokens = 200
+    provider.complete = complete
+
+    with (
+        patch("src.summarize.resolve", return_value=provider),
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="no text"),
+    ):
+        summarize_transcript("สั้น", model="GLM-5.2")
+
+    assert calls["n"] == 1

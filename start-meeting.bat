@@ -58,22 +58,29 @@ if errorlevel 1 (
 
 echo.
 echo เลือกโมเดลสรุป:
-echo   [1] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
-echo   [2] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
-echo   [3] ถอดเสียงอย่างเดียว - ไม่สรุป (ไม่เสียเงิน)
-rem Anything that is not "2" or "3" lands on Opus 5, so a typo cannot reach Python
-rem as an invalid model id. set /p rather than choice: choice takes a single
+echo   [1] GLM 5.2 - ข้อมูลไม่ออกนอกบริษัท (ช้ากว่า)
+echo   [2] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
+echo   [3] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
+echo   [4] ถอดเสียงอย่างเดียว - ไม่สรุป (ไม่เสียเงิน)
+rem Anything that is not "2", "3" or "4" lands on GLM 5.2, so a typo cannot reach
+rem Python as an invalid model id. set /p rather than choice: choice takes a single
 rem keypress and ignores Enter, and pressing Enter for the default is the point here.
+rem GLM is the default because the transcript stays on company infrastructure with
+rem it -- the private path has to be the one that needs no decision.
 set "MODEL_CHOICE=1"
-set /p MODEL_CHOICE=เลือก [1/2/3] (Enter=1):
+set /p MODEL_CHOICE=เลือก [1/2/3/4] (Enter=1):
 if "%MODEL_CHOICE%"=="2" (
-    set "MODEL_ID=claude-sonnet-5"
+    set "MODEL_ID=claude-opus-5"
 ) else if "%MODEL_CHOICE%"=="3" (
+    set "MODEL_ID=claude-sonnet-5"
+) else if "%MODEL_CHOICE%"=="4" (
     rem Must stay byte-identical to job.NO_SUMMARY_MODEL: the pipeline decides
     rem whether to skip summarizing by comparing against this exact string.
     set "MODEL_ID=transcript-only"
 ) else (
-    set "MODEL_ID=claude-opus-5"
+    rem Must stay byte-identical to the registry key in src/llm.py -- the endpoint
+    rem rejects a lowercased id.
+    set "MODEL_ID=GLM-5.2"
 )
 rem "ใช้โมเดล: transcript-only" would name a model that does not exist, so the
 rem confirmation line follows the mode rather than the value.

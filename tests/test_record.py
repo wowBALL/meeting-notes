@@ -699,7 +699,6 @@ def _config(tmp_path):
         inbox_dir=inbox,
         failed_dir=tmp_path / "failed",
         meetings_dir=tmp_path / "meetings",
-        anthropic_api_key="k",
         hf_token="h",
     )
 
