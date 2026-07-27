@@ -144,6 +144,19 @@ def _patch_urlopen_raw(raw_body: str):
     return patch("urllib.request.urlopen", side_effect=urlopen), captured
 
 
+def _patch_urlopen_bytes(raw_body: bytes):
+    """เหมือน _patch_urlopen_raw แต่รับ bytes ดิบๆ โดยไม่ encode -- ใช้จำลอง body ที่
+    มีไบต์ที่ไม่ใช่ UTF-8 เป็นต้น"""
+    captured = {}
+
+    def urlopen(request, timeout=None):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _FakeResponse(raw_body)
+
+    return patch("urllib.request.urlopen", side_effect=urlopen), captured
+
+
 def test_resolve_returns_the_glm_budgets():
     provider = resolve("GLM-5.2")
 
@@ -312,6 +325,22 @@ def test_glm_non_json_body_is_retried_with_body_preserved(raw_body, marker):
     assert is_retryable(caught.value) is True
     if marker:
         assert marker in str(caught.value)
+
+
+def test_glm_non_utf8_body_is_retried():
+    """body ที่มีไบต์ที่ไม่ใช่ UTF-8 นั้นมักเป็นอาการชั่วคราวของ gateway corruption
+    กลางทาง (เหมือนกับ HTML error page หรือ truncated stream) -- ต้อง retryable
+    เหมือนเดิม แต่ข้อความต้องบอกว่า UTF-8 decode ล้มเหลว"""
+    from src.summarize import is_retryable
+
+    patcher, _ = _patch_urlopen_bytes(b"\xff\xfe not utf-8")
+
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+        with pytest.raises(UpstreamBodyError) as caught:
+            resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+    assert is_retryable(caught.value) is True
+    assert "UTF-8" in str(caught.value)
 
 
 def test_glm_malformed_response_is_not_retried():

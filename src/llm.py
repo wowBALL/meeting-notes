@@ -200,7 +200,15 @@ def _openai_compat_completer(
             with urllib.request.urlopen(
                 request, timeout=LLM_TIMEOUT_SECONDS
             ) as response:
-                raw_body = response.read().decode("utf-8")
+                try:
+                    raw_body = response.read().decode("utf-8")
+                except UnicodeDecodeError as e:
+                    # gateway corruption กลางทาง: ไบต์ที่ไม่ใช่ UTF-8 ปกติเป็นอาการ
+                    # ชั่วคราวเหมือนกับ HTML error page หรือ truncated stream ยิงซ้ำ
+                    # รอบถัดไปมีโอกาสได้ข้อมูลที่ถูกต้องกลับมา
+                    raise UpstreamBodyError(
+                        f"{model_id} returned HTTP 200 with a body that is not valid UTF-8: {e}"
+                    ) from e
         except urllib.error.HTTPError as e:
             # ตัดที่ _RESPONSE_DETAIL_CHARS ตัวอักษร: body ของ error บาง proxy ยัด HTML
             # มาทั้งหน้า
