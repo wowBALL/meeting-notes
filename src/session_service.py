@@ -17,6 +17,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 
 from src import activity
+from src.messages import render
 from src.record import run_recording
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class RecorderState:
         self.thread = None
         self.warnings = []
         self.last_result = None
+        self.devices = {}
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -83,6 +85,7 @@ class RecorderState:
                 "elapsed_seconds": elapsed,
                 "warnings": list(self.warnings),
                 "last_result": self.last_result,
+                "devices": dict(self.devices),
             }
 
 
@@ -107,10 +110,20 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
 
     @app.get("/api/state")
     def get_state():
+        # ภาษามาจากหน้าเว็บ แล้ว service เป็นคนแปลงรหัสเป็นคำพูด -- ถ้าให้ JS
+        # มี catalog ของตัวเองจะกลายเป็นสองชุดที่ต้องแก้พร้อมกันเสมอ
+        lang = request.args.get("lang") or config.ui_lang
         body = state.snapshot()
         body["worker_ready"] = worker_ready()
-        body["activity"] = activity.tail(config.base_dir, ACTIVITY_LIMIT)
-        body["lang"] = config.ui_lang
+        body["lang"] = lang
+        body["warnings"] = [
+            {**w, "text": render(w["code"], w.get("params"), lang)}
+            for w in body["warnings"]
+        ]
+        body["activity"] = [
+            {**e, "text": render(e.get("code", ""), e.get("params"), lang)}
+            for e in activity.tail(config.base_dir, ACTIVITY_LIMIT)
+        ]
         return jsonify(body)
 
     @app.post("/api/session")
@@ -126,10 +139,16 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             state.stop_event = threading.Event()
             state.warnings = []
             state.last_result = None
+            state.devices = {}
             stop_event = state.stop_event
             room, model = state.room, state.model
 
         def on_event(code, params=None, level="info"):
+            # ไมค์/ลำโพงที่ถูกดักฟังจริงต้องเห็นได้ตลอดการอัด ไม่ใช่ไปขุดใน log --
+            # การอัดจากอุปกรณ์ผิดตัวคือสาเหตุอันดับหนึ่งของเคส "ไม่มีเสียง"
+            if code == "devices_selected":
+                with state.lock:
+                    state.devices = dict(params or {})
             if level in ("warn", "error"):
                 with state.lock:
                     state.warnings.append({"code": code, "params": params or {}})
