@@ -2,6 +2,7 @@ from datetime import datetime
 import json
 import queue
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -470,6 +471,135 @@ def test_record_streams_to_session_drains_queues_after_stop_requested(tmp_path):
 
     written, _ = sf.read(str(tmp_path / parts[0]), dtype="float32")
     assert len(written) == 4
+
+
+def test_record_streams_to_session_does_not_wait_per_queue_once_stopped(tmp_path):
+    """หยุดแล้วต้องระบายคิวที่ค้างจนหมดโดยไม่รอ timeout เป็นราย ๆ คิว
+
+    ของจริงที่พังคือ: loopback ที่ไม่ส่ง callback เลยทำให้ speaker_queue ว่างตลอด
+    แต่ละรอบจึงไปนอนรอ block_timeout เต็ม ๆ ที่คิวว่างนั้น ทั้งที่ mic มีของค้างอยู่
+    เป็นพันบล็อก การระบายจึงกินเวลา (จำนวนบล็อก x block_timeout) ซึ่งกลายเป็น
+    "กดปิดแล้วไม่ปิด" ในสายตาผู้ใช้
+    """
+    stop_event = threading.Event()
+    stop_event.set()
+    block = np.ones(2, dtype=np.float32)
+    backlog = 20
+
+    started = time.monotonic()
+    parts = record.record_streams_to_session(
+        _queue_with(*[block] * backlog),
+        queue.Queue(),  # loopback ที่ไม่เคยส่งอะไรมาเลย
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=10_000,
+        block_timeout=0.2,
+    )
+    elapsed = time.monotonic() - started
+
+    written, _ = sf.read(str(tmp_path / parts[0]), dtype="float32")
+    assert len(written) == backlog * 2, "ต้องไม่ทิ้งเสียงที่ค้างอยู่ในคิว"
+    # โค้ดเดิมใช้เวลา backlog x block_timeout = 4 วินาที เผื่อไว้กว้าง ๆ ให้
+    # เทสต์ไม่ flaky บนเครื่องที่โหลดหนัก แต่ยังห่างจาก 4 วินาทีอยู่หลายเท่า
+    assert elapsed < backlog * 0.2 / 4, f"ระบายคิวช้าเกินไป: {elapsed:.2f}s"
+
+
+def test_record_streams_to_session_keeps_up_when_one_stream_is_dead(tmp_path):
+    """สตรีมที่เปิดอยู่แต่ไม่ส่งอะไรเลย ต้องไม่ฉุดให้ตัวเขียนตามเสียงจริงไม่ทัน
+
+    ถ้าตัวเขียนช้ากว่าที่ callback ป้อนเข้ามา คิวจะโตไม่มีเพดาน เสียงที่เขียนลงดิสก์
+    จะตามหลังเวลาจริงเรื่อย ๆ และถ้า process ตายไปก่อนหยุด ส่วนที่ค้างในแรมหายหมด
+    """
+    stop_event = threading.Event()
+    mic_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+    block = np.ones(2, dtype=np.float32)
+    produced = 40
+    interval = 0.01  # ป้อนเข้ามาเรื่อย ๆ เหมือน callback ของไมค์
+
+    def feed_mic():
+        for _ in range(produced):
+            mic_queue.put(block)
+            time.sleep(interval)
+        stop_event.set()
+
+    feeder = threading.Thread(target=feed_mic)
+    started = time.monotonic()
+    feeder.start()
+    parts = record.record_streams_to_session(
+        mic_queue,
+        queue.Queue(),  # loopback ที่ตายอยู่
+        tmp_path,
+        samplerate=16000,
+        stop_event=stop_event,
+        rotate_samples=10_000,
+        block_timeout=0.2,
+    )
+    elapsed = time.monotonic() - started
+    feeder.join()
+
+    written, _ = sf.read(str(tmp_path / parts[0]), dtype="float32")
+    assert len(written) == produced * 2, "เขียนไม่ครบ แปลว่าตัวเขียนตามไม่ทัน"
+    # ป้อนเข้ามาทั้งหมด produced x interval = 0.4 วินาที ถ้าตัวเขียนตามทันก็ต้องจบ
+    # ไม่ห่างจากนั้นมาก โค้ดเดิมเขียนได้รอบละหนึ่งบล็อกต่อ block_timeout จึงใช้
+    # produced x 0.2 = 8 วินาที เพดาน 2 วินาทีนี้จับความต่างนั้นได้โดยไม่ flaky
+    assert elapsed < 2.0, f"ตัวเขียนตามเสียงจริงไม่ทัน: ใช้ไป {elapsed:.2f}s"
+
+
+def test_run_recording_closes_the_streams_before_it_waits_for_the_drain(
+    tmp_path, monkeypatch
+):
+    """ต้องปิดสตรีมก่อน แล้วจึงรอตัวอัดระบายคิว ไม่ใช่ลำดับกลับกัน
+
+    ถ้ารอตัวอัดก่อนปิดสตรีม callback ยังป้อนคิวอยู่ตลอดเวลาที่รอ เงื่อนไขจบของ
+    ตัวอัด (คิวว่างทั้งสองข้าง) จึงอาจไม่เป็นจริงเลย -- การกดปิดจะค้างถาวร
+    """
+    calls = _fake_audio(monkeypatch)
+    config = _config(tmp_path)
+    mic_stopped = threading.Event()
+    outcome = {}
+
+    original_open = record.pyaudio.PyAudio
+
+    def audio_that_signals_on_stop():
+        instance = original_open()
+        real_open = instance.open
+
+        def open_and_wrap(**kwargs):
+            stream = real_open(**kwargs)
+            real_stop = stream.stop_stream
+
+            def stop_and_signal():
+                real_stop()
+                mic_stopped.set()
+
+            stream.stop_stream = stop_and_signal
+            return stream
+
+        instance.open = open_and_wrap
+        return instance
+
+    monkeypatch.setattr(record.pyaudio, "PyAudio", audio_that_signals_on_stop)
+
+    def fake_record(*a, **k):
+        # ยืนอยู่จนกว่าสตรีมจะถูกปิด เลียนแบบของจริงที่ระบายคิวไม่จบตราบใดที่
+        # callback ยังป้อนเข้ามา ถ้าผู้เรียก join ก่อนปิดสตรีม อันนี้จะไม่มีวันหลุด
+        outcome["streams_closed_first"] = mic_stopped.wait(timeout=3.0)
+        return ["part0001.wav"]
+
+    monkeypatch.setattr(record, "record_streams_to_session", fake_record)
+    monkeypatch.setattr(
+        record, "finish_or_discard", lambda s, i: config.inbox_dir / "meet.ogg"
+    )
+
+    stop_event = threading.Event()
+    stop_event.set()
+    record.run_recording("meet", "claude-opus-5", config, stop_event)
+
+    assert outcome["streams_closed_first"] is True, (
+        "ตัวอัดถูกรอจนจบก่อนสตรีมจะถูกปิด -- นี่คือลำดับที่ทำให้กดปิดแล้วค้าง"
+    )
+    assert [s.closed for s in calls["streams"]] == [True, True]
 
 
 def test_parse_args_reads_the_name_and_the_model():
