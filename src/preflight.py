@@ -18,13 +18,14 @@
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 from dotenv import load_dotenv
 
-from src.config import DEFAULT_CLAUDE_MODEL
+from src.config import DEFAULT_CLAUDE_MODEL, DEFAULT_UI_LANG
+from src.messages import render
 from src.record import (
     get_common_samplerate,
     get_wasapi_loopback_device,
@@ -40,8 +41,12 @@ LOOPBACK_SILENT_DBFS = -50.0
 
 MEASURE_SECONDS = 8
 
-SAMPLERATE_CHECK_NAME = "sample rate"
-API_CHECK_NAME = "Claude API key"
+# ภาษาตั้งต้นของโมดูลนี้ -- ผู้เรียกส่ง lang เข้ามาทับได้ทุกฟังก์ชัน ค่านี้มีไว้ให้
+# ผู้เรียกเดิม (และเทสต์ชุดเดิม) ได้ข้อความชุดเดียวกับก่อนมี catalog
+TH = DEFAULT_UI_LANG
+
+SAMPLERATE_CHECK_NAME = render("check_samplerate", {}, TH)
+API_CHECK_NAME = render("check_api", {}, TH)
 # ตัดสั้นกว่า default ของ SDK (10 นาที) มาก -- นี่คือการตรวจก่อนอัด ไม่ใช่การเรียกจริง
 # เน็ตอืดจนเกินนี้ให้รายงานเป็นคำเตือนแล้วเดินหน้าต่อ ดีกว่าค้างคาหน้าจอก่อนประชุม
 API_PROBE_TIMEOUT_SECONDS = 15.0
@@ -49,53 +54,73 @@ API_PROBE_TIMEOUT_SECONDS = 15.0
 
 @dataclass
 class CheckResult:
+    """ผลตรวจหนึ่งข้อ
+
+    `name` กับ `detail` เป็นข้อความที่ render แล้วในภาษาที่ขอมา ส่วน `name_code`
+    `code` `params` คือของจริงที่เอาไป render ใหม่เป็นภาษาอื่นได้ -- เก็บทั้งสอง
+    อย่างเพื่อให้ผู้เรียกเดิม (และเทสต์ชุดเดิม) ยังอ่าน .detail ได้ตรง ๆ เหมือนเดิม
+    """
+
     name: str
     status: str  # "ok" | "warn" | "fail"
     detail: str
+    name_code: str = ""
+    code: str = ""
+    params: dict = field(default_factory=dict)
+
+
+def _result(
+    name_code: str, status: str, code: str, params: dict | None = None, lang: str = TH
+) -> CheckResult:
+    params = params or {}
+    return CheckResult(
+        name=render(name_code, {}, lang),
+        status=status,
+        detail=render(code, params, lang),
+        name_code=name_code,
+        code=code,
+        params=params,
+    )
+
+
+def localized(result: CheckResult, lang: str) -> CheckResult:
+    """ผลตรวจเดิมในอีกภาษาหนึ่ง -- ผลที่ไม่มีรหัสกำกับคืนกลับไปตามเดิม"""
+    if not result.code:
+        return result
+    return _result(result.name_code, result.status, result.code, result.params, lang)
 
 
 def peak_dbfs(peak: float) -> float:
     return 20 * math.log10(peak) if peak > 0 else -math.inf
 
 
-def _fmt(db: float) -> str:
-    return "เงียบสนิท" if db == -math.inf else f"peak {db:.1f} dB"
+def _fmt(db: float, lang: str = TH) -> str:
+    if db == -math.inf:
+        return render("peak_silent", {}, lang)
+    return render("peak_level", {"db": f"{db:.1f}"}, lang)
 
 
-def evaluate_mic(db: float) -> CheckResult:
+def evaluate_mic(db: float, lang: str = TH) -> CheckResult:
+    level = {"level": _fmt(db, lang)}
     if db >= MIC_GOOD_DBFS:
-        return CheckResult("ไมค์", "ok", f"{_fmt(db)} -- ระดับเสียงพูดปกติ")
+        return _result("check_mic", "ok", "mic_ok", level, lang)
     if db >= MIC_WEAK_DBFS:
-        return CheckResult(
-            "ไมค์",
-            "warn",
-            f"{_fmt(db)} -- เบากว่าปกติมาก ลองขยับไมค์เข้าใกล้ / ดัน volume "
-            "หรือเปิด Microphone Boost (mmsys.cpl)",
-        )
-    return CheckResult(
-        "ไมค์",
-        "fail",
-        f"{_fmt(db)} -- แทบไม่มีสัญญาณ เช็คว่าเสียบช่องไมค์ (สีชมพู) แน่นดี "
-        "และไม่ได้ mute อยู่",
-    )
+        return _result("check_mic", "warn", "mic_weak", level, lang)
+    return _result("check_mic", "fail", "mic_none", level, lang)
 
 
-def evaluate_loopback(db: float, device_name: str) -> CheckResult:
+def evaluate_loopback(db: float, device_name: str, lang: str = TH) -> CheckResult:
+    params = {"level": _fmt(db, lang), "device": device_name}
     if db >= LOOPBACK_SILENT_DBFS:
-        return CheckResult(
-            "ลำโพง (คู่สนทนา)", "ok", f"{_fmt(db)} จาก {device_name} -- เสียงไหลผ่านจริง"
-        )
+        return _result("check_loopback", "ok", "loopback_ok", params, lang)
     # แยกไม่ออกว่า "ไม่มีอะไรเล่นอยู่" หรือ "แอปประชุมส่งเสียงออกอุปกรณ์อื่น"
     # กรณีหลังคือกรณีที่ทำให้เสียเสียงฝั่งคู่สนทนาไปทั้งประชุมโดยไม่รู้ตัว
-    return CheckResult(
-        "ลำโพง (คู่สนทนา)",
-        "warn",
-        f"ไม่มีเสียงผ่าน {device_name} -- ถ้าตอนนี้เปิดเสียงอยู่ แปลว่าแอปส่งเสียง "
-        "ออกอุปกรณ์อื่น ให้ตั้ง output ของแอปประชุมให้ตรงกับ default ของ Windows",
-    )
+    return _result("check_loopback", "warn", "loopback_silent", params, lang)
 
 
-def evaluate_samplerate(mic_device: dict, loopback_device: dict) -> CheckResult:
+def evaluate_samplerate(
+    mic_device: dict, loopback_device: dict, lang: str = TH
+) -> CheckResult:
     """ไมค์กับลำโพงคุยกันที่ sample rate เดียวกันไหม
 
     ถามผ่าน get_common_samplerate ตัวเดียวกับที่ record.py เรียกตอนเริ่มอัด แทนที่จะ
@@ -108,8 +133,12 @@ def evaluate_samplerate(mic_device: dict, loopback_device: dict) -> CheckResult:
     try:
         rate = get_common_samplerate(mic_device, loopback_device)
     except RuntimeError as e:
-        return CheckResult(SAMPLERATE_CHECK_NAME, "fail", str(e))
-    return CheckResult(SAMPLERATE_CHECK_NAME, "ok", f"ตรงกันที่ {rate} Hz")
+        # ข้อความของ error นี้มาจาก record.py ซึ่งยังเป็นไทยอยู่ -- ส่งผ่านตรง ๆ
+        # ดีกว่าแปลครึ่งเดียวแล้วได้ประโยคที่ปนสองภาษา
+        return _result(
+            "check_samplerate", "fail", "passthrough", {"error": str(e)}, lang
+        )
+    return _result("check_samplerate", "ok", "samplerate_ok", {"rate": rate}, lang)
 
 
 def read_api_settings(base_dir: Path | None = None) -> tuple[str, str]:
@@ -144,40 +173,24 @@ def probe_claude(api_key: str, model: str) -> None:
     )
 
 
-def classify_probe_error(error: Exception, model: str) -> CheckResult:
+def classify_probe_error(error: Exception, model: str, lang: str = TH) -> CheckResult:
     status_code = getattr(error, "status_code", None)
     message = str(error)
     if status_code == 429:
         # ผ่าน auth และมีเครดิตแล้วเท่านั้นถึงจะโดนจำกัดอัตรา -- ไม่ใช่ปัญหาของ key
-        return CheckResult(
-            API_CHECK_NAME,
-            "ok",
-            "key ใช้ได้ (ตอนนี้ชนลิมิตอัตราการเรียก แต่ตอนสรุปมี retry รออยู่แล้ว)",
-        )
+        return _result("check_api", "ok", "api_rate_limited", {}, lang)
     if status_code == 401:
-        return CheckResult(
-            API_CHECK_NAME,
-            "warn",
-            "key ใช้ไม่ได้ (401) -- หมดอายุ ถูกเพิกถอน หรือพิมพ์ผิด "
-            "ออก key ใหม่แล้วแก้ ANTHROPIC_API_KEY ใน .env",
-        )
+        return _result("check_api", "warn", "api_unauthorized", {}, lang)
     if status_code in (400, 403) and "credit balance" in message.lower():
-        return CheckResult(
-            API_CHECK_NAME,
-            "warn",
-            "เครดิตไม่พอ -- เติมที่หน้า Plans & Billing ใน Anthropic Console "
-            "ไม่งั้นประชุมนี้จะได้แค่ transcript",
-        )
+        return _result("check_api", "warn", "api_no_credit", {}, lang)
     if status_code == 403:
-        return CheckResult(
-            API_CHECK_NAME,
-            "warn",
-            f"key ไม่มีสิทธิ์เรียก {model} (403) -- ตรวจสิทธิ์ของ key หรือแก้ CLAUDE_MODEL",
+        return _result(
+            "check_api", "warn", "api_model_forbidden", {"model": model}, lang
         )
-    return CheckResult(API_CHECK_NAME, "warn", f"ตรวจไม่สำเร็จ: {message}")
+    return _result("check_api", "warn", "api_probe_failed", {"error": message}, lang)
 
 
-def check_api_key(api_key: str, model: str, probe=None) -> CheckResult:
+def check_api_key(api_key: str, model: str, probe=None, lang: str = TH) -> CheckResult:
     """สถานะของ key ที่จะใช้สรุป -- คืน "ok" หรือ "warn" เท่านั้น ไม่มี "fail"
 
     เพราะ start-meeting.bat ถามยกเลิกการอัดเมื่อเจอ "ไม่ผ่าน" และ key เสียไม่ใช่เหตุ
@@ -185,30 +198,26 @@ def check_api_key(api_key: str, model: str, probe=None) -> CheckResult:
     นั้นหายถาวร
     """
     if not api_key.strip():
-        return CheckResult(
-            API_CHECK_NAME,
-            "warn",
-            "ไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env -- อัดและถอดเสียงได้ปกติ "
-            "แต่จะไม่ได้สรุปอัตโนมัติ",
-        )
+        return _result("check_api", "warn", "api_no_key", {}, lang)
     try:
         (probe or probe_claude)(api_key, model)
     except Exception as e:
-        return classify_probe_error(e, model)
+        return classify_probe_error(e, model, lang)
     # ไม่ต้องบอกชื่อโมเดล (บรรทัด "กำลังตรวจ..." บอกไปแล้ว) และไม่ต้องอธิบายว่าทำไม
     # ถึงไม่มีตัวเลขเครดิต -- คนอ่านบรรทัดนี้ตอนกำลังจะเข้าประชุม ผ่านคือผ่าน จบ
-    return CheckResult(API_CHECK_NAME, "ok", "ใช้งานได้ปกติ")
+    return _result("check_api", "ok", "api_ok", {}, lang)
 
 
-def format_report(results: list[CheckResult]) -> str:
-    marks = {"ok": "[ ผ่าน ]", "warn": "[ เตือน ]", "fail": "[ ไม่ผ่าน ]"}
-    lines = [f"{marks[r.status]} {r.name}: {r.detail}" for r in results]
-    if any(r.status == "fail" for r in results):
-        lines.append("สรุป: ยังไม่ควรเริ่มอัด -- แก้ข้อที่ไม่ผ่านก่อน")
-    elif any(r.status == "warn" for r in results):
-        lines.append("สรุป: พร้อมอัด แต่มีข้อเตือน อ่านให้ครบก่อนเริ่ม")
+def format_report(results: list[CheckResult], lang: str = TH) -> str:
+    marks = {status: render(f"mark_{status}", {}, lang) for status in ("ok", "warn", "fail")}
+    shown = [localized(r, lang) for r in results]
+    lines = [f"{marks[r.status]} {r.name}: {r.detail}" for r in shown]
+    if any(r.status == "fail" for r in shown):
+        lines.append(render("report_fail", {}, lang))
+    elif any(r.status == "warn" for r in shown):
+        lines.append(render("report_warn", {}, lang))
     else:
-        lines.append("สรุป: พร้อมอัดประชุมได้เลย")
+        lines.append(render("report_ok", {}, lang))
     return "\n".join(lines)
 
 
@@ -262,16 +271,17 @@ def measure_peaks(audio, mic_device: dict, loopback_device: dict, seconds: int):
     return peaks["mic"], peaks["loopback"]
 
 
-def run_preflight(seconds: int = MEASURE_SECONDS) -> list[CheckResult]:
+def run_preflight(seconds: int = MEASURE_SECONDS, lang: str = TH) -> list[CheckResult]:
     audio = pyaudio_instance()
     try:
         try:
             mic_device = get_wasapi_mic_device(audio)
             loopback_device = get_wasapi_loopback_device(audio)
         except Exception as e:
+            failure = {"error": str(e)}
             return [
-                CheckResult("ไมค์", "fail", str(e)),
-                CheckResult("ลำโพง (คู่สนทนา)", "fail", str(e)),
+                _result("check_mic", "fail", "passthrough", failure, lang),
+                _result("check_loopback", "fail", "passthrough", failure, lang),
             ]
 
         mic_peak, loopback_peak = measure_peaks(
@@ -284,21 +294,24 @@ def run_preflight(seconds: int = MEASURE_SECONDS) -> list[CheckResult]:
             pass
 
     return [
-        evaluate_mic(peak_dbfs(mic_peak)),
-        evaluate_loopback(peak_dbfs(loopback_peak), loopback_device["name"]),
-        evaluate_samplerate(mic_device, loopback_device),
+        evaluate_mic(peak_dbfs(mic_peak), lang),
+        evaluate_loopback(peak_dbfs(loopback_peak), loopback_device["name"], lang),
+        evaluate_samplerate(mic_device, loopback_device, lang),
     ]
 
 
 def main() -> int:
+    # ต้องเรียกก่อนอ่าน UI_LANG: read_api_settings เป็นตัวที่ load_dotenv เข้ามา
+    # ถ้าสลับลำดับ ค่า UI_LANG ที่ตั้งใน .env จะไม่มีผลเลย
     api_key, claude_model = read_api_settings()
-    print(f"กำลังตรวจ key ที่จะใช้สรุป ({claude_model}) ...")
-    api_result = check_api_key(api_key, claude_model)
+    lang = os.environ.get("UI_LANG", TH)
+    print(render("preflight_checking_key", {"model": claude_model}, lang))
+    api_result = check_api_key(api_key, claude_model, lang=lang)
 
-    print(f"กำลังตรวจเสียง {MEASURE_SECONDS} วินาที -- พูดใส่ไมค์ และเปิดเสียงอะไรก็ได้ออกลำโพง")
-    results = [*run_preflight(), api_result]
+    print(render("preflight_checking_audio", {"seconds": MEASURE_SECONDS}, lang))
+    results = [*run_preflight(lang=lang), api_result]
     print()
-    print(format_report(results))
+    print(format_report(results, lang))
     return 1 if any(r.status == "fail" for r in results) else 0
 
 

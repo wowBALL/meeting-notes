@@ -12,6 +12,7 @@ from src.preflight import (
     MIC_WEAK_DBFS,
     CheckResult,
     check_api_key,
+    classify_probe_error,
     evaluate_loopback,
     evaluate_mic,
     evaluate_samplerate,
@@ -300,3 +301,73 @@ def test_read_api_settings_reads_the_configured_model(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_MODEL", "claude-sonnet-5")
 
     assert read_api_settings(base_dir=tmp_path) == ("sk-ant-test", "claude-sonnet-5")
+
+
+# --- สลับภาษา ------------------------------------------------------------
+
+
+def test_every_check_carries_a_message_code(tmp_path):
+    """ผลตรวจต้องพก "รหัส" ไปด้วย ไม่ใช่มีแต่ข้อความที่ render แล้ว
+
+    ถ้าข้อไหนไม่มีรหัส ข้อนั้นจะแปลไม่ได้และค้างเป็นไทยอยู่ในรายงานภาษาอังกฤษ
+    """
+    results = [
+        evaluate_mic(-15.0),
+        evaluate_loopback(-20.0, "Speakers"),
+        check_api_key("", "claude-opus-5"),
+    ]
+
+    assert all(r.code for r in results)
+    assert all(r.name_code for r in results)
+
+
+def test_evaluate_mic_renders_in_english():
+    result = evaluate_mic(-15.0, "en")
+
+    assert result.name == "Microphone"
+    assert "normal speaking level" in result.detail
+    assert "peak -15.0 dB" in result.detail
+
+
+def test_evaluate_loopback_keeps_the_device_name_untranslated():
+    # ชื่ออุปกรณ์เป็นของ Windows ไม่ใช่ข้อความของเรา -- ห้ามแตะ
+    result = evaluate_loopback(-60.0, "Speakers (3- NX-S2)", "en")
+
+    assert "Speakers (3- NX-S2)" in result.detail
+    assert result.status == "warn"
+
+
+def test_api_failures_render_in_english():
+    class Unauthorized(Exception):
+        status_code = 401
+
+    result = classify_probe_error(Unauthorized("nope"), "claude-opus-5", "en")
+
+    assert result.name == "Claude API key"
+    assert "401" in result.detail
+    assert "expired" in result.detail
+
+
+def test_format_report_translates_results_that_were_built_in_thai():
+    """รายงานภาษาอังกฤษต้องแปลผลที่สร้างไว้เป็นไทยแล้วได้
+
+    ผลตรวจถูกสร้างตอนวัดเสียง ส่วนภาษาถูกเลือกตอนพิมพ์รายงาน -- สองจังหวะนี้
+    คนละเวลากัน
+    """
+    results = [evaluate_mic(-15.0), evaluate_mic(-60.0)]
+
+    report = format_report(results, "en")
+
+    assert "[ PASS ]" in report
+    assert "[ FAIL ]" in report
+    assert "Microphone" in report
+    assert "Verdict: do not start recording yet" in report
+    assert "ไมค์" not in report
+
+
+def test_format_report_leaves_a_codeless_result_alone():
+    # ผลที่ประกอบเองโดยไม่ผ่าน _result (เช่นในเทสต์เก่า) ต้องไม่ทำให้รายงานพัง
+    report = format_report([CheckResult("ไมค์", "ok", "peak -15.0 dB")], "en")
+
+    assert "ไมค์" in report
+    assert "Verdict: ready to record" in report

@@ -47,6 +47,61 @@ MESSAGES = {
         "summarize_started": "กำลังสรุปด้วย {model}",
         "meeting_done": "เสร็จแล้ว: {path}",
         "job_failed": "ประมวลผลล้มเหลว: {error}",
+        # --- preflight ---
+        # ข้อความชุดนี้ถูกยึดไว้ด้วย tests/test_preflight.py แบบตรงตัวอักษร
+        # แก้คำเมื่อไหร่เทสต์จะบอกทันที ซึ่งเป็นสิ่งที่ต้องการ
+        "check_mic": "ไมค์",
+        "check_loopback": "ลำโพง (คู่สนทนา)",
+        "check_samplerate": "sample rate",
+        "check_api": "Claude API key",
+        "peak_silent": "เงียบสนิท",
+        "peak_level": "peak {db} dB",
+        "passthrough": "{error}",
+        "mic_ok": "{level} -- ระดับเสียงพูดปกติ",
+        "mic_weak": (
+            "{level} -- เบากว่าปกติมาก ลองขยับไมค์เข้าใกล้ / ดัน volume "
+            "หรือเปิด Microphone Boost (mmsys.cpl)"
+        ),
+        "mic_none": (
+            "{level} -- แทบไม่มีสัญญาณ เช็คว่าเสียบช่องไมค์ (สีชมพู) แน่นดี "
+            "และไม่ได้ mute อยู่"
+        ),
+        "loopback_ok": "{level} จาก {device} -- เสียงไหลผ่านจริง",
+        "loopback_silent": (
+            "ไม่มีเสียงผ่าน {device} -- ถ้าตอนนี้เปิดเสียงอยู่ แปลว่าแอปส่งเสียง "
+            "ออกอุปกรณ์อื่น ให้ตั้ง output ของแอปประชุมให้ตรงกับ default ของ Windows"
+        ),
+        "samplerate_ok": "ตรงกันที่ {rate} Hz",
+        "api_ok": "ใช้งานได้ปกติ",
+        "api_no_key": (
+            "ไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env -- อัดและถอดเสียงได้ปกติ "
+            "แต่จะไม่ได้สรุปอัตโนมัติ"
+        ),
+        "api_rate_limited": (
+            "key ใช้ได้ (ตอนนี้ชนลิมิตอัตราการเรียก แต่ตอนสรุปมี retry รออยู่แล้ว)"
+        ),
+        "api_unauthorized": (
+            "key ใช้ไม่ได้ (401) -- หมดอายุ ถูกเพิกถอน หรือพิมพ์ผิด "
+            "ออก key ใหม่แล้วแก้ ANTHROPIC_API_KEY ใน .env"
+        ),
+        "api_no_credit": (
+            "เครดิตไม่พอ -- เติมที่หน้า Plans & Billing ใน Anthropic Console "
+            "ไม่งั้นประชุมนี้จะได้แค่ transcript"
+        ),
+        "api_model_forbidden": (
+            "key ไม่มีสิทธิ์เรียก {model} (403) -- ตรวจสิทธิ์ของ key หรือแก้ CLAUDE_MODEL"
+        ),
+        "api_probe_failed": "ตรวจไม่สำเร็จ: {error}",
+        "mark_ok": "[ ผ่าน ]",
+        "mark_warn": "[ เตือน ]",
+        "mark_fail": "[ ไม่ผ่าน ]",
+        "report_fail": "สรุป: ยังไม่ควรเริ่มอัด -- แก้ข้อที่ไม่ผ่านก่อน",
+        "report_warn": "สรุป: พร้อมอัด แต่มีข้อเตือน อ่านให้ครบก่อนเริ่ม",
+        "report_ok": "สรุป: พร้อมอัดประชุมได้เลย",
+        "preflight_checking_key": "กำลังตรวจ key ที่จะใช้สรุป ({model}) ...",
+        "preflight_checking_audio": (
+            "กำลังตรวจเสียง {seconds} วินาที -- พูดใส่ไมค์ และเปิดเสียงอะไรก็ได้ออกลำโพง"
+        ),
     },
     "en": {
         # --- recorder ---
@@ -93,6 +148,62 @@ MESSAGES = {
         "summarize_started": "Summarizing with {model}",
         "meeting_done": "Done: {path}",
         "job_failed": "Processing failed: {error}",
+        # --- preflight ---
+        "check_mic": "Microphone",
+        "check_loopback": "Speaker (far end)",
+        "check_samplerate": "sample rate",
+        "check_api": "Claude API key",
+        "peak_silent": "completely silent",
+        "peak_level": "peak {db} dB",
+        "passthrough": "{error}",
+        "mic_ok": "{level} -- normal speaking level",
+        "mic_weak": (
+            "{level} -- much quieter than normal. Move closer to the mic, raise the "
+            "volume, or turn on Microphone Boost (mmsys.cpl)"
+        ),
+        "mic_none": (
+            "{level} -- almost no signal. Check that the mic is plugged in firmly "
+            "(pink jack) and not muted"
+        ),
+        "loopback_ok": "{level} from {device} -- audio is flowing",
+        "loopback_silent": (
+            "No audio through {device} -- if something is playing right now, the app "
+            "is sending audio to a different device. Set the meeting app's output to "
+            "match the Windows default"
+        ),
+        "samplerate_ok": "both at {rate} Hz",
+        "api_ok": "working",
+        "api_no_key": (
+            "ANTHROPIC_API_KEY is not set in .env -- recording and transcription "
+            "still work, but there will be no automatic summary"
+        ),
+        "api_rate_limited": (
+            "key works (rate-limited right now, but summarizing already retries)"
+        ),
+        "api_unauthorized": (
+            "key rejected (401) -- expired, revoked, or mistyped. Issue a new one "
+            "and update ANTHROPIC_API_KEY in .env"
+        ),
+        "api_no_credit": (
+            "not enough credit -- top up under Plans & Billing in the Anthropic "
+            "Console, otherwise this meeting only gets a transcript"
+        ),
+        "api_model_forbidden": (
+            "the key may not call {model} (403) -- check the key's permissions or "
+            "change CLAUDE_MODEL"
+        ),
+        "api_probe_failed": "check failed: {error}",
+        "mark_ok": "[ PASS ]",
+        "mark_warn": "[ WARN ]",
+        "mark_fail": "[ FAIL ]",
+        "report_fail": "Verdict: do not start recording yet -- fix what failed first",
+        "report_warn": "Verdict: ready to record, but read the warnings first",
+        "report_ok": "Verdict: ready to record",
+        "preflight_checking_key": "Checking the key used for summarizing ({model}) ...",
+        "preflight_checking_audio": (
+            "Checking audio for {seconds} seconds -- talk into the mic, and play "
+            "anything through the speakers"
+        ),
     },
 }
 
