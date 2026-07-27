@@ -53,7 +53,7 @@ MESSAGES = {
         "check_mic": "ไมค์",
         "check_loopback": "ลำโพง (คู่สนทนา)",
         "check_samplerate": "sample rate",
-        "check_api": "Claude API key",
+        "check_api": "API key ของโมเดลสรุป",
         "check_model": "โมเดลที่ใช้สรุป",
         "peak_silent": "เงียบสนิท",
         "peak_level": "peak {db} dB",
@@ -84,10 +84,10 @@ MESSAGES = {
         ),
         "api_unauthorized": (
             "key ใช้ไม่ได้ (401) -- หมดอายุ ถูกเพิกถอน หรือพิมพ์ผิด "
-            "ออก key ใหม่แล้วแก้ ANTHROPIC_API_KEY ใน .env"
+            "ออก key ใหม่แล้วแก้ {env_var} ใน .env"
         ),
         "api_no_credit": (
-            "เครดิตไม่พอ -- เติมที่หน้า Plans & Billing ใน Anthropic Console "
+            "เครดิตไม่พอสำหรับ key นี้ -- เติมเครดิตก่อน "
             "ไม่งั้นประชุมนี้จะได้แค่ transcript"
         ),
         "api_model_forbidden": (
@@ -159,7 +159,7 @@ MESSAGES = {
         "check_mic": "Microphone",
         "check_loopback": "Speaker (far end)",
         "check_samplerate": "sample rate",
-        "check_api": "Claude API key",
+        "check_api": "Summary model API key",
         "check_model": "Summary model",
         "peak_silent": "completely silent",
         "peak_level": "peak {db} dB",
@@ -191,11 +191,11 @@ MESSAGES = {
         ),
         "api_unauthorized": (
             "key rejected (401) -- expired, revoked, or mistyped. Issue a new one "
-            "and update ANTHROPIC_API_KEY in .env"
+            "and update {env_var} in .env"
         ),
         "api_no_credit": (
-            "not enough credit -- top up under Plans & Billing in the Anthropic "
-            "Console, otherwise this meeting only gets a transcript"
+            "not enough credit for this key -- top it up, otherwise this meeting "
+            "only gets a transcript"
         ),
         "api_model_forbidden": (
             "the key may not call {model} (403) -- check the key's permissions or "

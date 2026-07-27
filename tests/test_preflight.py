@@ -1,4 +1,6 @@
+import json
 import math
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -6,11 +8,12 @@ import pytest
 
 import src.preflight as preflight
 from src.config import DEFAULT_SUMMARY_MODEL
-from src.llm import Completion, MissingApiKeyError
+from src.llm import LLM_TIMEOUT_SECONDS, Completion, MissingApiKeyError
 from src.preflight import (
     LOOPBACK_SILENT_DBFS,
     MIC_GOOD_DBFS,
     MIC_WEAK_DBFS,
+    PROBE_TIMEOUT_SECONDS,
     CheckResult,
     check_api_key,
     check_summary_model,
@@ -320,8 +323,9 @@ def test_probe_summary_model_uses_the_provider_of_the_given_model():
     # ค่าเริ่มต้นเป็น GLM แล้ว การตรวจ key ของ Anthropic เสมอจะบอกผิดฝั่งทุกครั้ง
     called = {}
 
-    def fake_complete(system, content, max_tokens):
+    def fake_complete(system, content, max_tokens, timeout=None):
         called["max_tokens"] = max_tokens
+        called["timeout"] = timeout
         return Completion(text="hi", truncated=False)
 
     provider = MagicMock()
@@ -332,6 +336,90 @@ def test_probe_summary_model_uses_the_provider_of_the_given_model():
 
     resolve_mock.assert_called_once_with("GLM-5.2")
     assert called["max_tokens"] == 1
+
+
+def test_probe_summary_model_passes_its_own_short_timeout_not_the_providers():
+    # ตัวเก่ามี max_retries=0 กับ timeout สั้นเฉพาะของ probe -- Task 5 ทำให้ probe ยิงผ่าน
+    # resolve(model).complete() ที่ปรับแต่งมาสำหรับสรุปทั้งก้อน (LLM_TIMEOUT_SECONDS =
+    # 900) ต้องส่ง timeout สั้นของตัวเองเข้าไปแทนเสมอ ไม่งั้น preflight ค้างได้ถึง 15 นาที
+    # ก่อนเข้าประชุม
+    called = {}
+
+    def fake_complete(system, content, max_tokens, timeout=None):
+        called["timeout"] = timeout
+        return Completion(text="hi", truncated=False)
+
+    provider = MagicMock()
+    provider.complete = fake_complete
+
+    with patch("src.preflight.resolve", return_value=provider):
+        probe_summary_model("claude-opus-5")
+
+    assert called["timeout"] == PROBE_TIMEOUT_SECONDS
+    assert called["timeout"] != LLM_TIMEOUT_SECONDS
+
+
+def test_probe_forwards_the_probe_timeout_to_the_openai_compatible_transport():
+    # จบที่ transport จริง (urlopen) ไม่ใช่แค่ที่ตัว fake -- กัน regression ที่ตัว
+    # completer เองเมินพารามิเตอร์ timeout ที่ส่งเข้าไป
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["timeout"] = timeout
+        return BytesIO(
+            json.dumps(
+                {"choices": [{"finish_reason": "stop", "message": {"content": "hi"}}]}
+            ).encode("utf-8")
+        )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+    ):
+        probe_summary_model("GLM-5.2")
+
+    assert captured["timeout"] == PROBE_TIMEOUT_SECONDS
+    assert captured["timeout"] != LLM_TIMEOUT_SECONDS
+
+
+def test_probe_forwards_the_probe_timeout_to_the_anthropic_sdk_client():
+    # จบที่ constructor ของ Anthropic client จริง -- นี่คือจุดที่ max_retries=0 ต้องติด
+    # ไปด้วยเสมอตอน probe เพื่อไม่ให้ SDK ลองซ้ำเอง
+    block = MagicMock()
+    block.type = "text"
+    block.text = "hi"
+    response = MagicMock()
+    response.content = [block]
+    response.stop_reason = "end_turn"
+    client = MagicMock()
+    client.messages.create.return_value = response
+
+    with (
+        patch("anthropic.Anthropic", return_value=client) as anthropic_cls,
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
+    ):
+        probe_summary_model("claude-opus-5")
+
+    kwargs = anthropic_cls.call_args.kwargs
+    assert kwargs["timeout"] == PROBE_TIMEOUT_SECONDS
+    assert kwargs["max_retries"] == 0
+
+
+def test_probe_does_not_retry_the_openai_compatible_transport_on_failure():
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):
+        calls["n"] += 1
+        raise OSError("getaddrinfo failed")
+
+    with (
+        patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        pytest.raises(OSError),
+    ):
+        probe_summary_model("GLM-5.2")
+
+    assert calls["n"] == 1
 
 
 def test_an_empty_answer_from_the_probe_still_passes():
@@ -493,7 +581,7 @@ def test_api_failures_render_in_english():
 
     result = classify_probe_error(Unauthorized("nope"), "claude-opus-5", "en")
 
-    assert result.name == "Claude API key"
+    assert result.name == "Summary model API key"
     assert "401" in result.detail
     assert "expired" in result.detail
 

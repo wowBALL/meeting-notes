@@ -42,6 +42,14 @@ LOOPBACK_SILENT_DBFS = -50.0
 
 MEASURE_SECONDS = 8
 
+# timeout ของ probe เอง สั้นกว่า timeout ของงานสรุปจริง (LLM_TIMEOUT_SECONDS = 900 ใน
+# src/llm.py) มาก โดยตั้งใจ: request "hi" สั้นๆ ที่ probe ยิงไปกับ chunk ของประชุมทั้ง
+# ก้อนที่งานสรุปยิงจริงไม่ได้ใช้เวลาระดับเดียวกันเลย ถ้า probe ใช้ timeout เดียวกับ
+# งานสรุป endpoint ที่ตายอยู่จะทำให้คนที่กำลังจะกดเริ่มอัดต้องรอถึง 15 นาทีก่อนรู้ว่า
+# ควรอัดต่อไปดีไหม -- preflight มีไว้ตอบเร็วพอที่จะคุ้มค่ารอ ไม่ใช่ค้างนานกว่าประชุมเอง
+# ค่าเดิมก่อน Task 5 (ตอนยังสร้าง client ของ Anthropic เองตรงๆ) คือ 15 วินาที คงไว้เท่าเดิม
+PROBE_TIMEOUT_SECONDS = 15
+
 # ภาษาตั้งต้นของโมดูลนี้ -- ผู้เรียกส่ง lang เข้ามาทับได้ทุกฟังก์ชัน ค่านี้มีไว้ให้
 # ผู้เรียกเดิม (และเทสต์ชุดเดิม) ได้ข้อความชุดเดียวกับก่อนมี catalog
 TH = DEFAULT_UI_LANG
@@ -170,12 +178,19 @@ def probe_summary_model(model: str) -> None:
     หนึ่งครั้งอยู่ในหลักเศษสตางค์ ยิงผ่าน resolve(model).complete() ตัวเดียวกับที่
     summarize.py เรียกจริง -- provider ไหนถูกเลือกก็ถูกตรวจ ไม่ใช่ Anthropic เสมอ
 
+    ส่ง PROBE_TIMEOUT_SECONDS เข้าไปเป็น timeout override เสมอ แทนที่จะปล่อยให้ complete()
+    ใช้ timeout ประจำตัว provider (ของ GLM คือ LLM_TIMEOUT_SECONDS = 900 วินาที ซึ่งเหมาะ
+    กับการสรุปทั้ง chunk ไม่ใช่กับ "hi" คำเดียวก่อนเข้าประชุม) -- ฝั่ง Anthropic ค่านี้ยัง
+    พ่วง max_retries=0 มาด้วยในตัว completer เอง (ดู src/llm.py::_anthropic_completer)
+    ส่วนฝั่ง GLM ไม่ต้องปิด retry เพิ่มเพราะ urlopen ไม่มี retry ในตัวอยู่แล้ว จึงยิง
+    ครั้งเดียวเสมอไม่ว่า provider ไหน
+
     คำตอบว่างเปล่าถือว่าผ่าน -- reasoning model ที่ max_tokens=1 ใช้โควตาหมดก่อนเขียน
     อะไรได้ ซึ่งพิสูจน์แล้วว่าคำขอไปถึงโมเดลจริงและ key ผ่าน auth แล้ว สิ่งที่ตรวจคือ
     key ใช้ได้และโมเดลมีอยู่ ไม่ใช่คุณภาพของคำตอบ
     """
     try:
-        resolve(model).complete("hi", "hi", 1)
+        resolve(model).complete("hi", "hi", 1, PROBE_TIMEOUT_SECONDS)
     except MissingApiKeyError:
         # สืบทอดจาก RuntimeError เหมือนกัน แต่ความหมายตรงข้าม: ยังไปไม่ถึงโมเดลเลย
         # ต้องจับก่อน except RuntimeError ข้างล่าง ไม่งั้นจะถูกกลืนเป็น "ผ่าน"
@@ -199,7 +214,13 @@ def classify_probe_error(error: Exception, model: str, lang: str = TH) -> CheckR
         # ผ่าน auth และมีเครดิตแล้วเท่านั้นถึงจะโดนจำกัดอัตรา -- ไม่ใช่ปัญหาของ key
         return _result("check_api", "ok", "api_rate_limited", {}, lang)
     if status_code == 401:
-        return _result("check_api", "warn", "api_unauthorized", {}, lang)
+        # ชื่อ env var มาจาก resolve(model) เสมอ ไม่เดาว่าเป็น ANTHROPIC_API_KEY --
+        # ฟังก์ชันนี้ถูกเรียกไม่ว่า provider ไหนถูกตรวจอยู่ (ดู check_api_key)
+        try:
+            env_var = resolve(model).key_env
+        except UnknownModelError:
+            env_var = ""
+        return _result("check_api", "warn", "api_unauthorized", {"env_var": env_var}, lang)
     if status_code in (400, 403) and "credit balance" in message.lower():
         return _result("check_api", "warn", "api_no_credit", {}, lang)
     if status_code == 403:

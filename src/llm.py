@@ -106,7 +106,12 @@ class Provider:
     # ชื่อ env var ที่ provider นี้อ่าน key มา -- preflight ใช้ถามว่าจะเช็ค key ตัวไหน
     # แทนที่จะเดาเองจาก model id (ดู src/preflight.py::read_summary_settings)
     key_env: str
-    complete: Callable[[str, str, int], Completion]
+    # timeout พารามิเตอร์ตัวที่สี่เป็น optional โดยตั้งใจ: None แปลว่า "ใช้ timeout
+    # ประจำตัว provider นี้เอง" (ของ Anthropic คือ default ของ SDK เอง, ของ GLM คือ
+    # LLM_TIMEOUT_SECONDS) -- summarize.py เรียกด้วยสามพารามิเตอร์เสมอและไม่ต้องแก้
+    # อะไรเลย ส่วน preflight ส่ง timeout สั้นของตัวเองมาแทนตอน probe (ดู
+    # src/preflight.py::probe_summary_model)
+    complete: Callable[[str, str, int, float | None], Completion]
 
 
 def _require_key(env_var: str, model_id: str) -> str:
@@ -121,12 +126,22 @@ def _require_key(env_var: str, model_id: str) -> str:
 
 def _anthropic_completer(
     model_id: str, key_env: str
-) -> Callable[[str, str, int], Completion]:
-    def complete(system: str, content: str, max_tokens: int) -> Completion:
+) -> Callable[[str, str, int, float | None], Completion]:
+    def complete(
+        system: str, content: str, max_tokens: int, timeout: float | None = None
+    ) -> Completion:
         from anthropic import Anthropic
 
         api_key = _require_key(key_env, model_id)
-        client = Anthropic(api_key=api_key)
+        # timeout=None (ทางเดินของ summarize.py เสมอ) ปล่อยให้ SDK ใช้ default ของ
+        # มันเอง -- ไม่ต้องยุ่งกับ max_retries ด้วย เพราะ retry เป็นหน้าที่ของ
+        # is_retryable ใน summarize.py อยู่แล้ว มี timeout มาก็ต่อเมื่อเป็น probe
+        # (preflight ส่งเข้ามาสั้นๆ) ซึ่งต้องปิด retry ของ SDK เองไปด้วย
+        # (max_retries=0) ไม่งั้น probe หนึ่งครั้งอาจกลายเป็นหลายครั้งเงียบๆ
+        if timeout is None:
+            client = Anthropic(api_key=api_key)
+        else:
+            client = Anthropic(api_key=api_key, timeout=timeout, max_retries=0)
         response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens,
@@ -177,10 +192,17 @@ def _response_detail(payload: object) -> str:
 
 def _openai_compat_completer(
     model_id: str, key_env: str, base_url_env: str, default_base_url: str
-) -> Callable[[str, str, int], Completion]:
-    def complete(system: str, content: str, max_tokens: int) -> Completion:
+) -> Callable[[str, str, int, float | None], Completion]:
+    def complete(
+        system: str, content: str, max_tokens: int, timeout: float | None = None
+    ) -> Completion:
         api_key = _require_key(key_env, model_id)
         base_url = os.environ.get(base_url_env, "").strip() or default_base_url
+        # timeout=None (ทางเดินของ summarize.py เสมอ) ใช้ LLM_TIMEOUT_SECONDS เดิม
+        # -- มี timeout มาก็ต่อเมื่อเป็น probe ที่ preflight ส่งค่าสั้นๆ ของตัวเองเข้ามา
+        # แทน ไม่ต้องมี retry ให้ปิดที่นี่ เพราะ urlopen ไม่ retry เองอยู่แล้ว
+        # (retry เป็นหน้าที่ของ is_retryable ใน summarize.py ที่ชั้นเหนือขึ้นไป)
+        request_timeout = LLM_TIMEOUT_SECONDS if timeout is None else timeout
         # ensure_ascii=False คือหัวใจ: transcript เป็นภาษาไทยทั้งไฟล์ ถ้า escape เป็น
         # \uXXXX ขนาด payload บวมและ proxy บางตัวส่งต่อเป็น ???? -- ทดสอบไว้แล้วว่า
         # แบบนี้ภาษาไทยกลับมาตรงทุกตัวอักษร
@@ -205,7 +227,7 @@ def _openai_compat_completer(
         )
         try:
             with urllib.request.urlopen(
-                request, timeout=LLM_TIMEOUT_SECONDS
+                request, timeout=request_timeout
             ) as response:
                 try:
                     raw_body = response.read().decode("utf-8")
