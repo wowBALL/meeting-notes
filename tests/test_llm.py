@@ -119,34 +119,12 @@ class _FakeResponse(BytesIO):
         self.close()
 
 
-def _patch_urlopen(payload):
-    """คืน (context manager, ตัวเก็บ request) เพื่อ assert ว่าส่งอะไรออกไปจริง"""
-    captured = {}
-
-    def urlopen(request, timeout=None):
-        captured["request"] = request
-        captured["timeout"] = timeout
-        return _FakeResponse(json.dumps(payload).encode("utf-8"))
-
-    return patch("urllib.request.urlopen", side_effect=urlopen), captured
-
-
-def _patch_urlopen_raw(raw_body: str):
-    """เหมือน _patch_urlopen แต่ส่ง string ดิบๆ ตรงๆ ไม่ผ่าน json.dumps -- ใช้จำลอง
-    body ที่ไม่ใช่ JSON เลย (หน้า error HTML, สตริงว่าง, JSON ที่ถูกตัดกลางคัน)"""
-    captured = {}
-
-    def urlopen(request, timeout=None):
-        captured["request"] = request
-        captured["timeout"] = timeout
-        return _FakeResponse(raw_body.encode("utf-8"))
-
-    return patch("urllib.request.urlopen", side_effect=urlopen), captured
-
-
 def _patch_urlopen_bytes(raw_body: bytes):
-    """เหมือน _patch_urlopen_raw แต่รับ bytes ดิบๆ โดยไม่ encode -- ใช้จำลอง body ที่
-    มีไบต์ที่ไม่ใช่ UTF-8 เป็นต้น"""
+    """คืน (context manager, ตัวเก็บ request) เพื่อ assert ว่าส่งอะไรออกไปจริง
+
+    รับ bytes เพราะเป็นหน่วยที่ตรงกับสิ่งที่ response ส่งกลับจริง และเพราะ body ที่ไบต์
+    ไม่ใช่ UTF-8 เขียนเป็น str ไม่ได้ อีกสองตัวข้างล่างเป็นเพียงทางสะดวกที่แปลงมาลงตัวนี้
+    """
     captured = {}
 
     def urlopen(request, timeout=None):
@@ -155,6 +133,17 @@ def _patch_urlopen_bytes(raw_body: bytes):
         return _FakeResponse(raw_body)
 
     return patch("urllib.request.urlopen", side_effect=urlopen), captured
+
+
+def _patch_urlopen_raw(raw_body: str):
+    """ส่ง string ดิบๆ ตรงๆ ไม่ผ่าน json.dumps -- ใช้จำลอง body ที่ไม่ใช่ JSON เลย
+    (หน้า error HTML, สตริงว่าง, JSON ที่ถูกตัดกลางคัน)"""
+    return _patch_urlopen_bytes(raw_body.encode("utf-8"))
+
+
+def _patch_urlopen(payload):
+    """ส่ง payload ที่ผ่าน json.dumps -- ใช้กับ response ที่มีรูปร่างถูกต้อง"""
+    return _patch_urlopen_bytes(json.dumps(payload).encode("utf-8"))
 
 
 def test_resolve_returns_the_glm_budgets():
