@@ -10,7 +10,6 @@ def make_config(tmp_path) -> Config:
         inbox_dir=tmp_path / "inbox",
         failed_dir=tmp_path / "failed",
         meetings_dir=tmp_path / "meetings",
-        anthropic_api_key="sk-ant-test",
         hf_token="hf-test-token",
     )
 

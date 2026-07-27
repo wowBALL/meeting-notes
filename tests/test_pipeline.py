@@ -29,7 +29,6 @@ def make_config(tmp_path: Path) -> Config:
         inbox_dir=tmp_path / "inbox",
         failed_dir=tmp_path / "failed",
         meetings_dir=tmp_path / "meetings",
-        anthropic_api_key="sk-ant-test",
         hf_token="hf-test-token",
         claude_model="claude-opus-4-8",
         whisper_model="small",

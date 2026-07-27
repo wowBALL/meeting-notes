@@ -11,7 +11,6 @@ def test_load_config_reads_required_env_vars(tmp_path, monkeypatch):
 
     config = load_config(base_dir=tmp_path)
 
-    assert config.anthropic_api_key == "sk-ant-test"
     assert config.hf_token == "hf-test-token"
     assert config.claude_model == "GLM-5.2"
     assert config.whisper_model == "small"
@@ -84,25 +83,19 @@ def test_load_config_falls_back_when_the_port_is_not_a_number(tmp_path, monkeypa
 
 
 def test_load_config_works_without_an_anthropic_key(tmp_path, monkeypatch):
-    """GLM จะเป็นค่าเริ่มต้น -- คนที่ตั้งเครื่องใหม่ต้องเริ่มงานได้โดยไม่มี key ของ Anthropic"""
+    """GLM จะเป็นค่าเริ่มต้น -- คนที่ตั้งเครื่องใหม่ต้องเริ่มงานได้โดยไม่มี key ของ Anthropic
+
+    Config ไม่มี field anthropic_api_key อีกแล้ว (ไม่มีใครอ่านมันในโค้ดจริง --
+    ดู src/llm.py ที่อ่าน ANTHROPIC_API_KEY ตรงจาก os.environ เอง) เทสต์นี้จึงยืนยัน
+    แค่ว่า load_config ไม่ raise และยังได้ค่าเริ่มต้น GLM ตามเดิมแม้ไม่มี key นี้เลย
+    """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("HF_TOKEN", "hf_test")
     (tmp_path / ".env").write_text("", encoding="utf-8")
 
     config = load_config(tmp_path)
 
-    assert config.anthropic_api_key == ""
-
-
-def test_llm_base_url_falls_back_to_the_default(tmp_path, monkeypatch):
-    from src.llm import DEFAULT_LLM_BASE_URL
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
-    monkeypatch.delenv("LLM_BASE_URL", raising=False)
-    (tmp_path / ".env").write_text("", encoding="utf-8")
-
-    assert load_config(tmp_path).llm_base_url == DEFAULT_LLM_BASE_URL
+    assert config.claude_model == "GLM-5.2"
 
 
 def test_the_default_summary_model_is_the_one_that_keeps_data_in_house():
