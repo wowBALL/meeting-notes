@@ -8,18 +8,22 @@ import pytest
 from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
-    DEFAULT_LLM_BASE_URL,
     LLM_TIMEOUT_SECONDS,
     GLM_MAP_MAX_TOKENS,
     GLM_REDUCE_MAX_TOKENS,
     Completion,
     HttpStatusError,
-    MissingApiKeyError,
+    MissingSettingError,
     UnknownModelError,
     UnusableAnswerError,
     UpstreamBodyError,
     resolve,
 )
+
+
+# .invalid เป็น TLD ที่สงวนไว้ไม่มีทาง resolve ได้ -- ถ้าเทสหลุดไปยิงจริงก็ไปไม่ถึงไหน
+# และที่อยู่ของ endpoint จริงไม่ต้องอยู่ในไฟล์นี้เลย
+TEST_BASE_URL = "https://llm.test.invalid/v1"
 
 
 def _anthropic_response(text: str, stop_reason: str = "end_turn"):
@@ -97,7 +101,7 @@ def test_claude_completer_raises_when_there_is_no_text_block():
 def test_claude_completer_names_the_env_var_when_the_key_is_missing():
     with (
         patch.dict("os.environ", {"ANTHROPIC_API_KEY": "   "}),
-        pytest.raises(MissingApiKeyError, match="ANTHROPIC_API_KEY"),
+        pytest.raises(MissingSettingError, match="ANTHROPIC_API_KEY"),
     ):
         resolve("claude-opus-5").complete("ระบบ", "เนื้อหา", 10)
 
@@ -179,7 +183,7 @@ def test_glm_sends_thai_as_utf8_not_escape_sequences():
     """จุดที่พังจริงตอนทดลอง: ถ้า json.dumps escape เป็น \\uXXXX ปลายทางจะได้ ????"""
     patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
 
-    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}):
         result = resolve("GLM-5.2").complete("ระบบ", "ผู้พูด 1 พูดว่าสวัสดี", 999)
 
     assert result == Completion(text="สรุป", truncated=False)
@@ -189,7 +193,7 @@ def test_glm_sends_thai_as_utf8_not_escape_sequences():
     assert "\\u" not in body
     assert request.headers["Content-type"] == "application/json; charset=utf-8"
     assert request.headers["Authorization"] == "Bearer test-key"
-    assert request.full_url == f"{DEFAULT_LLM_BASE_URL}/chat/completions"
+    assert request.full_url == f"{TEST_BASE_URL}/chat/completions"
     assert captured["timeout"] == LLM_TIMEOUT_SECONDS
 
     sent = json.loads(body)
@@ -204,7 +208,7 @@ def test_glm_sends_thai_as_utf8_not_escape_sequences():
 def test_glm_finish_reason_length_means_truncated():
     patcher, _ = _patch_urlopen(_llm_payload("ขาด", "length"))
 
-    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}):
         result = resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
 
     assert result.truncated is True
@@ -221,7 +225,7 @@ def test_glm_empty_content_is_a_failure_not_an_empty_summary():
 
     with (
         patcher,
-        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}),
         pytest.raises(UnusableAnswerError, match="no text"),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
@@ -232,7 +236,7 @@ def test_glm_whitespace_only_content_is_also_a_failure():
 
     with (
         patcher,
-        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}),
         pytest.raises(UnusableAnswerError, match="no text"),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
@@ -246,7 +250,7 @@ def test_glm_200_error_envelope_surfaces_the_proxys_own_message():
 
     with (
         patcher,
-        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}),
         pytest.raises(UnusableAnswerError, match="budget exceeded for key"),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
@@ -257,7 +261,7 @@ def test_glm_empty_choices_list_does_not_raise_indexerror():
 
     with (
         patcher,
-        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}),
         pytest.raises(UnusableAnswerError),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
@@ -268,7 +272,7 @@ def test_glm_choice_with_no_message_key_does_not_raise_keyerror():
 
     with (
         patcher,
-        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}),
         pytest.raises(UnusableAnswerError),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
@@ -283,7 +287,7 @@ def test_glm_content_as_parts_list_does_not_raise_attributeerror():
 
     with (
         patcher,
-        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}),
         pytest.raises(UnusableAnswerError),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
@@ -302,7 +306,7 @@ def test_glm_non_object_top_level_is_not_retried(payload):
 
     patcher, _ = _patch_urlopen(payload)
 
-    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}):
         with pytest.raises(UnusableAnswerError) as caught:
             resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
 
@@ -326,11 +330,11 @@ def test_glm_non_json_body_is_retried_with_body_preserved(raw_body, marker):
 
     patcher, _ = _patch_urlopen_raw(raw_body)
 
-    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}):
         with pytest.raises(UpstreamBodyError) as caught:
             resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
 
-    assert not isinstance(caught.value, (UnusableAnswerError, MissingApiKeyError))
+    assert not isinstance(caught.value, (UnusableAnswerError, MissingSettingError))
     assert is_retryable(caught.value) is True
     if marker:
         assert marker in str(caught.value)
@@ -344,7 +348,7 @@ def test_glm_non_utf8_body_is_retried():
 
     patcher, _ = _patch_urlopen_bytes(b"\xff\xfe not utf-8")
 
-    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}):
         with pytest.raises(UpstreamBodyError) as caught:
             resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
 
@@ -359,7 +363,7 @@ def test_glm_malformed_response_is_not_retried():
 
     patcher, _ = _patch_urlopen({"error": {"message": "budget exceeded"}})
 
-    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}):
         try:
             resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
             pytest.fail("expected an exception")
@@ -375,7 +379,7 @@ def test_glm_http_error_carries_a_status_code_for_is_retryable():
 
     with (
         patch("urllib.request.urlopen", side_effect=error),
-        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}),
         pytest.raises(HttpStatusError) as caught,
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
@@ -386,7 +390,7 @@ def test_glm_http_error_carries_a_status_code_for_is_retryable():
 def test_glm_names_its_own_env_var_when_the_key_is_missing():
     with (
         patch.dict("os.environ", {"LLM_API_KEY": ""}),
-        pytest.raises(MissingApiKeyError, match="LLM_API_KEY"),
+        pytest.raises(MissingSettingError, match="LLM_API_KEY"),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
 
@@ -396,13 +400,24 @@ def test_glm_completer_always_uses_llm_timeout_seconds():
     # LLM_TIMEOUT_SECONDS เสมอ
     patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
 
-    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 999)
 
     assert captured["timeout"] == LLM_TIMEOUT_SECONDS
 
 
-def test_glm_honours_a_custom_base_url():
+def test_glm_names_the_base_url_env_var_when_it_is_not_set():
+    """ไม่มี default ของ base URL ในโค้ดแล้ว (ที่อยู่ endpoint ภายในไม่ควรอยู่ใน repo
+    สาธารณะ) -- ถ้าไม่ตั้ง LLM_BASE_URL ต้องบอกชื่อ env var ตรงๆ ไม่ใช่ไปยิง URL เปล่า
+    แล้วได้ error ที่อ่านไม่ออก"""
+    with (
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": ""}),
+        pytest.raises(MissingSettingError, match="LLM_BASE_URL"),
+    ):
+        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+
+def test_glm_uses_the_configured_base_url():
     patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
 
     with patcher, patch.dict(
@@ -416,7 +431,7 @@ def test_glm_honours_a_custom_base_url():
     )
 
 
-def test_glm_strips_a_trailing_slash_from_a_custom_base_url():
+def test_glm_strips_a_trailing_slash_from_the_base_url():
     # README บอกห้ามใส่ "/" ปิดท้ายไว้แค่ในเนื้อความ ไม่มีอะไรบังคับจริง -- ถ้าใส่มา
     # ผลลัพธ์เดิมคือ ".../v1//chat/completions" ซึ่งเป็น 404 ทึบ ไม่ retryable แล้ว
     # ทุก chunk กลายเป็น placeholder ทั้งประชุม ต้องกันไว้ที่โค้ด ไม่ใช่แค่บอกในเอกสาร

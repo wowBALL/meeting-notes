@@ -15,7 +15,7 @@ from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
     HttpStatusError,
-    MissingApiKeyError,
+    MissingSettingError,
     Provider,
     UnusableAnswerError,
     _anthropic_completer,
@@ -50,7 +50,7 @@ def _response(text: str, stop_reason: str = "end_turn"):
 
 @contextlib.contextmanager
 def _patch_anthropic(client):
-    """patch ทั้ง SDK และ env var เพราะ llm._require_key อ่าน ANTHROPIC_API_KEY จริง
+    """patch ทั้ง SDK และ env var เพราะ llm._require_setting อ่าน ANTHROPIC_API_KEY จริง
 
     เดิมโค้ดรับ api_key มาเป็น argument จึงไม่ต้องมี env ตอนเทส ตอนนี้ key เป็นเรื่อง
     ของ provider ซึ่งอ่านจาก environment -- ใส่ให้ที่นี่ที่เดียวแทนการเติม 24 ที่
@@ -720,13 +720,13 @@ def test_is_retryable_accepts_timeout_and_dns_failures(error):
 def test_is_retryable_by_exception_shape():
     """สี่รูปแบบที่ is_retryable ต้องแยกออกจากกัน:
 
-    UnusableAnswerError และ MissingApiKeyError เป็นคำตอบที่แน่นอนแล้ว -- ยิงซ้ำก็ได้
+    UnusableAnswerError และ MissingSettingError เป็นคำตอบที่แน่นอนแล้ว -- ยิงซ้ำก็ได้
     ผลเดิม HttpStatusError(429) ยังลองใหม่ได้เหมือน 4xx/5xx ทั่วไป ส่วน RuntimeError
     ธรรมดา (ไม่มี status_code, ไม่ใช่สองชนิดข้างต้น) ยังต้องลองใหม่ได้เหมือนเดิม --
     นี่คือกรณีที่กฎเดิม (ทุก RuntimeError ที่ไม่มี status_code ไม่ retryable) จับพลาด
     """
     assert is_retryable(UnusableAnswerError("no text")) is False
-    assert is_retryable(MissingApiKeyError("no key")) is False
+    assert is_retryable(MissingSettingError("no key")) is False
     assert is_retryable(HttpStatusError(429, "slow down")) is True
     assert is_retryable(RuntimeError("transient")) is True
 

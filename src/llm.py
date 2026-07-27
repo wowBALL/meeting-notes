@@ -16,7 +16,10 @@ from typing import Callable
 CLAUDE_MAP_MAX_TOKENS = 4096
 CLAUDE_REDUCE_MAX_TOKENS = 8192
 
-DEFAULT_LLM_BASE_URL = "https://your-llm-endpoint.example/v1"
+# ไม่มีค่า default ของ base URL ในไฟล์นี้โดยเจตนา: repo นี้เป็น public ที่อยู่ของ
+# endpoint ภายในองค์กรจึงไม่ควรถูกฝังลงโค้ดที่เผยแพร่ และการมี default ก็ไม่ได้ช่วยอะไร
+# อยู่แล้ว -- คนที่จะใช้ provider นี้ต้องตั้ง key ใน .env อยู่ดี ตั้ง URL เพิ่มอีกบรรทัด
+# ไม่ได้เพิ่มภาระจริง ดู LLM_BASE_URL ใน .env.example
 
 # GLM-5.2 เป็น reasoning model: max_tokens คุมผลรวมของ reasoning + คำตอบ ไม่ใช่
 # คำตอบเพียงอย่างเดียว วัดจริงบน transcript ไทยแล้ว reasoning กินได้ถึง 12,909
@@ -38,10 +41,13 @@ class UnknownModelError(ValueError):
     """model id ที่ไม่มีใน registry -- ล้มตรงนี้ก่อนจ่ายค่าเรียก API"""
 
 
-class MissingApiKeyError(RuntimeError):
-    """provider ที่เลือกไม่มี key ให้ใช้
+class MissingSettingError(RuntimeError):
+    """ค่าใน .env ที่ provider ที่เลือกต้องใช้ ยังไม่ได้ตั้ง (key หรือ base URL)
 
     ข้อความต้องบอกชื่อ env var ที่ต้องตั้ง เพราะตอนนี้มีมากกว่าหนึ่งตัวให้สับสนได้
+
+    คลาสเดียวครอบทั้ง key และ base URL เพราะไม่มีใครแยกสองกรณีนี้ออกจากกันในการ
+    ตัดสินใจอะไร -- ทั้งคู่แปลว่า "ตั้งค่าไม่ครบ ยิงไปก็ไม่มีประโยชน์"
     """
 
 
@@ -76,7 +82,7 @@ class UpstreamBodyError(RuntimeError):
     รอบถัดไปมีโอกาสได้ JSON ที่ถูกต้องกลับมา
 
     ไม่มี status_code ติดมา (ไม่ใช่ urllib.error.HTTPError) และไม่ใช่ UnusableAnswerError
-    หรือ MissingApiKeyError จึงถูก is_retryable ตัดสินว่า retryable โดยอัตโนมัติ -- ตรง
+    หรือ MissingSettingError จึงถูก is_retryable ตัดสินว่า retryable โดยอัตโนมัติ -- ตรง
     ตามเจตนา: ค่า backoff ที่เสียไปถูกกว่าการทิ้งสรุปทั้ง chunk ไปเฉยๆ
     """
 
@@ -113,14 +119,14 @@ class Provider:
     complete: Callable[[str, str, int], Completion]
 
 
-def _require_key(env_var: str, model_id: str) -> str:
-    """อ่าน key ตอนจะใช้ ไม่ใช่ตอน import -- import โมดูลนี้ต้องไม่พังเมื่อยังไม่ตั้ง .env"""
-    api_key = os.environ.get(env_var, "").strip()
-    if not api_key:
-        raise MissingApiKeyError(
+def _require_setting(env_var: str, model_id: str) -> str:
+    """อ่านค่าตอนจะใช้ ไม่ใช่ตอน import -- import โมดูลนี้ต้องไม่พังเมื่อยังไม่ตั้ง .env"""
+    value = os.environ.get(env_var, "").strip()
+    if not value:
+        raise MissingSettingError(
             f"ไม่ได้ตั้ง {env_var} ใน .env -- ต้องตั้งก่อนจึงจะสรุปด้วย {model_id} ได้"
         )
-    return api_key
+    return value
 
 
 def _anthropic_completer(
@@ -129,7 +135,7 @@ def _anthropic_completer(
     def complete(system: str, content: str, max_tokens: int) -> Completion:
         from anthropic import Anthropic
 
-        api_key = _require_key(key_env, model_id)
+        api_key = _require_setting(key_env, model_id)
         # timeout ปล่อยให้ SDK ใช้ default ของมันเอง แต่ max_retries=0 ต้องตั้งเอง:
         # ค่า default ของ SDK คือ retry ในตัวเองสูงสุด 2 ครั้ง (รวม 3 HTTP attempt
         # ต่อ complete() หนึ่งครั้ง) ซึ่งซ้อนกับ retry_with_backoff และการ escalate
@@ -185,17 +191,17 @@ def _response_detail(payload: object) -> str:
 
 
 def _openai_compat_completer(
-    model_id: str, key_env: str, base_url_env: str, default_base_url: str
+    model_id: str, key_env: str, base_url_env: str
 ) -> Callable[[str, str, int], Completion]:
     def complete(system: str, content: str, max_tokens: int) -> Completion:
-        api_key = _require_key(key_env, model_id)
+        api_key = _require_setting(key_env, model_id)
         # .rstrip("/"): LLM_BASE_URL ที่ลงท้ายด้วย "/" (เช่นก็อปมาทั้งท้าย path)
         # จะกลายเป็น ".../v1//chat/completions" -- proxy บางตัวตอบ 404 ทึบให้กับ
         # double slash แบบนี้ ซึ่งไม่มี status_code ที่ is_retryable เดาว่า retryable
         # ได้ (เป็น HttpStatusError(404) ที่ retryable=False อยู่แล้ว) ผลคือทุก
         # chunk กลายเป็น placeholder ทั้งประชุมจากแค่ "/" ตัวเดียวที่เกิน README
         # เตือนไว้ในเนื้อความอย่างเดียว ไม่มีอะไรบังคับจริงถ้าไม่ตัดที่นี่
-        base_url = (os.environ.get(base_url_env, "").strip() or default_base_url).rstrip("/")
+        base_url = _require_setting(base_url_env, model_id).rstrip("/")
         # ensure_ascii=False คือหัวใจ: transcript เป็นภาษาไทยทั้งไฟล์ ถ้า escape เป็น
         # \uXXXX ขนาด payload บวมและ proxy บางตัวส่งต่อเป็น ???? -- ทดสอบไว้แล้วว่า
         # แบบนี้ภาษาไทยกลับมาตรงทุกตัวอักษร
@@ -309,9 +315,7 @@ PROVIDERS: dict[str, Provider] = {
         model_id="GLM-5.2",
         map_max_tokens=GLM_MAP_MAX_TOKENS,
         reduce_max_tokens=GLM_REDUCE_MAX_TOKENS,
-        complete=_openai_compat_completer(
-            "GLM-5.2", "LLM_API_KEY", "LLM_BASE_URL", DEFAULT_LLM_BASE_URL
-        ),
+        complete=_openai_compat_completer("GLM-5.2", "LLM_API_KEY", "LLM_BASE_URL"),
     ),
     "claude-opus-5": _claude("claude-opus-5"),
     "claude-sonnet-5": _claude("claude-sonnet-5"),

@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
 from src.config import DEFAULT_SUMMARY_MODEL
-from src.llm import MissingApiKeyError, Provider, UnusableAnswerError, resolve
+from src.llm import MissingSettingError, Provider, UnusableAnswerError, resolve
 from src.render import format_timestamp
 from src.retry import retry_with_backoff
 
@@ -95,7 +95,7 @@ _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 def is_retryable(error: Exception) -> bool:
     """เรียกซ้ำแล้วมีโอกาสได้คำตอบต่างจากเดิมไหม
 
-    UnusableAnswerError กับ MissingApiKeyError คือคำตอบที่แน่นอนแล้ว -- คำขอเดิมยิงซ้ำ
+    UnusableAnswerError กับ MissingSettingError คือคำตอบที่แน่นอนแล้ว -- คำขอเดิมยิงซ้ำ
     ก็ได้ผลเดิม การเรียกครั้งแรกที่ raise แบบนี้ไม่มีทางไปถึง path เพิ่ม budget เป็น
     สองเท่าใน _summarize ด้านล่างจริง (path นั้นทำงานเฉพาะตอนได้
     Completion(truncated=True) กลับมาเท่านั้น) แต่ path เพิ่ม budget เองก็เรียก
@@ -110,7 +110,7 @@ def is_retryable(error: Exception) -> bool:
 
     ไม่มี status_code แปลว่าไปไม่ถึง API (เน็ตหลุด หมดเวลา) ซึ่งเป็นอาการที่หายเองได้
     """
-    if isinstance(error, (UnusableAnswerError, MissingApiKeyError)):
+    if isinstance(error, (UnusableAnswerError, MissingSettingError)):
         return False
     status_code = getattr(error, "status_code", None)
     if status_code is None:

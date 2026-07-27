@@ -58,8 +58,9 @@ copy .env.example .env
 
 ```ini
 LLM_API_KEY=sk-...
+LLM_BASE_URL=https://your-llm-endpoint.example/v1
 HF_TOKEN=hf_...
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=
 CLAUDE_MODEL=GLM-5.2
 WHISPER_MODEL=small
 ```
@@ -74,7 +75,7 @@ WHISPER_MODEL=small
 |---|---|---|
 | `CLAUDE_MODEL` | `GLM-5.2` | ใช้เมื่อไฟล์เสียงไม่ได้ระบุโมเดลมา (ดูหัวข้อถัดไป) ตั้งเป็น `transcript-only` ได้ ไฟล์ที่ลากใส่ `inbox/` เองจะใช้ค่านี้ ชื่อตัวแปรยังเป็น `CLAUDE_MODEL` ตามเดิมทั้งที่รับ id ของ provider อื่นได้แล้ว — เปลี่ยนชื่อจะทำให้ `.job.json` ที่ค้างอยู่ใน `inbox/` อ่านไม่ออก |
 | `LLM_API_KEY` | — | key ของ endpoint บริษัท จำเป็นเมื่อสรุปด้วย `GLM-5.2` |
-| `LLM_BASE_URL` | `https://your-llm-endpoint.example/v1` | เปลี่ยนเมื่อ endpoint ย้าย ห้ามมี `/` ปิดท้าย |
+| `LLM_BASE_URL` | — (ต้องตั้งเอง) | URL ของ endpoint ที่องค์กรรัน จำเป็นเมื่อสรุปด้วย `GLM-5.2` **ไม่มีค่า default ในโค้ด** เพราะที่อยู่ของ endpoint ภายในไม่ควรถูกฝังลง repo สาธารณะ ใส่ `/` ปิดท้ายได้ โค้ดตัดให้เอง |
 | `ANTHROPIC_API_KEY` | — | จำเป็นเฉพาะเมื่อเลือกสรุปด้วย Claude |
 | `WHISPER_MODEL` | `small` | เร็ว ใช้ CPU ได้ เปลี่ยนเป็น `large-v3` ได้ถ้ามี GPU |
 | `UI_PORT` | `8765` | พอร์ตของหน้าจอตัวรัน (`start-ui.bat`) เปลี่ยนเมื่อพอร์ตนี้ชนกับโปรแกรมอื่น |
