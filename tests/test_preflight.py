@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 import src.preflight as preflight
-from src.config import DEFAULT_CLAUDE_MODEL
+from src.config import DEFAULT_SUMMARY_MODEL
+from src.llm import Completion, MissingApiKeyError
 from src.preflight import (
     LOOPBACK_SILENT_DBFS,
     MIC_GOOD_DBFS,
@@ -13,13 +14,15 @@ from src.preflight import (
     CheckResult,
     check_api_key,
     check_summary_model,
+    check_summary_readiness,
     classify_probe_error,
     evaluate_loopback,
     evaluate_mic,
     evaluate_samplerate,
     format_report,
     peak_dbfs,
-    read_api_settings,
+    probe_summary_model,
+    read_summary_settings,
     run_preflight,
 )
 
@@ -310,22 +313,144 @@ def test_check_summary_model_never_fails():
     assert check_summary_model("not-a-real-model").status != "fail"
 
 
-def test_read_api_settings_returns_an_empty_key_instead_of_raising(tmp_path, monkeypatch):
+# --- probe_summary_model / check_api_key ผ่าน provider ที่ resolve ได้จริง ----------
+
+
+def test_probe_summary_model_uses_the_provider_of_the_given_model():
+    # ค่าเริ่มต้นเป็น GLM แล้ว การตรวจ key ของ Anthropic เสมอจะบอกผิดฝั่งทุกครั้ง
+    called = {}
+
+    def fake_complete(system, content, max_tokens):
+        called["max_tokens"] = max_tokens
+        return Completion(text="hi", truncated=False)
+
+    provider = MagicMock()
+    provider.complete = fake_complete
+
+    with patch("src.preflight.resolve", return_value=provider) as resolve_mock:
+        probe_summary_model("GLM-5.2")
+
+    resolve_mock.assert_called_once_with("GLM-5.2")
+    assert called["max_tokens"] == 1
+
+
+def test_an_empty_answer_from_the_probe_still_passes():
+    # probe ถามว่า key ใช้ได้และโมเดลมีอยู่ ไม่ได้ถามคุณภาพคำตอบ -- GLM ที่ max_tokens=1
+    # ใช้โควตาหมดไปกับ reasoning แล้วคืน content ว่าง ซึ่งพิสูจน์แล้วว่าไปถึงโมเดลจริง
+    provider = MagicMock()
+    provider.complete.side_effect = RuntimeError(
+        "GLM-5.2 returned no text (finish_reason='length')"
+    )
+
+    with patch("src.preflight.resolve", return_value=provider):
+        result = check_api_key("sk-test", "GLM-5.2")
+
+    assert result.status == "ok"
+
+
+def test_a_missing_key_names_the_env_var_of_that_provider():
+    provider = MagicMock()
+    provider.complete.side_effect = MissingApiKeyError(
+        "ไม่ได้ตั้ง LLM_API_KEY ใน .env"
+    )
+
+    with patch("src.preflight.resolve", return_value=provider):
+        result = check_api_key("sk-test", "GLM-5.2")
+
+    assert result.status == "warn"
+    assert "LLM_API_KEY" in result.detail
+
+
+def test_probe_summary_model_reraises_an_http_status_error():
+    # HttpStatusError พก .status_code มาให้ classify_probe_error อ่านต่อ -- ต้องไม่ถูก
+    # probe_summary_model กลืนเป็น "ผ่าน" เหมือน RuntimeError ธรรมดา
+    class FakeHttpError(RuntimeError):
+        def __init__(self):
+            super().__init__("HTTP 401: invalid key")
+            self.status_code = 401
+
+    provider = MagicMock()
+    provider.complete.side_effect = FakeHttpError()
+
+    with patch("src.preflight.resolve", return_value=provider):
+        result = check_api_key("sk-test", "GLM-5.2")
+
+    assert result.status == "warn"
+    assert "401" in result.detail
+
+
+def test_check_api_key_reports_the_right_env_var_when_the_glm_key_is_missing():
+    # api_no_key เดิมพูดถึง ANTHROPIC_API_KEY เสมอไม่ว่าโมเดลจะเป็นอะไร -- ผิดฝั่งทันที
+    # ที่ GLM เป็นโมเดลที่ตั้งไว้
+    result = check_api_key("", "GLM-5.2")
+
+    assert result.status == "warn"
+    assert "LLM_API_KEY" in result.detail
+    assert "ANTHROPIC_API_KEY" not in result.detail
+
+
+# --- check_summary_readiness: หนึ่งสาเหตุ หนึ่งรายงาน -----------------------------
+
+
+def test_check_summary_readiness_skips_the_key_probe_when_the_model_is_unregistered():
+    # โมเดลไม่อยู่ใน registry แปลว่าไม่มี provider ให้ยิงคำขอตรวจ key เลย -- ต้องได้
+    # คำเตือนข้อเดียวจาก check_summary_model ไม่ใช่สองข้อสำหรับสาเหตุเดียวกัน
+    results = check_summary_readiness("sk-test", "not-a-real-model")
+
+    assert [r.code for r in results] == ["model_unresolvable"]
+
+
+def test_check_summary_readiness_checks_the_key_when_the_model_resolves():
+    provider = MagicMock()
+    provider.complete.return_value = Completion(text="hi", truncated=False)
+
+    with patch("src.preflight.resolve", return_value=provider):
+        results = check_summary_readiness("sk-test", "claude-opus-5")
+
+    assert [r.code for r in results] == ["model_ok", "api_ok"]
+
+
+# --- read_summary_settings: ไม่รู้จัก provider ใด ๆ เป็นการเฉพาะ --------------------
+
+
+def test_read_summary_settings_returns_an_empty_key_instead_of_raising(tmp_path, monkeypatch):
     # load_config โยน KeyError เมื่อไม่มี ANTHROPIC_API_KEY -- ซึ่งคือกรณีที่ต้องรายงาน ไม่ใช่พัง
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
 
-    api_key, model = read_api_settings(base_dir=tmp_path)
+    api_key, model = read_summary_settings(base_dir=tmp_path)
 
     assert api_key == ""
-    assert model == DEFAULT_CLAUDE_MODEL
+    assert model == DEFAULT_SUMMARY_MODEL
 
 
-def test_read_api_settings_reads_the_configured_model(tmp_path, monkeypatch):
+def test_read_summary_settings_reads_the_configured_model(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("CLAUDE_MODEL", "claude-sonnet-5")
 
-    assert read_api_settings(base_dir=tmp_path) == ("sk-ant-test", "claude-sonnet-5")
+    assert read_summary_settings(base_dir=tmp_path) == ("sk-ant-test", "claude-sonnet-5")
+
+
+def test_read_summary_settings_reads_the_glm_key_when_glm_is_configured(tmp_path, monkeypatch):
+    # จุดที่ทั้งบั๊กเดิมอยู่: เดิมโค้ดนี้อ่าน ANTHROPIC_API_KEY เสมอไม่ว่าโมเดลจะเป็นอะไร
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "llm-test-key")
+    monkeypatch.setenv("CLAUDE_MODEL", "GLM-5.2")
+
+    assert read_summary_settings(base_dir=tmp_path) == ("llm-test-key", "GLM-5.2")
+
+
+def test_read_summary_settings_returns_an_empty_key_for_an_unregistered_model(
+    tmp_path, monkeypatch
+):
+    # ไม่มี provider ให้ถามว่า key_env ชื่ออะไร -- ปล่อยว่างไว้ ไม่ใช่เดาว่าเป็น Anthropic
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_MODEL", "not-a-real-model")
+
+    api_key, model = read_summary_settings(base_dir=tmp_path)
+
+    assert api_key == ""
+    assert model == "not-a-real-model"
 
 
 # --- สลับภาษา ------------------------------------------------------------

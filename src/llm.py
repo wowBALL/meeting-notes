@@ -103,6 +103,9 @@ class Provider:
     model_id: str
     map_max_tokens: int
     reduce_max_tokens: int
+    # ชื่อ env var ที่ provider นี้อ่าน key มา -- preflight ใช้ถามว่าจะเช็ค key ตัวไหน
+    # แทนที่จะเดาเองจาก model id (ดู src/preflight.py::read_summary_settings)
+    key_env: str
     complete: Callable[[str, str, int], Completion]
 
 
@@ -116,11 +119,13 @@ def _require_key(env_var: str, model_id: str) -> str:
     return api_key
 
 
-def _anthropic_completer(model_id: str) -> Callable[[str, str, int], Completion]:
+def _anthropic_completer(
+    model_id: str, key_env: str
+) -> Callable[[str, str, int], Completion]:
     def complete(system: str, content: str, max_tokens: int) -> Completion:
         from anthropic import Anthropic
 
-        api_key = _require_key("ANTHROPIC_API_KEY", model_id)
+        api_key = _require_key(key_env, model_id)
         client = Anthropic(api_key=api_key)
         response = client.messages.create(
             model=model_id,
@@ -143,11 +148,13 @@ def _anthropic_completer(model_id: str) -> Callable[[str, str, int], Completion]
 
 
 def _claude(model_id: str) -> Provider:
+    key_env = "ANTHROPIC_API_KEY"
     return Provider(
         model_id=model_id,
         map_max_tokens=CLAUDE_MAP_MAX_TOKENS,
         reduce_max_tokens=CLAUDE_REDUCE_MAX_TOKENS,
-        complete=_anthropic_completer(model_id),
+        key_env=key_env,
+        complete=_anthropic_completer(model_id, key_env),
     )
 
 
@@ -284,6 +291,7 @@ PROVIDERS: dict[str, Provider] = {
         model_id="GLM-5.2",
         map_max_tokens=GLM_MAP_MAX_TOKENS,
         reduce_max_tokens=GLM_REDUCE_MAX_TOKENS,
+        key_env="LLM_API_KEY",
         complete=_openai_compat_completer(
             "GLM-5.2", "LLM_API_KEY", "LLM_BASE_URL", DEFAULT_LLM_BASE_URL
         ),

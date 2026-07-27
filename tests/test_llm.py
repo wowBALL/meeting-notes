@@ -40,6 +40,15 @@ def test_resolve_returns_claude_budgets():
     assert provider.reduce_max_tokens == CLAUDE_REDUCE_MAX_TOKENS
 
 
+def test_resolve_exposes_the_env_var_each_provider_reads_its_key_from():
+    # preflight ต้องถามตรงนี้ว่า provider ที่ resolve ได้อ่าน key จาก env var ไหน
+    # แทนที่จะเดาเองว่า "ไม่ใช่ GLM-5.2 ก็ต้องเป็น Anthropic" -- ความรู้เฉพาะ provider
+    # ต้องอยู่ใน registry นี้ที่เดียว
+    assert resolve("claude-opus-5").key_env == "ANTHROPIC_API_KEY"
+    assert resolve("claude-sonnet-5").key_env == "ANTHROPIC_API_KEY"
+    assert resolve("GLM-5.2").key_env == "LLM_API_KEY"
+
+
 def test_resolve_rejects_an_unknown_model_by_name():
     with pytest.raises(UnknownModelError, match="ไม่มี-โมเดล-นี้"):
         resolve("ไม่มี-โมเดล-นี้")

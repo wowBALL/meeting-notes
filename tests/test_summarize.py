@@ -129,7 +129,8 @@ def test_map_budget_comes_from_the_provider_not_a_module_constant():
         model_id="claude-opus-5",
         map_max_tokens=distinct_map_budget,
         reduce_max_tokens=distinct_map_budget * 2,
-        complete=_anthropic_completer("claude-opus-5"),
+        key_env="ANTHROPIC_API_KEY",
+        complete=_anthropic_completer("claude-opus-5", "ANTHROPIC_API_KEY"),
     )
     client = _single_response_client("สรุป")
 

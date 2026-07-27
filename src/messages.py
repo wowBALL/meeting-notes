@@ -75,9 +75,10 @@ MESSAGES = {
         "samplerate_ok": "ตรงกันที่ {rate} Hz",
         "api_ok": "ใช้งานได้ปกติ",
         "api_no_key": (
-            "ไม่ได้ตั้งค่า ANTHROPIC_API_KEY ใน .env -- อัดและถอดเสียงได้ปกติ "
+            "ไม่ได้ตั้งค่า {env_var} ใน .env -- อัดและถอดเสียงได้ปกติ "
             "แต่จะไม่ได้สรุปอัตโนมัติ"
         ),
+        "api_no_key_for": "{error}",
         "api_rate_limited": (
             "key ใช้ได้ (ตอนนี้ชนลิมิตอัตราการเรียก แต่ตอนสรุปมี retry รออยู่แล้ว)"
         ),
@@ -181,9 +182,10 @@ MESSAGES = {
         "samplerate_ok": "both at {rate} Hz",
         "api_ok": "working",
         "api_no_key": (
-            "ANTHROPIC_API_KEY is not set in .env -- recording and transcription "
+            "{env_var} is not set in .env -- recording and transcription "
             "still work, but there will be no automatic summary"
         ),
+        "api_no_key_for": "{error}",
         "api_rate_limited": (
             "key works (rate-limited right now, but summarizing already retries)"
         ),

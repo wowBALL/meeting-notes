@@ -24,8 +24,8 @@ from pathlib import Path
 import numpy as np
 from dotenv import load_dotenv
 
-from src.config import DEFAULT_CLAUDE_MODEL, DEFAULT_UI_LANG
-from src.llm import PROVIDERS, UnknownModelError, resolve
+from src.config import DEFAULT_SUMMARY_MODEL, DEFAULT_UI_LANG
+from src.llm import PROVIDERS, MissingApiKeyError, UnknownModelError, resolve
 from src.messages import render
 from src.record import (
     get_common_samplerate,
@@ -48,9 +48,6 @@ TH = DEFAULT_UI_LANG
 
 SAMPLERATE_CHECK_NAME = render("check_samplerate", {}, TH)
 API_CHECK_NAME = render("check_api", {}, TH)
-# ตัดสั้นกว่า default ของ SDK (10 นาที) มาก -- นี่คือการตรวจก่อนอัด ไม่ใช่การเรียกจริง
-# เน็ตอืดจนเกินนี้ให้รายงานเป็นคำเตือนแล้วเดินหน้าต่อ ดีกว่าค้างคาหน้าจอก่อนประชุม
-API_PROBE_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass
@@ -142,39 +139,60 @@ def evaluate_samplerate(
     return _result("check_samplerate", "ok", "samplerate_ok", {"rate": rate}, lang)
 
 
-def read_api_settings(base_dir: Path | None = None) -> tuple[str, str]:
-    """(API key, โมเดลที่ตั้งไว้) อ่านจาก .env ตรง ๆ ไม่ผ่าน load_config
+def read_summary_settings(base_dir: Path | None = None) -> tuple[str, str]:
+    """(key ที่ provider ของโมเดลนี้ต้องใช้, โมเดลที่ตั้งไว้) อ่านจาก .env ตรง ๆ
 
-    load_config โยน KeyError เมื่อไม่มี ANTHROPIC_API_KEY -- ซึ่งเป็นหนึ่งในกรณีที่
-    หน้าที่ของโมดูลนี้คือรายงานให้อ่านรู้เรื่อง ไม่ใช่พังคาหน้าจอด้วย traceback
+    ไม่ผ่าน load_config เพราะหน้าที่ของโมดูลนี้คือรายงานปัญหาการตั้งค่าให้อ่านรู้เรื่อง
+    ไม่ใช่พังคาหน้าจอด้วย traceback
+
+    ถาม resolve() ว่า provider ของโมเดลนี้อ่าน key จาก env var ชื่ออะไร แทนที่จะเดาเอง
+    ว่า "ไม่ใช่ GLM-5.2 ก็ต้องเป็น Anthropic" -- ประโยคแบบนั้นคือความรู้เฉพาะ provider ที่
+    ควรอยู่ใน registry ของ src/llm.py ที่เดียว เพิ่ม provider ตัวที่สี่แล้วลืมแก้ที่นี่
+    จะเงียบ ๆ ไปเช็ค key ผิดตัวโดยไม่มีใครรู้
+
+    โมเดลที่ไม่อยู่ใน registry ไม่มี provider ให้ถาม -- คืน key ว่างไว้ check_summary_model
+    เป็นคนรายงานปัญหานั้นแทน
     """
     load_dotenv((base_dir or Path.cwd()) / ".env")
-    return (
-        os.environ.get("ANTHROPIC_API_KEY", ""),
-        os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL),
-    )
+    model = os.environ.get("CLAUDE_MODEL", DEFAULT_SUMMARY_MODEL)
+    try:
+        key_env = resolve(model).key_env
+    except UnknownModelError:
+        return ("", model)
+    return (os.environ.get(key_env, ""), model)
 
 
-def probe_claude(api_key: str, model: str) -> None:
-    """ยิงคำขอที่เล็กที่สุดเท่าที่ยิงได้ ผ่าน = ไม่โยนอะไรออกมา
+def probe_summary_model(model: str) -> None:
+    """ยิงคำขอที่เล็กที่สุดเท่าที่ยิงได้ไปยัง provider ของโมเดลนี้ ผ่าน = ไม่โยนอะไรออกมา
 
-    ต้องเรียกจริงเพราะ Anthropic ไม่มี endpoint ให้ถามสถานะ key หรือยอดเครดิตคงเหลือ
-    ทั้งสองอย่างอ่านได้จาก error ที่ตอบกลับมาเท่านั้น max_tokens=1 ทำให้ค่าใช้จ่ายต่อ
-    การตรวจหนึ่งครั้งอยู่ในหลักเศษสตางค์
+    ต้องเรียกจริงเพราะไม่มี endpoint ให้ถามสถานะ key หรือยอดเครดิตคงเหลือ ทั้งสอง
+    อย่างอ่านได้จาก error ที่ตอบกลับมาเท่านั้น max_tokens=1 ทำให้ค่าใช้จ่ายต่อการตรวจ
+    หนึ่งครั้งอยู่ในหลักเศษสตางค์ ยิงผ่าน resolve(model).complete() ตัวเดียวกับที่
+    summarize.py เรียกจริง -- provider ไหนถูกเลือกก็ถูกตรวจ ไม่ใช่ Anthropic เสมอ
+
+    คำตอบว่างเปล่าถือว่าผ่าน -- reasoning model ที่ max_tokens=1 ใช้โควตาหมดก่อนเขียน
+    อะไรได้ ซึ่งพิสูจน์แล้วว่าคำขอไปถึงโมเดลจริงและ key ผ่าน auth แล้ว สิ่งที่ตรวจคือ
+    key ใช้ได้และโมเดลมีอยู่ ไม่ใช่คุณภาพของคำตอบ
     """
-    from anthropic import Anthropic
-
-    client = Anthropic(
-        api_key=api_key, timeout=API_PROBE_TIMEOUT_SECONDS, max_retries=0
-    )
-    client.messages.create(
-        model=model,
-        max_tokens=1,
-        messages=[{"role": "user", "content": "hi"}],
-    )
+    try:
+        resolve(model).complete("hi", "hi", 1)
+    except MissingApiKeyError:
+        # สืบทอดจาก RuntimeError เหมือนกัน แต่ความหมายตรงข้าม: ยังไปไม่ถึงโมเดลเลย
+        # ต้องจับก่อน except RuntimeError ข้างล่าง ไม่งั้นจะถูกกลืนเป็น "ผ่าน"
+        raise
+    except RuntimeError as e:
+        if hasattr(e, "status_code"):
+            # HttpStatusError -- คำตอบเรื่อง auth/โควตา ต้องให้ classify_probe_error อ่าน
+            raise
+        # "returned no text" -- ไปถึงโมเดลแล้ว ถือว่าผ่าน
+        return
 
 
 def classify_probe_error(error: Exception, model: str, lang: str = TH) -> CheckResult:
+    if isinstance(error, MissingApiKeyError):
+        return _result(
+            "check_api", "warn", "api_no_key_for", {"error": str(error)}, lang
+        )
     status_code = getattr(error, "status_code", None)
     message = str(error)
     if status_code == 429:
@@ -221,16 +239,39 @@ def check_api_key(api_key: str, model: str, probe=None, lang: str = TH) -> Check
     เพราะ start-meeting.bat ถามยกเลิกการอัดเมื่อเจอ "ไม่ผ่าน" และ key เสียไม่ใช่เหตุ
     ให้ไม่อัด: transcript ยังได้ครบ เอาไปให้ Claude สรุปทีหลังได้ ส่วนประชุมที่ไม่ได้อัด
     นั้นหายถาวร
+
+    เมื่อไม่มี `probe` ระบุมา (ทางเดินจริงตอน main() เรียก) จะยิงผ่าน probe_summary_model
+    ซึ่งถาม resolve(model) เอง -- จึงตรวจ provider ที่ model จะใช้จริง ไม่ใช่ Anthropic เสมอ
     """
     if not api_key.strip():
-        return _result("check_api", "warn", "api_no_key", {}, lang)
+        try:
+            env_var = resolve(model).key_env
+        except UnknownModelError:
+            # ไม่มี provider ให้บอกชื่อ env var -- เกิดขึ้นได้เฉพาะตอนถูกเรียกตรงโดยไม่ผ่าน
+            # check_summary_readiness (ซึ่งกันกรณีนี้ไว้แล้ว) ปล่อยว่างดีกว่าเดา
+            env_var = ""
+        return _result("check_api", "warn", "api_no_key", {"env_var": env_var}, lang)
     try:
-        (probe or probe_claude)(api_key, model)
+        (probe or (lambda _api_key, m: probe_summary_model(m)))(api_key, model)
     except Exception as e:
         return classify_probe_error(e, model, lang)
     # ไม่ต้องบอกชื่อโมเดล (บรรทัด "กำลังตรวจ..." บอกไปแล้ว) และไม่ต้องอธิบายว่าทำไม
     # ถึงไม่มีตัวเลขเครดิต -- คนอ่านบรรทัดนี้ตอนกำลังจะเข้าประชุม ผ่านคือผ่าน จบ
     return _result("check_api", "ok", "api_ok", {}, lang)
+
+
+def check_summary_readiness(api_key: str, model: str, lang: str = TH) -> list[CheckResult]:
+    """ผลตรวจทั้งสองข้อของสาย "จะสรุปได้ไหม": โมเดลอยู่ใน registry ไหม แล้วถ้าอยู่ key
+    ใช้ได้ไหม
+
+    โมเดลไม่อยู่ใน registry ทำให้ทั้งสองข้อพังพร้อมกันด้วยสาเหตุเดียว -- ไม่มี provider
+    ให้ยิงคำขอตรวจ key เลย จึงคืนแค่ผลตรวจโมเดลข้อเดียว ไม่ใช่สองคำเตือนสำหรับสาเหตุ
+    เดียวกัน (ซึ่งจะสอนให้คนอ่านรายงานแบบข้ามผ่าน)
+    """
+    model_result = check_summary_model(model, lang=lang)
+    if model_result.status != "ok":
+        return [model_result]
+    return [model_result, check_api_key(api_key, model, lang=lang)]
 
 
 def format_report(results: list[CheckResult], lang: str = TH) -> str:
@@ -326,16 +367,17 @@ def run_preflight(seconds: int = MEASURE_SECONDS, lang: str = TH) -> list[CheckR
 
 
 def main() -> int:
-    # ต้องเรียกก่อนอ่าน UI_LANG: read_api_settings เป็นตัวที่ load_dotenv เข้ามา
+    # ต้องเรียกก่อนอ่าน UI_LANG: read_summary_settings เป็นตัวที่ load_dotenv เข้ามา
     # ถ้าสลับลำดับ ค่า UI_LANG ที่ตั้งใน .env จะไม่มีผลเลย
-    api_key, claude_model = read_api_settings()
+    api_key, model = read_summary_settings()
     lang = os.environ.get("UI_LANG", TH)
-    print(render("preflight_checking_key", {"model": claude_model}, lang))
-    model_result = check_summary_model(claude_model, lang=lang)
-    api_result = check_api_key(api_key, claude_model, lang=lang)
+    print(render("preflight_checking_key", {"model": model}, lang))
+    # ข้อเดียวถ้าโมเดลไม่อยู่ใน registry (ไม่มี provider ให้ตรวจ key เลย) สองข้อถ้า
+    # โมเดลใช้ได้ -- ดู check_summary_readiness
+    key_results = check_summary_readiness(api_key, model, lang=lang)
 
     print(render("preflight_checking_audio", {"seconds": MEASURE_SECONDS}, lang))
-    results = [*run_preflight(lang=lang), model_result, api_result]
+    results = [*run_preflight(lang=lang), *key_results]
     print()
     print(format_report(results, lang))
     return 1 if any(r.status == "fail" for r in results) else 0
