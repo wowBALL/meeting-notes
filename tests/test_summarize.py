@@ -1,9 +1,11 @@
 import contextlib
 import inspect
 import logging
+import socket
 import threading
 import time
 from unittest.mock import MagicMock, patch
+from urllib.error import URLError
 
 import pytest
 
@@ -129,7 +131,6 @@ def test_map_budget_comes_from_the_provider_not_a_module_constant():
         model_id="claude-opus-5",
         map_max_tokens=distinct_map_budget,
         reduce_max_tokens=distinct_map_budget * 2,
-        key_env="ANTHROPIC_API_KEY",
         complete=_anthropic_completer("claude-opus-5", "ANTHROPIC_API_KEY"),
     )
     client = _single_response_client("สรุป")
@@ -231,6 +232,109 @@ def test_still_truncated_after_the_retry_keeps_the_text_and_appends_a_notice():
     assert client.messages.create.call_count == 2
     assert "ท่อนแรกที่ยาวขึ้นแต่ยังไม่จบ" in result
     assert summarize_module.TRUNCATION_NOTICE in result
+
+
+def _client_whose_second_call_raises(first_text, first_reason, error):
+    client = MagicMock()
+    client.messages.create.side_effect = [_response(first_text, first_reason), error]
+    return client
+
+
+def test_a_truncated_answer_whose_doubled_budget_retry_raises_keeps_the_first_calls_text():
+    """ถ้า call ที่สอง (budget สองเท่า) เจอ UnusableAnswerError -- เช่น reasoning model
+    ได้ budget เพิ่มแล้วยิ่งใช้ไปกับ reasoning จน content ว่างเปล่า -- ต้องไม่โยนทิ้ง
+    ข้อความที่ call แรกได้มาแล้วไปเฉยๆ ต้องคืนข้อความนั้นพร้อม TRUNCATION_NOTICE
+    เหมือนกรณีที่ retry สำเร็จแต่ยังขาดอยู่ดี ไม่ใช่แย่ลงกว่าเดิม"""
+    client = _client_whose_second_call_raises(
+        "ท่อนแรกที่ได้มาแล้ว", "max_tokens", UnusableAnswerError("no text")
+    )
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert client.messages.create.call_count == 2
+    assert "ท่อนแรกที่ได้มาแล้ว" in result
+    assert summarize_module.TRUNCATION_NOTICE in result
+
+
+def test_a_truncated_answer_whose_doubled_budget_retry_raises_400_keeps_the_first_calls_text():
+    """เหมือนเทสต์ข้างบนแต่เป็น HttpStatusError(400) -- proxy บางตัวปฏิเสธ max_tokens
+    ที่ใหญ่เกินเพดานต่อคำขอ (24576 × 2 = 49152) ด้วย 400 ซึ่งไม่ retryable เหมือนกัน"""
+    client = _client_whose_second_call_raises(
+        "ท่อนแรกที่ได้มาแล้ว", "max_tokens", HttpStatusError(400, "max_tokens too large")
+    )
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert client.messages.create.call_count == 2
+    assert "ท่อนแรกที่ได้มาแล้ว" in result
+    assert summarize_module.TRUNCATION_NOTICE in result
+
+
+def test_a_doubled_budget_retry_that_raises_inside_a_chunk_keeps_the_first_calls_text():
+    """เหมือนสองเทสต์ข้างบนแต่เกิดใน chunk หนึ่งของ map stage -- chunk นั้นต้องยังได้
+    ข้อความบางส่วนไปต่อในไทม์ไลน์ ไม่ใช่กลายเป็น CHUNK_FAILURE_PLACEHOLDER ซึ่งเป็น
+    ผลลัพธ์ที่แย่กว่าของเดิมที่ branch นี้ตั้งใจแก้"""
+    transcript = _long_transcript(100)
+    target_chunk = _chunk_texts(transcript)[0]
+    lock = threading.Lock()
+    calls_for_target = {"n": 0}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            return _response("สรุปรวมทั้งประชุม")
+        if kwargs["messages"][0]["content"] == target_chunk:
+            with lock:
+                calls_for_target["n"] += 1
+                n = calls_for_target["n"]
+            if n == 1:
+                return _response("ท่อนแรกของช่วงนี้", "max_tokens")
+            raise UnusableAnswerError("GLM-5.2 returned no text (finish_reason='length')")
+        return _response("สรุปช่วงปกติ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, model="claude-opus-5")
+
+    assert calls_for_target["n"] == 2
+    assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
+    assert "ท่อนแรกของช่วงนี้" in result
+    timeline_start = result.index("## ไทม์ไลน์ตามช่วง")
+    assert summarize_module.TRUNCATION_NOTICE in result[timeline_start:]
+
+
+def test_a_doubled_budget_retry_that_raises_400_inside_a_chunk_keeps_the_first_calls_text():
+    transcript = _long_transcript(100)
+    target_chunk = _chunk_texts(transcript)[0]
+    lock = threading.Lock()
+    calls_for_target = {"n": 0}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            return _response("สรุปรวมทั้งประชุม")
+        if kwargs["messages"][0]["content"] == target_chunk:
+            with lock:
+                calls_for_target["n"] += 1
+                n = calls_for_target["n"]
+            if n == 1:
+                return _response("ท่อนแรกของช่วงนี้", "max_tokens")
+            raise HttpStatusError(400, "max_tokens too large")
+        return _response("สรุปช่วงปกติ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, model="claude-opus-5")
+
+    assert calls_for_target["n"] == 2
+    assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
+    assert "ท่อนแรกของช่วงนี้" in result
+    timeline_start = result.index("## ไทม์ไลน์ตามช่วง")
+    assert summarize_module.TRUNCATION_NOTICE in result[timeline_start:]
 
 
 def test_an_answer_that_fits_is_not_retried():
@@ -595,6 +699,22 @@ def test_is_retryable_rejects_failures_that_answer_the_same_every_time(status_co
 def test_is_retryable_accepts_an_error_that_never_reached_the_api():
     # ไม่มี status_code = ต่อไม่ติด / หมดเวลา ซึ่งเป็นอาการที่หายเองได้
     assert is_retryable(OSError("connection reset by peer")) is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        URLError("nodename nor servname provided, or not known"),
+        TimeoutError("timed out"),
+        URLError(socket.timeout()),
+    ],
+    ids=["urlerror_dns", "bare_timeout", "urlerror_wrapping_socket_timeout"],
+)
+def test_is_retryable_accepts_timeout_and_dns_failures(error):
+    # จุดที่แพงที่สุดถ้าเดาผิด: ที่ LLM_TIMEOUT_SECONDS = 900 การตัดสินผิดที่นี่คือ
+    # 900 วินาที คูณด้วยจำนวนรอบ retry ต่อ chunk -- ปลายทางที่ต่อไม่ติดหรือหมดเวลา
+    # ต้องลองใหม่ได้เสมอ ไม่มีข้อยกเว้น
+    assert is_retryable(error) is True
 
 
 def test_is_retryable_by_exception_shape():

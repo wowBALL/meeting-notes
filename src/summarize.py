@@ -16,6 +16,16 @@ CHUNK_OVERLAP_TOKENS = 1_500
 # Chunks are independent, so the map stage is bound by its slowest call rather
 # than by their sum. 4 keeps a 13-chunk (5-hour) meeting well inside the API's
 # rate limits while cutting the map stage to roughly a quarter of its wall clock.
+#
+# The real worst-case bound this trades against: up to 2 provider calls per
+# _summarize (the first call plus the doubled-budget retry when truncated) ×
+# up to 3 _summarize attempts per retry_with_backoff = up to 6 provider calls
+# per chunk (same bound applies to the single reduce call). A 13-chunk meeting
+# is therefore up to 6 * 14 = 84 calls at worst. Against a fully stalled
+# endpoint at LLM_TIMEOUT_SECONDS = 900 with only MAP_MAX_CONCURRENCY = 4
+# chunks in flight at once, that worst case is hours, not minutes -- stated
+# here plainly; no deadline/cutoff mechanism is added, that is a separate
+# decision for whoever owns this trade-off to make.
 MAP_MAX_CONCURRENCY = 4
 
 # Substituted for a chunk whose summary failed every retry, so the surrounding
@@ -86,10 +96,14 @@ def is_retryable(error: Exception) -> bool:
     """เรียกซ้ำแล้วมีโอกาสได้คำตอบต่างจากเดิมไหม
 
     UnusableAnswerError กับ MissingApiKeyError คือคำตอบที่แน่นอนแล้ว -- คำขอเดิมยิงซ้ำ
-    ก็ได้ผลเดิม (UnusableAnswerError raise ก่อนที่ complete() จะคืน Completion ออกมา
-    ด้วยซ้ำ จึงไม่มีทางไปถึง path เพิ่ม budget เป็นสองเท่าใน _summarize ด้านล่าง --
-    path นั้นทำงานเฉพาะตอนได้ Completion(truncated=True) กลับมาเท่านั้น ส่วน key ที่
-    ไม่ได้ตั้งไม่มีทางโผล่มาเองระหว่างรอ)
+    ก็ได้ผลเดิม การเรียกครั้งแรกที่ raise แบบนี้ไม่มีทางไปถึง path เพิ่ม budget เป็น
+    สองเท่าใน _summarize ด้านล่างจริง (path นั้นทำงานเฉพาะตอนได้
+    Completion(truncated=True) กลับมาเท่านั้น) แต่ path เพิ่ม budget เองก็เรียก
+    provider.complete() อีกครั้งหนึ่ง และ raise ด้วยเหตุผลเดียวกันนี้ได้เหมือนกัน --
+    _summarize ดักไว้เองแล้ว (try/except รอบ call ที่สอง) และคืนข้อความจาก call แรก
+    พร้อม TRUNCATION_NOTICE แทนการโยนทิ้ง จึงไม่มีทางที่ error สองชนิดนี้จะหลุดออกมา
+    ให้ is_retryable เห็นจาก call ที่สองเลย ฟังก์ชันนี้จึงยังแยกมันออกได้ถูกต้องโดย
+    ไม่ต้องสนใจว่ามันมาจาก call ไหน
 
     4xx ที่เหลือเป็นคำตอบเรื่องคำขอหรือบัญชี -- key หมดอายุ เครดิตไม่พอ โมเดลผิด คำขอ
     ใหญ่เกิน ยิงซ้ำอีกกี่ครั้งก็ได้คำตอบเดิม เสียแค่เวลารอกับโควตา
@@ -107,9 +121,18 @@ def is_retryable(error: Exception) -> bool:
 def _summarize(provider: Provider, system: str, content: str, max_tokens: int) -> str:
     """ข้อความจากโมเดล ถูกตัดแล้วลองใหม่หนึ่งครั้งด้วย budget สองเท่า
 
-    ลองใหม่ครั้งเดียวเพราะการเรียกซ้ำแพงและช้า (GLM หนึ่ง call ถึง 155 วินาที) และ
-    การเพิ่มเป็นสองเท่าครอบกรณีที่วัดเจอทั้งหมดแล้ว ถ้ายังไม่จบอีกก็คืนของที่ได้พร้อม
-    หมายเหตุ ดีกว่าทิ้งงานที่จ่ายเงินไปแล้วทั้งก้อน
+    ลองใหม่ครั้งเดียวเพราะการเรียกซ้ำแพงและช้า (หนึ่ง call ใช้เวลาได้เป็นนาทีและมี
+    ค่าใช้จ่ายจริง) และการเพิ่มเป็นสองเท่าครอบกรณีที่วัดเจอทั้งหมดแล้ว ถ้ายังไม่จบอีก
+    ก็คืนของที่ได้พร้อมหมายเหตุ ดีกว่าทิ้งงานที่จ่ายเงินไปแล้วทั้งก้อน
+
+    call ที่สอง (budget สองเท่า) ก็ raise ได้เหมือน call แรก -- ไม่ใช่แค่ในทางทฤษฎี:
+    ขอ 24576 × 2 = 49152 token เกินเพดานต่อคำขอของบาง proxy (400), ส่ง reduce input
+    ก้อนใหญ่ซ้ำ (413), หรือที่พบได้บ่อยที่สุดคือ reasoning model ใช้ budget ที่เพิ่มมา
+    หมดไปกับ reasoning จน content ว่างเปล่า (UnusableAnswerError) -- ทั้งหมดนี้ไม่
+    retryable (ดู is_retryable) จึงต้องดักไว้ที่นี่ ไม่ใช่ปล่อยให้ propagate ออกไป
+    เพราะ completion.text จาก call แรกอยู่ในมือแล้วตอนนั้น การโยน exception ทิ้งทั้ง
+    หมดจะเสียข้อความที่ได้มาแล้วไปเฉยๆ ทั้งที่ผลลัพธ์ควรแย่ที่สุดเท่ากับตอน retry
+    สำเร็จแต่ยังไม่จบ (ข้อความบางส่วน + TRUNCATION_NOTICE) ไม่ใช่แย่กว่านั้น
     """
     completion = provider.complete(system, content, max_tokens)
     if not completion.truncated:
@@ -123,7 +146,17 @@ def _summarize(provider: Provider, system: str, content: str, max_tokens: int) -
         len(completion.text),
         max_tokens * 2,
     )
-    retried = provider.complete(system, content, max_tokens * 2)
+    try:
+        retried = provider.complete(system, content, max_tokens * 2)
+    except Exception as e:
+        logger.error(
+            "%s raised on the doubled-budget retry (%d tokens): %s -- keeping the "
+            "first call's partial text instead of losing it",
+            provider.model_id,
+            max_tokens * 2,
+            e,
+        )
+        return completion.text + TRUNCATION_NOTICE
     if not retried.truncated:
         return retried.text
 

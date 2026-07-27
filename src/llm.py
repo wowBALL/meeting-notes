@@ -56,9 +56,16 @@ class UnusableAnswerError(RuntimeError):
     เดิมยิงซ้ำก็ได้คำตอบเดิม ส่วน RuntimeError ที่มาจากที่อื่นอาจเป็นอาการชั่วคราวที่หายเอง
 
     หมายเหตุ: การเพิ่ม budget เป็นสองเท่าที่ _summarize ทำ (src/summarize.py) ทำงาน
-    เฉพาะตอน complete() คืน Completion(truncated=True) มาเท่านั้น -- error นี้ raise
-    ก่อนจะมี Completion ให้เห็นด้วยซ้ำ จึงไม่มีทางไปถึง path เพิ่ม budget นั้นเลย ความ
-    ล้มเหลวแบบนี้จึงเป็นแบบถาวรจริงๆ ไม่มี retry ชั้นไหนกู้คืนให้ได้
+    เฉพาะตอน complete() คืน Completion(truncated=True) มาเท่านั้น -- การเรียกครั้ง
+    แรกที่ raise error นี้จึงไม่มีทางไปถึง path เพิ่ม budget นั้นเลยจริง
+
+    แต่ path เพิ่ม budget เอง (การเรียกครั้งที่สอง) ก็เรียก complete() ซ้ำอีกครั้ง
+    หนึ่ง และ raise error นี้ได้เหมือนกัน (เช่น reasoning model ได้ budget เพิ่มมา
+    แล้วยิ่งใช้ไปกับ reasoning จน content ว่างเปล่าเหมือนเดิม) -- ไม่ใช่ความล้มเหลว
+    ที่ไปไม่ถึง เพียงแต่เกิดจาก call ที่สองแทนที่จะเป็น call แรก _summarize ดักไว้เอง
+    ด้วย try/except รอบ call ที่สองนั้นแล้ว: คืนข้อความบางส่วนจาก call แรกพร้อม
+    TRUNCATION_NOTICE แทนการโยน exception ทิ้งไปทั้งหมด นี่คือเหตุผลที่ต้องเก็บ
+    ข้อความจาก call แรกไว้ก่อนเรียก call ที่สอง -- ไม่ใช่แค่ optimization
     """
 
 
@@ -103,9 +110,6 @@ class Provider:
     model_id: str
     map_max_tokens: int
     reduce_max_tokens: int
-    # ชื่อ env var ที่ provider นี้อ่าน key มา -- completer แต่ละตัวใช้ตอนจะดึง key จริง
-    # (ดู _require_key) ไม่ได้ผูกกับ preflight โดยเฉพาะ
-    key_env: str
     complete: Callable[[str, str, int], Completion]
 
 
@@ -126,9 +130,14 @@ def _anthropic_completer(
         from anthropic import Anthropic
 
         api_key = _require_key(key_env, model_id)
-        # ปล่อยให้ SDK ใช้ timeout/retry default ของมันเอง -- retry เป็นหน้าที่ของ
-        # is_retryable ใน summarize.py อยู่แล้ว ไม่ต้องมีชั้นซ้อนที่นี่อีก
-        client = Anthropic(api_key=api_key)
+        # timeout ปล่อยให้ SDK ใช้ default ของมันเอง แต่ max_retries=0 ต้องตั้งเอง:
+        # ค่า default ของ SDK คือ retry ในตัวเองสูงสุด 2 ครั้ง (รวม 3 HTTP attempt
+        # ต่อ complete() หนึ่งครั้ง) ซึ่งซ้อนกับ retry_with_backoff และการ escalate
+        # budget สองเท่าใน summarize.py -- คูณกันแล้ว worst case ต่อ chunk พุ่งสูง
+        # เกินจริง (ดู pipeline.py) และซ่อน asymmetry ระหว่าง provider ไว้ด้วย เพราะ
+        # ฝั่ง GLM (urllib) ไม่มีชั้น retry ในตัวเองแบบนี้เลย retry ทั้งหมดต้องอยู่ที่
+        # is_retryable ที่เดียวเท่านั้น ตามที่คอมเมนต์นี้ตั้งใจจะบอกอยู่แล้ว
+        client = Anthropic(api_key=api_key, max_retries=0)
         response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens,
@@ -150,13 +159,11 @@ def _anthropic_completer(
 
 
 def _claude(model_id: str) -> Provider:
-    key_env = "ANTHROPIC_API_KEY"
     return Provider(
         model_id=model_id,
         map_max_tokens=CLAUDE_MAP_MAX_TOKENS,
         reduce_max_tokens=CLAUDE_REDUCE_MAX_TOKENS,
-        key_env=key_env,
-        complete=_anthropic_completer(model_id, key_env),
+        complete=_anthropic_completer(model_id, "ANTHROPIC_API_KEY"),
     )
 
 
@@ -182,7 +189,13 @@ def _openai_compat_completer(
 ) -> Callable[[str, str, int], Completion]:
     def complete(system: str, content: str, max_tokens: int) -> Completion:
         api_key = _require_key(key_env, model_id)
-        base_url = os.environ.get(base_url_env, "").strip() or default_base_url
+        # .rstrip("/"): LLM_BASE_URL ที่ลงท้ายด้วย "/" (เช่นก็อปมาทั้งท้าย path)
+        # จะกลายเป็น ".../v1//chat/completions" -- proxy บางตัวตอบ 404 ทึบให้กับ
+        # double slash แบบนี้ ซึ่งไม่มี status_code ที่ is_retryable เดาว่า retryable
+        # ได้ (เป็น HttpStatusError(404) ที่ retryable=False อยู่แล้ว) ผลคือทุก
+        # chunk กลายเป็น placeholder ทั้งประชุมจากแค่ "/" ตัวเดียวที่เกิน README
+        # เตือนไว้ในเนื้อความอย่างเดียว ไม่มีอะไรบังคับจริงถ้าไม่ตัดที่นี่
+        base_url = (os.environ.get(base_url_env, "").strip() or default_base_url).rstrip("/")
         # ensure_ascii=False คือหัวใจ: transcript เป็นภาษาไทยทั้งไฟล์ ถ้า escape เป็น
         # \uXXXX ขนาด payload บวมและ proxy บางตัวส่งต่อเป็น ???? -- ทดสอบไว้แล้วว่า
         # แบบนี้ภาษาไทยกลับมาตรงทุกตัวอักษร
@@ -296,7 +309,6 @@ PROVIDERS: dict[str, Provider] = {
         model_id="GLM-5.2",
         map_max_tokens=GLM_MAP_MAX_TOKENS,
         reduce_max_tokens=GLM_REDUCE_MAX_TOKENS,
-        key_env="LLM_API_KEY",
         complete=_openai_compat_completer(
             "GLM-5.2", "LLM_API_KEY", "LLM_BASE_URL", DEFAULT_LLM_BASE_URL
         ),

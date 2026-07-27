@@ -40,15 +40,6 @@ def test_resolve_returns_claude_budgets():
     assert provider.reduce_max_tokens == CLAUDE_REDUCE_MAX_TOKENS
 
 
-def test_resolve_exposes_the_env_var_each_provider_reads_its_key_from():
-    # preflight ต้องถามตรงนี้ว่า provider ที่ resolve ได้อ่าน key จาก env var ไหน
-    # แทนที่จะเดาเองว่า "ไม่ใช่ GLM-5.2 ก็ต้องเป็น Anthropic" -- ความรู้เฉพาะ provider
-    # ต้องอยู่ใน registry นี้ที่เดียว
-    assert resolve("claude-opus-5").key_env == "ANTHROPIC_API_KEY"
-    assert resolve("claude-sonnet-5").key_env == "ANTHROPIC_API_KEY"
-    assert resolve("GLM-5.2").key_env == "LLM_API_KEY"
-
-
 def test_resolve_rejects_an_unknown_model_by_name():
     with pytest.raises(UnknownModelError, match="ไม่มี-โมเดล-นี้"):
         resolve("ไม่มี-โมเดล-นี้")
@@ -111,9 +102,12 @@ def test_claude_completer_names_the_env_var_when_the_key_is_missing():
         resolve("claude-opus-5").complete("ระบบ", "เนื้อหา", 10)
 
 
-def test_claude_completer_uses_the_sdks_own_defaults():
+def test_claude_completer_uses_the_sdks_own_timeout_but_disables_its_retries():
     # complete() มีแค่สามพารามิเตอร์ (ไม่มี timeout override แล้ว) -- ต้องไม่มีใครถูกจำกัด
-    # เวลาแบบเงียบๆ ปล่อยให้ SDK ใช้ timeout/retry default ของมันเองเสมอ
+    # เวลาแบบเงียบๆ ปล่อยให้ SDK ใช้ timeout default ของมันเองเสมอ แต่ max_retries ต้อง
+    # เป็น 0 เป๊ะ: SDK default (2) จะซ้อนกับ retry_with_backoff และ escalation budget
+    # สองเท่าใน summarize.py ทำให้ worst case ต่อ chunk คูณกันเกินจริง (ดู
+    # src/pipeline.py) retry ทั้งหมดต้องอยู่ที่ is_retryable ที่เดียว
     client = MagicMock()
     client.messages.create.return_value = _anthropic_response("สรุป")
 
@@ -125,7 +119,7 @@ def test_claude_completer_uses_the_sdks_own_defaults():
 
     kwargs = anthropic_cls.call_args.kwargs
     assert "timeout" not in kwargs
-    assert "max_retries" not in kwargs
+    assert kwargs["max_retries"] == 0
 
 
 def _llm_payload(content: str, finish_reason: str = "stop"):
@@ -414,6 +408,23 @@ def test_glm_honours_a_custom_base_url():
     with patcher, patch.dict(
         "os.environ",
         {"LLM_API_KEY": "test-key", "LLM_BASE_URL": "https://other.example/v1"},
+    ):
+        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+    assert (
+        captured["request"].full_url == "https://other.example/v1/chat/completions"
+    )
+
+
+def test_glm_strips_a_trailing_slash_from_a_custom_base_url():
+    # README บอกห้ามใส่ "/" ปิดท้ายไว้แค่ในเนื้อความ ไม่มีอะไรบังคับจริง -- ถ้าใส่มา
+    # ผลลัพธ์เดิมคือ ".../v1//chat/completions" ซึ่งเป็น 404 ทึบ ไม่ retryable แล้ว
+    # ทุก chunk กลายเป็น placeholder ทั้งประชุม ต้องกันไว้ที่โค้ด ไม่ใช่แค่บอกในเอกสาร
+    patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
+
+    with patcher, patch.dict(
+        "os.environ",
+        {"LLM_API_KEY": "test-key", "LLM_BASE_URL": "https://other.example/v1/"},
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
 
