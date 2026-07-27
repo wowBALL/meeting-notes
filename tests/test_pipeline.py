@@ -746,3 +746,118 @@ def test_transcript_only_can_come_from_the_config_default(tmp_path):
 
     summarize.assert_not_called()
     assert not (meeting_dir / "summary.md").exists()
+
+
+# --- ความคืบหน้าที่ส่งให้หน้าจอ ------------------------------------------
+
+
+def _stage_codes(config: Config) -> list[str]:
+    from src.activity import tail
+
+    return [e["code"] for e in tail(config.base_dir)]
+
+
+def test_process_file_records_each_stage(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    assert _stage_codes(config) == [
+        "queued",
+        "transcribe_started",
+        "diarize_started",
+        "summarize_started",
+        "meeting_done",
+    ]
+
+
+def test_process_file_skips_the_summarize_event_in_transcript_only_mode(tmp_path):
+    """หน้าจอชี้ขั้นจากเหตุการณ์ล่าสุด ถ้ามี summarize_started ในโหมดนี้มันจะค้าง
+    ที่ "กำลังสรุป" ตลอดกาลสำหรับประชุมที่ไม่ได้สั่งสรุป"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(config.inbox_dir, "weekly-standup", NO_SUMMARY_MODEL)
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+        ),
+    ):
+        process_file(audio_path, config)
+
+    codes = _stage_codes(config)
+    assert "summarize_started" not in codes
+    assert codes[-1] == "meeting_done"
+
+
+def test_process_file_records_a_failure(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch(
+            "src.pipeline.summarize_transcript",
+            side_effect=RuntimeError("Claude ล่ม"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        process_file(audio_path, config)
+
+    assert _stage_codes(config)[-1] == "job_failed"
+
+
+def test_process_file_survives_an_activity_log_that_cannot_be_written(tmp_path):
+    """การเขียนสถานะที่ล้มต้องไม่ทำให้ประชุมที่อัดซ้ำไม่ได้พังตามไปด้วย
+
+    ยึดที่ state/ ด้วยไฟล์ธรรมดาเพื่อให้ mkdir ล้มจริง แทนการ patch activity.append
+    -- ทดสอบการรับประกันของจริงทั้งเส้น ไม่ใช่สมมติฐานเกี่ยวกับมัน
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "state").write_text("ไม่ใช่โฟลเดอร์", encoding="utf-8")
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    assert (meeting_dir / "summary.md").exists()
