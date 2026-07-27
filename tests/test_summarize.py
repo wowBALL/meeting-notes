@@ -1,4 +1,5 @@
 import contextlib
+import inspect
 import logging
 import threading
 import time
@@ -8,6 +9,12 @@ import pytest
 
 import src.summarize as summarize_module
 from src.chunk import parse_transcript_segments, split_into_chunks
+from src.llm import (
+    CLAUDE_MAP_MAX_TOKENS,
+    CLAUDE_REDUCE_MAX_TOKENS,
+    Provider,
+    _anthropic_completer,
+)
 from src.summarize import (
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
@@ -97,25 +104,35 @@ def _expected_chunk_count(transcript: str) -> int:
 
 
 def test_map_budget_comes_from_the_provider_not_a_module_constant():
-    """ค่า budget ต้องเดินทางมาจาก llm.resolve() เพื่อให้ provider ที่ต้องใช้
-    มากกว่านี้ตั้งค่าของตัวเองได้ โดยไม่ดัน budget ของ Claude ขึ้นตามไปด้วย"""
-    from src.llm import CLAUDE_MAP_MAX_TOKENS
-
+    """ค่า budget ต้องเดินทางมาจาก provider ที่ resolve() คืนมาโดยตรง ไม่ใช่จากค่าคงที่
+    ในโมดูลนี้หรือใน llm.py -- แพตช์ resolve() ให้คืน budget ที่ไม่ตรงกับค่าคงที่ตัวไหน
+    ในโค้ดเลย (ไม่ใช่ CLAUDE_MAP_MAX_TOKENS หรือ CLAUDE_REDUCE_MAX_TOKENS) ถ้า max_tokens
+    ที่ไปถึง wire ยังตรงกับค่านี้ แปลว่ามันเดินทางมาจาก provider จริง ไม่ใช่ค่าตายตัวที่
+    บังเอิญเท่ากัน (ก่อนหน้านี้เทสต์เทียบกับ CLAUDE_MAP_MAX_TOKENS ซึ่งบังเอิญเท่ากับค่า
+    module constant เดิมที่ถูกลบไปแล้ว จึงผ่านได้แม้ก่อน refactor และจะผ่านต่อไปแม้มีคน
+    เพิ่ม module constant กลับมาใหม่)"""
+    distinct_map_budget = 1234
+    assert distinct_map_budget not in (CLAUDE_MAP_MAX_TOKENS, CLAUDE_REDUCE_MAX_TOKENS)
+    fake_provider = Provider(
+        model_id="claude-opus-5",
+        map_max_tokens=distinct_map_budget,
+        reduce_max_tokens=distinct_map_budget * 2,
+        complete=_anthropic_completer("claude-opus-5"),
+    )
     client = _single_response_client("สรุป")
 
-    with _patch_anthropic(client), patch.dict(
-        "os.environ", {"ANTHROPIC_API_KEY": "test-key"}
+    with _patch_anthropic(client), patch.object(
+        summarize_module, "resolve", return_value=fake_provider
     ):
         summarize_transcript("transcript", model="claude-opus-5")
 
-    assert client.messages.create.call_args.kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
+    assert client.messages.create.call_args.kwargs["max_tokens"] == distinct_map_budget
 
 
 def test_summarize_transcript_no_longer_accepts_an_api_key():
     """key เป็นเรื่องของ provider ไม่ใช่ของผู้เรียก การส่ง key ของ Anthropic เข้า
     เส้นทางที่อาจไปจบที่ provider อื่นเป็นสิ่งที่ต้องเป็นไปไม่ได้"""
-    with pytest.raises(TypeError):
-        summarize_transcript("transcript", api_key="test-key")
+    assert "api_key" not in inspect.signature(summarize_transcript).parameters
 
 
 def test_short_transcript_returns_the_single_response_verbatim():
@@ -141,8 +158,6 @@ def test_short_transcript_uses_given_model_and_original_prompt():
     assert kwargs["model"] == "claude-sonnet-5"
     assert "transcript" in kwargs["messages"][0]["content"]
     assert kwargs["system"] == summarize_module.SUMMARY_SYSTEM_PROMPT
-    from src.llm import CLAUDE_MAP_MAX_TOKENS
-
     assert kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
 
 
@@ -197,8 +212,6 @@ def test_long_transcript_output_has_merged_summary_then_timeline():
 
 
 def test_long_transcript_chunk_calls_use_the_chunk_prompt():
-    from src.llm import CLAUDE_MAP_MAX_TOKENS
-
     transcript = _long_transcript(100)
     client = _prompt_aware_client()
 
@@ -211,8 +224,6 @@ def test_long_transcript_chunk_calls_use_the_chunk_prompt():
 
 
 def test_long_transcript_reduce_call_uses_reduce_prompt_and_larger_cap():
-    from src.llm import CLAUDE_REDUCE_MAX_TOKENS
-
     transcript = _long_transcript(100)
     client = _prompt_aware_client()
 

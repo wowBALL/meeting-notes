@@ -54,6 +54,7 @@ MESSAGES = {
         "check_loopback": "ลำโพง (คู่สนทนา)",
         "check_samplerate": "sample rate",
         "check_api": "Claude API key",
+        "check_model": "โมเดลที่ใช้สรุป",
         "peak_silent": "เงียบสนิท",
         "peak_level": "peak {db} dB",
         "passthrough": "{error}",
@@ -92,6 +93,11 @@ MESSAGES = {
             "key ไม่มีสิทธิ์เรียก {model} (403) -- ตรวจสิทธิ์ของ key หรือแก้ CLAUDE_MODEL"
         ),
         "api_probe_failed": "ตรวจไม่สำเร็จ: {error}",
+        "model_ok": "รองรับ",
+        "model_unresolvable": (
+            "ไม่รู้จักโมเดล {model} -- ที่รองรับตอนนี้: {known} -- อัดและถอดเสียงได้ปกติ "
+            "แต่จะสรุปไม่สำเร็จ แก้ CLAUDE_MODEL ใน .env ให้เป็นหนึ่งในรายชื่อนี้"
+        ),
         "mark_ok": "[ ผ่าน ]",
         "mark_warn": "[ เตือน ]",
         "mark_fail": "[ ไม่ผ่าน ]",
@@ -153,6 +159,7 @@ MESSAGES = {
         "check_loopback": "Speaker (far end)",
         "check_samplerate": "sample rate",
         "check_api": "Claude API key",
+        "check_model": "Summary model",
         "peak_silent": "completely silent",
         "peak_level": "peak {db} dB",
         "passthrough": "{error}",
@@ -193,6 +200,12 @@ MESSAGES = {
             "change CLAUDE_MODEL"
         ),
         "api_probe_failed": "check failed: {error}",
+        "model_ok": "supported",
+        "model_unresolvable": (
+            "unknown model {model} -- supported right now: {known} -- recording and "
+            "transcription still work, but summarizing will fail. Fix CLAUDE_MODEL in "
+            ".env to one of these"
+        ),
         "mark_ok": "[ PASS ]",
         "mark_warn": "[ WARN ]",
         "mark_fail": "[ FAIL ]",

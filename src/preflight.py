@@ -25,6 +25,7 @@ import numpy as np
 from dotenv import load_dotenv
 
 from src.config import DEFAULT_CLAUDE_MODEL, DEFAULT_UI_LANG
+from src.llm import PROVIDERS, UnknownModelError, resolve
 from src.messages import render
 from src.record import (
     get_common_samplerate,
@@ -190,6 +191,30 @@ def classify_probe_error(error: Exception, model: str, lang: str = TH) -> CheckR
     return _result("check_api", "warn", "api_probe_failed", {"error": message}, lang)
 
 
+def check_summary_model(model: str, lang: str = TH) -> CheckResult:
+    """model ที่จะใช้สรุปอยู่ใน registry ของ resolve() ไหม -- คืน "ok" หรือ "warn" เท่านั้น
+    ไม่มี "fail"
+
+    ก่อนหน้านี้ CLAUDE_MODEL ถูกส่งตรงเข้า Anthropic API โดยไม่ผ่านที่นี่เลย id อะไรที่ API
+    รับก็ใช้ได้ พอ summarize_transcript หันมาเรียกผ่าน resolve() แล้ว id ที่ไม่อยู่ใน
+    PROVIDERS จะโยน UnknownModelError กลางท่อ -- หลังถอดเสียงเสร็จไปแล้ว ซึ่งเป็นขั้นที่
+    แพงที่สุด check_api_key ข้างล่างยิงไปถาม API จริงจึงตรวจไม่เจอกรณีนี้ (API รู้จักโมเดล
+    id นั้นได้โดยไม่ต้องอยู่ใน registry ของเรา) ต้องเช็คแยกจาก resolve() ตรง ๆ เท่านั้น
+
+    เป็น "warn" ไม่ใช่ "fail" ด้วยเหตุผลเดียวกับ check_api_key: resolve ไม่ผ่านไม่ได้ทำให้
+    อัดหรือถอดเสียงไม่ได้ -- transcript ยังออกมาครบ เอาไปสรุปด้วยมือทีหลังได้ ต่างจากอัดไม่ได้
+    เลยซึ่งหายถาวร
+    """
+    try:
+        resolve(model)
+    except UnknownModelError:
+        known = ", ".join(sorted(PROVIDERS))
+        return _result(
+            "check_model", "warn", "model_unresolvable", {"model": model, "known": known}, lang
+        )
+    return _result("check_model", "ok", "model_ok", {}, lang)
+
+
 def check_api_key(api_key: str, model: str, probe=None, lang: str = TH) -> CheckResult:
     """สถานะของ key ที่จะใช้สรุป -- คืน "ok" หรือ "warn" เท่านั้น ไม่มี "fail"
 
@@ -306,10 +331,11 @@ def main() -> int:
     api_key, claude_model = read_api_settings()
     lang = os.environ.get("UI_LANG", TH)
     print(render("preflight_checking_key", {"model": claude_model}, lang))
+    model_result = check_summary_model(claude_model, lang=lang)
     api_result = check_api_key(api_key, claude_model, lang=lang)
 
     print(render("preflight_checking_audio", {"seconds": MEASURE_SECONDS}, lang))
-    results = [*run_preflight(lang=lang), api_result]
+    results = [*run_preflight(lang=lang), model_result, api_result]
     print()
     print(format_report(results, lang))
     return 1 if any(r.status == "fail" for r in results) else 0

@@ -12,6 +12,7 @@ from src.preflight import (
     MIC_WEAK_DBFS,
     CheckResult,
     check_api_key,
+    check_summary_model,
     classify_probe_error,
     evaluate_loopback,
     evaluate_mic,
@@ -283,6 +284,30 @@ def test_check_api_key_never_blocks_recording(error):
 
     for api_key in ("", "sk-ant-test"):
         assert check_api_key(api_key, "claude-opus-5", probe=probe).status != "fail"
+
+
+def test_check_summary_model_warns_on_a_model_outside_the_registry():
+    # เคยเป็น "ส่ง CLAUDE_MODEL ตรงเข้า API" มาก่อน -- id อะไรที่ API รับก็ใช้ได้ พอ
+    # summarize_transcript หันมาเรียกผ่าน resolve() แล้ว id ที่ไม่อยู่ใน registry จะ
+    # โยน UnknownModelError กลางท่อ หลังถอดเสียงเสร็จไปแล้ว ต้องรู้ตอนนี้ ไม่ใช่ตอนนั้น
+    result = check_summary_model("claude-opus-4-8")
+
+    assert result.status == "warn"
+    assert "claude-opus-4-8" in result.detail
+    assert "claude-opus-5" in result.detail
+    assert "claude-sonnet-5" in result.detail
+
+
+def test_check_summary_model_passes_for_a_registered_model():
+    result = check_summary_model("claude-opus-5")
+
+    assert result.status == "ok"
+
+
+def test_check_summary_model_never_fails():
+    # เหตุผลเดียวกับ check_api_key: resolve ไม่ผ่านไม่ได้ทำให้อัดหรือถอดเสียงไม่ได้
+    # transcript ยังออกมาครบ เอาไปสรุปด้วยมือทีหลังได้
+    assert check_summary_model("not-a-real-model").status != "fail"
 
 
 def test_read_api_settings_returns_an_empty_key_instead_of_raising(tmp_path, monkeypatch):
