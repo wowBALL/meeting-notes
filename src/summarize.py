@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
 from src.config import DEFAULT_SUMMARY_MODEL
-from src.llm import Provider, resolve
+from src.llm import MissingApiKeyError, Provider, UnusableAnswerError, resolve
 from src.render import format_timestamp
 from src.retry import retry_with_backoff
 
@@ -85,10 +85,17 @@ _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 def is_retryable(error: Exception) -> bool:
     """เรียกซ้ำแล้วมีโอกาสได้คำตอบต่างจากเดิมไหม
 
-    4xx ที่เหลือเป็นคำตอบเรื่องคำขอหรือบัญชี -- key หมดอายุ เครดิตไม่พอ โมเดลผิด
-    คำขอใหญ่เกิน ยิงซ้ำอีกกี่ครั้งก็ได้คำตอบเดิม เสียแค่เวลารอกับโควตา ไม่มี status_code
-    แปลว่าไปไม่ถึง API (เน็ตหลุด หมดเวลา) ซึ่งเป็นอาการที่หายเองได้
+    UnusableAnswerError กับ MissingApiKeyError คือคำตอบที่แน่นอนแล้ว -- คำขอเดิมยิงซ้ำ
+    ก็ได้ผลเดิม (การเพิ่ม budget เป็นหน้าที่ของ _summarize ไม่ใช่ของ retry ชั้นนี้ ส่วน
+    key ที่ไม่ได้ตั้งไม่มีทางโผล่มาเองระหว่างรอ)
+
+    4xx ที่เหลือเป็นคำตอบเรื่องคำขอหรือบัญชี -- key หมดอายุ เครดิตไม่พอ โมเดลผิด คำขอ
+    ใหญ่เกิน ยิงซ้ำอีกกี่ครั้งก็ได้คำตอบเดิม เสียแค่เวลารอกับโควตา
+
+    ไม่มี status_code แปลว่าไปไม่ถึง API (เน็ตหลุด หมดเวลา) ซึ่งเป็นอาการที่หายเองได้
     """
+    if isinstance(error, (UnusableAnswerError, MissingApiKeyError)):
+        return False
     status_code = getattr(error, "status_code", None)
     if status_code is None:
         return True

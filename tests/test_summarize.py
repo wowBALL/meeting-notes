@@ -12,7 +12,10 @@ from src.chunk import parse_transcript_segments, split_into_chunks
 from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
+    HttpStatusError,
+    MissingApiKeyError,
     Provider,
+    UnusableAnswerError,
     _anthropic_completer,
 )
 from src.summarize import (
@@ -593,6 +596,20 @@ def test_is_retryable_accepts_an_error_that_never_reached_the_api():
     assert is_retryable(OSError("connection reset by peer")) is True
 
 
+def test_is_retryable_by_exception_shape():
+    """สี่รูปแบบที่ is_retryable ต้องแยกออกจากกัน:
+
+    UnusableAnswerError และ MissingApiKeyError เป็นคำตอบที่แน่นอนแล้ว -- ยิงซ้ำก็ได้
+    ผลเดิม HttpStatusError(429) ยังลองใหม่ได้เหมือน 4xx/5xx ทั่วไป ส่วน RuntimeError
+    ธรรมดา (ไม่มี status_code, ไม่ใช่สองชนิดข้างต้น) ยังต้องลองใหม่ได้เหมือนเดิม --
+    นี่คือกรณีที่กฎเดิม (ทุก RuntimeError ที่ไม่มี status_code ไม่ retryable) จับพลาด
+    """
+    assert is_retryable(UnusableAnswerError("no text")) is False
+    assert is_retryable(MissingApiKeyError("no key")) is False
+    assert is_retryable(HttpStatusError(429, "slow down")) is True
+    assert is_retryable(RuntimeError("transient")) is True
+
+
 def test_single_call_stops_after_one_attempt_when_the_key_is_rejected():
     client = MagicMock()
     client.messages.create.side_effect = FakeAPIError(401)
@@ -667,3 +684,30 @@ def test_reduce_failure_still_raises_when_no_chunk_ever_succeeded():
     with _patch_anthropic(client), patch("time.sleep"):
         with pytest.raises(RuntimeError, match="Every one of the"):
             summarize_transcript(transcript, model="claude-opus-5")
+
+
+def test_a_provider_that_returns_no_text_is_not_retried():
+    from src.llm import Completion
+
+    calls = {"n": 0}
+
+    def complete(system, content, max_tokens):
+        calls["n"] += 1
+        raise UnusableAnswerError(
+            "GLM-5.2 returned no text (finish_reason='length')"
+        )
+
+    provider = MagicMock()
+    provider.model_id = "GLM-5.2"
+    provider.map_max_tokens = 100
+    provider.reduce_max_tokens = 200
+    provider.complete = complete
+
+    with (
+        patch("src.summarize.resolve", return_value=provider),
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="no text"),
+    ):
+        summarize_transcript("สั้น", model="GLM-5.2")
+
+    assert calls["n"] == 1

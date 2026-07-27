@@ -81,3 +81,25 @@ def test_load_config_falls_back_when_the_port_is_not_a_number(tmp_path, monkeypa
     config = load_config(base_dir=tmp_path)
 
     assert config.ui_port == 8765
+
+
+def test_load_config_works_without_an_anthropic_key(tmp_path, monkeypatch):
+    """GLM จะเป็นค่าเริ่มต้น -- คนที่ตั้งเครื่องใหม่ต้องเริ่มงานได้โดยไม่มี key ของ Anthropic"""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    config = load_config(tmp_path)
+
+    assert config.anthropic_api_key == ""
+
+
+def test_llm_base_url_falls_back_to_the_default(tmp_path, monkeypatch):
+    from src.llm import DEFAULT_LLM_BASE_URL
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    assert load_config(tmp_path).llm_base_url == DEFAULT_LLM_BASE_URL
