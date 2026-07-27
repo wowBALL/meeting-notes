@@ -9,10 +9,15 @@
    ทำให้ได้ยินแต่ฝั่งเราเอง)
 3. ไมค์กับลำโพงตั้ง sample rate ตรงกันไหม -- ไม่ตรง = ตัวอัดปฏิเสธการทำงาน
    แต่จะบอกก็ต่อเมื่อหน้าจอขึ้นคำว่าเริ่มอัดไปแล้ว
-4. key ที่จะใช้สรุปยังเรียกได้จริงไหม -- รู้ตอนนี้ ดีกว่ารู้ตอนประชุมเลิกแล้ว
+4. โมเดลที่ตั้งไว้จะใช้สรุปได้จริงไหม -- อยู่ใน registry ของ resolve() หรือเปล่า
 
 ข้อ 1-3 เป็น "ไม่ผ่าน" ได้ เพราะเสียงที่ไม่ได้อัดหายถาวร ข้อ 4 เป็นได้แค่ "เตือน"
 เพราะ transcript ยังได้ครบอยู่ดี เอาไปให้ Claude สรุปทีหลังได้
+
+เดิมข้อ 4 ยิงคำขอจริงไปยัง API เพื่อตรวจว่า key ใช้ได้ด้วย (probe_summary_model) แต่
+ถูกถอดออกแล้ว: มันคือคำขอที่มีค่าใช้จ่ายจริงทุกครั้งก่อนอัดประชุม ต้องมี timeout ของ
+ตัวเอง และถึงจะรู้ว่า key ใช้ไม่ได้ก็ยังอัดต่อได้อยู่ดี (transcript ไม่ได้หายไปไหน
+สรุปทีหลังด้วยมือได้) ความคุ้มค่าจึงไม่พอเทียบกับต้นทุนที่ต้องจ่ายทุกครั้ง
 """
 
 import math
@@ -25,7 +30,7 @@ import numpy as np
 from dotenv import load_dotenv
 
 from src.config import DEFAULT_SUMMARY_MODEL, DEFAULT_UI_LANG
-from src.llm import PROVIDERS, MissingApiKeyError, UnknownModelError, resolve
+from src.llm import PROVIDERS, UnknownModelError, resolve
 from src.messages import render
 from src.record import (
     get_common_samplerate,
@@ -42,20 +47,11 @@ LOOPBACK_SILENT_DBFS = -50.0
 
 MEASURE_SECONDS = 8
 
-# timeout ของ probe เอง สั้นกว่า timeout ของงานสรุปจริง (LLM_TIMEOUT_SECONDS = 900 ใน
-# src/llm.py) มาก โดยตั้งใจ: request "hi" สั้นๆ ที่ probe ยิงไปกับ chunk ของประชุมทั้ง
-# ก้อนที่งานสรุปยิงจริงไม่ได้ใช้เวลาระดับเดียวกันเลย ถ้า probe ใช้ timeout เดียวกับ
-# งานสรุป endpoint ที่ตายอยู่จะทำให้คนที่กำลังจะกดเริ่มอัดต้องรอถึง 15 นาทีก่อนรู้ว่า
-# ควรอัดต่อไปดีไหม -- preflight มีไว้ตอบเร็วพอที่จะคุ้มค่ารอ ไม่ใช่ค้างนานกว่าประชุมเอง
-# ค่าเดิมก่อน Task 5 (ตอนยังสร้าง client ของ Anthropic เองตรงๆ) คือ 15 วินาที คงไว้เท่าเดิม
-PROBE_TIMEOUT_SECONDS = 15
-
 # ภาษาตั้งต้นของโมดูลนี้ -- ผู้เรียกส่ง lang เข้ามาทับได้ทุกฟังก์ชัน ค่านี้มีไว้ให้
 # ผู้เรียกเดิม (และเทสต์ชุดเดิม) ได้ข้อความชุดเดียวกับก่อนมี catalog
 TH = DEFAULT_UI_LANG
 
 SAMPLERATE_CHECK_NAME = render("check_samplerate", {}, TH)
-API_CHECK_NAME = render("check_api", {}, TH)
 
 
 @dataclass
@@ -147,87 +143,18 @@ def evaluate_samplerate(
     return _result("check_samplerate", "ok", "samplerate_ok", {"rate": rate}, lang)
 
 
-def read_summary_settings(base_dir: Path | None = None) -> tuple[str, str]:
-    """(key ที่ provider ของโมเดลนี้ต้องใช้, โมเดลที่ตั้งไว้) อ่านจาก .env ตรง ๆ
+def read_summary_model(base_dir: Path | None = None) -> str:
+    """โมเดลที่ตั้งไว้ใช้สรุป อ่านจาก .env ตรง ๆ
 
     ไม่ผ่าน load_config เพราะหน้าที่ของโมดูลนี้คือรายงานปัญหาการตั้งค่าให้อ่านรู้เรื่อง
     ไม่ใช่พังคาหน้าจอด้วย traceback
 
-    ถาม resolve() ว่า provider ของโมเดลนี้อ่าน key จาก env var ชื่ออะไร แทนที่จะเดาเอง
-    ว่า "ไม่ใช่ GLM-5.2 ก็ต้องเป็น Anthropic" -- ประโยคแบบนั้นคือความรู้เฉพาะ provider ที่
-    ควรอยู่ใน registry ของ src/llm.py ที่เดียว เพิ่ม provider ตัวที่สี่แล้วลืมแก้ที่นี่
-    จะเงียบ ๆ ไปเช็ค key ผิดตัวโดยไม่มีใครรู้
-
-    โมเดลที่ไม่อยู่ใน registry ไม่มี provider ให้ถาม -- คืน key ว่างไว้ check_summary_model
-    เป็นคนรายงานปัญหานั้นแทน
+    เดิมฟังก์ชันนี้ชื่อ read_summary_settings และคืน key คู่กับ model ด้วย เพราะตอนนั้น
+    ยังมี check_api_key ยิง API จริงเพื่อตรวจ key พอ probe ถูกถอดออก ไม่มีใครในโมดูลนี้
+    ต้องใช้ key อีกแล้ว จึงคืนแค่โมเดลและเปลี่ยนชื่อให้ตรงกับหน้าที่ที่เหลือ
     """
     load_dotenv((base_dir or Path.cwd()) / ".env")
-    model = os.environ.get("CLAUDE_MODEL", DEFAULT_SUMMARY_MODEL)
-    try:
-        key_env = resolve(model).key_env
-    except UnknownModelError:
-        return ("", model)
-    return (os.environ.get(key_env, ""), model)
-
-
-def probe_summary_model(model: str) -> None:
-    """ยิงคำขอที่เล็กที่สุดเท่าที่ยิงได้ไปยัง provider ของโมเดลนี้ ผ่าน = ไม่โยนอะไรออกมา
-
-    ต้องเรียกจริงเพราะไม่มี endpoint ให้ถามสถานะ key หรือยอดเครดิตคงเหลือ ทั้งสอง
-    อย่างอ่านได้จาก error ที่ตอบกลับมาเท่านั้น max_tokens=1 ทำให้ค่าใช้จ่ายต่อการตรวจ
-    หนึ่งครั้งอยู่ในหลักเศษสตางค์ ยิงผ่าน resolve(model).complete() ตัวเดียวกับที่
-    summarize.py เรียกจริง -- provider ไหนถูกเลือกก็ถูกตรวจ ไม่ใช่ Anthropic เสมอ
-
-    ส่ง PROBE_TIMEOUT_SECONDS เข้าไปเป็น timeout override เสมอ แทนที่จะปล่อยให้ complete()
-    ใช้ timeout ประจำตัว provider (ของ GLM คือ LLM_TIMEOUT_SECONDS = 900 วินาที ซึ่งเหมาะ
-    กับการสรุปทั้ง chunk ไม่ใช่กับ "hi" คำเดียวก่อนเข้าประชุม) -- ฝั่ง Anthropic ค่านี้ยัง
-    พ่วง max_retries=0 มาด้วยในตัว completer เอง (ดู src/llm.py::_anthropic_completer)
-    ส่วนฝั่ง GLM ไม่ต้องปิด retry เพิ่มเพราะ urlopen ไม่มี retry ในตัวอยู่แล้ว จึงยิง
-    ครั้งเดียวเสมอไม่ว่า provider ไหน
-
-    คำตอบว่างเปล่าถือว่าผ่าน -- reasoning model ที่ max_tokens=1 ใช้โควตาหมดก่อนเขียน
-    อะไรได้ ซึ่งพิสูจน์แล้วว่าคำขอไปถึงโมเดลจริงและ key ผ่าน auth แล้ว สิ่งที่ตรวจคือ
-    key ใช้ได้และโมเดลมีอยู่ ไม่ใช่คุณภาพของคำตอบ
-    """
-    try:
-        resolve(model).complete("hi", "hi", 1, PROBE_TIMEOUT_SECONDS)
-    except MissingApiKeyError:
-        # สืบทอดจาก RuntimeError เหมือนกัน แต่ความหมายตรงข้าม: ยังไปไม่ถึงโมเดลเลย
-        # ต้องจับก่อน except RuntimeError ข้างล่าง ไม่งั้นจะถูกกลืนเป็น "ผ่าน"
-        raise
-    except RuntimeError as e:
-        if hasattr(e, "status_code"):
-            # HttpStatusError -- คำตอบเรื่อง auth/โควตา ต้องให้ classify_probe_error อ่าน
-            raise
-        # "returned no text" -- ไปถึงโมเดลแล้ว ถือว่าผ่าน
-        return
-
-
-def classify_probe_error(error: Exception, model: str, lang: str = TH) -> CheckResult:
-    if isinstance(error, MissingApiKeyError):
-        return _result(
-            "check_api", "warn", "api_no_key_for", {"error": str(error)}, lang
-        )
-    status_code = getattr(error, "status_code", None)
-    message = str(error)
-    if status_code == 429:
-        # ผ่าน auth และมีเครดิตแล้วเท่านั้นถึงจะโดนจำกัดอัตรา -- ไม่ใช่ปัญหาของ key
-        return _result("check_api", "ok", "api_rate_limited", {}, lang)
-    if status_code == 401:
-        # ชื่อ env var มาจาก resolve(model) เสมอ ไม่เดาว่าเป็น ANTHROPIC_API_KEY --
-        # ฟังก์ชันนี้ถูกเรียกไม่ว่า provider ไหนถูกตรวจอยู่ (ดู check_api_key)
-        try:
-            env_var = resolve(model).key_env
-        except UnknownModelError:
-            env_var = ""
-        return _result("check_api", "warn", "api_unauthorized", {"env_var": env_var}, lang)
-    if status_code in (400, 403) and "credit balance" in message.lower():
-        return _result("check_api", "warn", "api_no_credit", {}, lang)
-    if status_code == 403:
-        return _result(
-            "check_api", "warn", "api_model_forbidden", {"model": model}, lang
-        )
-    return _result("check_api", "warn", "api_probe_failed", {"error": message}, lang)
+    return os.environ.get("CLAUDE_MODEL", DEFAULT_SUMMARY_MODEL)
 
 
 def check_summary_model(model: str, lang: str = TH) -> CheckResult:
@@ -237,12 +164,10 @@ def check_summary_model(model: str, lang: str = TH) -> CheckResult:
     ก่อนหน้านี้ CLAUDE_MODEL ถูกส่งตรงเข้า Anthropic API โดยไม่ผ่านที่นี่เลย id อะไรที่ API
     รับก็ใช้ได้ พอ summarize_transcript หันมาเรียกผ่าน resolve() แล้ว id ที่ไม่อยู่ใน
     PROVIDERS จะโยน UnknownModelError กลางท่อ -- หลังถอดเสียงเสร็จไปแล้ว ซึ่งเป็นขั้นที่
-    แพงที่สุด check_api_key ข้างล่างยิงไปถาม API จริงจึงตรวจไม่เจอกรณีนี้ (API รู้จักโมเดล
-    id นั้นได้โดยไม่ต้องอยู่ใน registry ของเรา) ต้องเช็คแยกจาก resolve() ตรง ๆ เท่านั้น
+    แพงที่สุด ต้องเช็คแยกจาก resolve() ตรง ๆ เท่านั้นถึงจะจับกรณีนี้ได้ก่อนอัด
 
-    เป็น "warn" ไม่ใช่ "fail" ด้วยเหตุผลเดียวกับ check_api_key: resolve ไม่ผ่านไม่ได้ทำให้
-    อัดหรือถอดเสียงไม่ได้ -- transcript ยังออกมาครบ เอาไปสรุปด้วยมือทีหลังได้ ต่างจากอัดไม่ได้
-    เลยซึ่งหายถาวร
+    เป็น "warn" ไม่ใช่ "fail": resolve ไม่ผ่านไม่ได้ทำให้อัดหรือถอดเสียงไม่ได้ -- transcript
+    ยังออกมาครบ เอาไปสรุปด้วยมือทีหลังได้ ต่างจากอัดไม่ได้เลยซึ่งหายถาวร
     """
     try:
         resolve(model)
@@ -252,47 +177,6 @@ def check_summary_model(model: str, lang: str = TH) -> CheckResult:
             "check_model", "warn", "model_unresolvable", {"model": model, "known": known}, lang
         )
     return _result("check_model", "ok", "model_ok", {}, lang)
-
-
-def check_api_key(api_key: str, model: str, probe=None, lang: str = TH) -> CheckResult:
-    """สถานะของ key ที่จะใช้สรุป -- คืน "ok" หรือ "warn" เท่านั้น ไม่มี "fail"
-
-    เพราะ start-meeting.bat ถามยกเลิกการอัดเมื่อเจอ "ไม่ผ่าน" และ key เสียไม่ใช่เหตุ
-    ให้ไม่อัด: transcript ยังได้ครบ เอาไปให้ Claude สรุปทีหลังได้ ส่วนประชุมที่ไม่ได้อัด
-    นั้นหายถาวร
-
-    เมื่อไม่มี `probe` ระบุมา (ทางเดินจริงตอน main() เรียก) จะยิงผ่าน probe_summary_model
-    ซึ่งถาม resolve(model) เอง -- จึงตรวจ provider ที่ model จะใช้จริง ไม่ใช่ Anthropic เสมอ
-    """
-    if not api_key.strip():
-        try:
-            env_var = resolve(model).key_env
-        except UnknownModelError:
-            # ไม่มี provider ให้บอกชื่อ env var -- เกิดขึ้นได้เฉพาะตอนถูกเรียกตรงโดยไม่ผ่าน
-            # check_summary_readiness (ซึ่งกันกรณีนี้ไว้แล้ว) ปล่อยว่างดีกว่าเดา
-            env_var = ""
-        return _result("check_api", "warn", "api_no_key", {"env_var": env_var}, lang)
-    try:
-        (probe or (lambda _api_key, m: probe_summary_model(m)))(api_key, model)
-    except Exception as e:
-        return classify_probe_error(e, model, lang)
-    # ไม่ต้องบอกชื่อโมเดล (บรรทัด "กำลังตรวจ..." บอกไปแล้ว) และไม่ต้องอธิบายว่าทำไม
-    # ถึงไม่มีตัวเลขเครดิต -- คนอ่านบรรทัดนี้ตอนกำลังจะเข้าประชุม ผ่านคือผ่าน จบ
-    return _result("check_api", "ok", "api_ok", {}, lang)
-
-
-def check_summary_readiness(api_key: str, model: str, lang: str = TH) -> list[CheckResult]:
-    """ผลตรวจทั้งสองข้อของสาย "จะสรุปได้ไหม": โมเดลอยู่ใน registry ไหม แล้วถ้าอยู่ key
-    ใช้ได้ไหม
-
-    โมเดลไม่อยู่ใน registry ทำให้ทั้งสองข้อพังพร้อมกันด้วยสาเหตุเดียว -- ไม่มี provider
-    ให้ยิงคำขอตรวจ key เลย จึงคืนแค่ผลตรวจโมเดลข้อเดียว ไม่ใช่สองคำเตือนสำหรับสาเหตุ
-    เดียวกัน (ซึ่งจะสอนให้คนอ่านรายงานแบบข้ามผ่าน)
-    """
-    model_result = check_summary_model(model, lang=lang)
-    if model_result.status != "ok":
-        return [model_result]
-    return [model_result, check_api_key(api_key, model, lang=lang)]
 
 
 def format_report(results: list[CheckResult], lang: str = TH) -> str:
@@ -388,17 +272,15 @@ def run_preflight(seconds: int = MEASURE_SECONDS, lang: str = TH) -> list[CheckR
 
 
 def main() -> int:
-    # ต้องเรียกก่อนอ่าน UI_LANG: read_summary_settings เป็นตัวที่ load_dotenv เข้ามา
+    # ต้องเรียกก่อนอ่าน UI_LANG: read_summary_model เป็นตัวที่ load_dotenv เข้ามา
     # ถ้าสลับลำดับ ค่า UI_LANG ที่ตั้งใน .env จะไม่มีผลเลย
-    api_key, model = read_summary_settings()
+    model = read_summary_model()
     lang = os.environ.get("UI_LANG", TH)
-    print(render("preflight_checking_key", {"model": model}, lang))
-    # ข้อเดียวถ้าโมเดลไม่อยู่ใน registry (ไม่มี provider ให้ตรวจ key เลย) สองข้อถ้า
-    # โมเดลใช้ได้ -- ดู check_summary_readiness
-    key_results = check_summary_readiness(api_key, model, lang=lang)
+    print(render("preflight_checking_model", {"model": model}, lang))
+    model_result = check_summary_model(model, lang=lang)
 
     print(render("preflight_checking_audio", {"seconds": MEASURE_SECONDS}, lang))
-    results = [*run_preflight(lang=lang), *key_results]
+    results = [*run_preflight(lang=lang), model_result]
     print()
     print(format_report(results, lang))
     return 1 if any(r.status == "fail" for r in results) else 0

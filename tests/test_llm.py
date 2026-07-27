@@ -111,10 +111,9 @@ def test_claude_completer_names_the_env_var_when_the_key_is_missing():
         resolve("claude-opus-5").complete("ระบบ", "เนื้อหา", 10)
 
 
-def test_claude_completer_uses_the_sdks_own_defaults_when_no_timeout_is_given():
-    # summarize.py เรียกด้วยสามพารามิเตอร์เสมอ (ไม่ส่ง timeout) -- ต้องไม่มีใครถูกจำกัด
-    # เวลาแบบเงียบๆ นี่คือเทสต์ที่จะจับได้ถ้ามีคนเผลอเอา timeout สั้นของ probe มาผูกไว้
-    # กับทางสรุปจริง ซึ่งจะไปตัดทุก call จริงให้เหลือแค่ timeout สั้นๆ
+def test_claude_completer_uses_the_sdks_own_defaults():
+    # complete() มีแค่สามพารามิเตอร์ (ไม่มี timeout override แล้ว) -- ต้องไม่มีใครถูกจำกัด
+    # เวลาแบบเงียบๆ ปล่อยให้ SDK ใช้ timeout/retry default ของมันเองเสมอ
     client = MagicMock()
     client.messages.create.return_value = _anthropic_response("สรุป")
 
@@ -127,23 +126,6 @@ def test_claude_completer_uses_the_sdks_own_defaults_when_no_timeout_is_given():
     kwargs = anthropic_cls.call_args.kwargs
     assert "timeout" not in kwargs
     assert "max_retries" not in kwargs
-
-
-def test_claude_completer_forwards_an_explicit_timeout_and_disables_retries():
-    # preflight ส่ง timeout สั้นของตัวเองเข้ามาแทน -- ต้องไปถึง client ของ SDK จริงๆ
-    # พร้อม max_retries=0 กันไม่ให้ SDK ลองซ้ำเองจนกินเวลาเกินสิ่งที่ preflight ตั้งใจไว้
-    client = MagicMock()
-    client.messages.create.return_value = _anthropic_response("สรุป")
-
-    with (
-        patch("anthropic.Anthropic", return_value=client) as anthropic_cls,
-        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
-    ):
-        resolve("claude-opus-5").complete("ระบบ", "เนื้อหา", 1, timeout=15)
-
-    kwargs = anthropic_cls.call_args.kwargs
-    assert kwargs["timeout"] == 15
-    assert kwargs["max_retries"] == 0
 
 
 def _llm_payload(content: str, finish_reason: str = "stop"):
@@ -415,26 +397,15 @@ def test_glm_names_its_own_env_var_when_the_key_is_missing():
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
 
 
-def test_glm_completer_uses_its_own_timeout_when_none_is_given():
-    # summarize.py เรียกด้วยสามพารามิเตอร์เสมอ -- ต้องยังได้ LLM_TIMEOUT_SECONDS เดิม
+def test_glm_completer_always_uses_llm_timeout_seconds():
+    # complete() มีแค่สามพารามิเตอร์ (ไม่มี timeout override แล้ว) -- ต้องได้
+    # LLM_TIMEOUT_SECONDS เสมอ
     patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
 
     with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 999)
 
     assert captured["timeout"] == LLM_TIMEOUT_SECONDS
-
-
-def test_glm_completer_forwards_an_explicit_timeout_override():
-    # preflight ส่ง timeout สั้นของตัวเองเข้ามาแทน -- ต้องไปถึง urlopen จริงๆ ไม่ใช่
-    # LLM_TIMEOUT_SECONDS ที่ใช้กับงานสรุปจริง
-    patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
-
-    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
-        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 1, timeout=15)
-
-    assert captured["timeout"] == 15
-    assert captured["timeout"] != LLM_TIMEOUT_SECONDS
 
 
 def test_glm_honours_a_custom_base_url():

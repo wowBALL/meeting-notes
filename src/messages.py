@@ -53,7 +53,6 @@ MESSAGES = {
         "check_mic": "ไมค์",
         "check_loopback": "ลำโพง (คู่สนทนา)",
         "check_samplerate": "sample rate",
-        "check_api": "API key ของโมเดลสรุป",
         "check_model": "โมเดลที่ใช้สรุป",
         "peak_silent": "เงียบสนิท",
         "peak_level": "peak {db} dB",
@@ -73,27 +72,6 @@ MESSAGES = {
             "ออกอุปกรณ์อื่น ให้ตั้ง output ของแอปประชุมให้ตรงกับ default ของ Windows"
         ),
         "samplerate_ok": "ตรงกันที่ {rate} Hz",
-        "api_ok": "ใช้งานได้ปกติ",
-        "api_no_key": (
-            "ไม่ได้ตั้งค่า {env_var} ใน .env -- อัดและถอดเสียงได้ปกติ "
-            "แต่จะไม่ได้สรุปอัตโนมัติ"
-        ),
-        "api_no_key_for": "{error}",
-        "api_rate_limited": (
-            "key ใช้ได้ (ตอนนี้ชนลิมิตอัตราการเรียก แต่ตอนสรุปมี retry รออยู่แล้ว)"
-        ),
-        "api_unauthorized": (
-            "key ใช้ไม่ได้ (401) -- หมดอายุ ถูกเพิกถอน หรือพิมพ์ผิด "
-            "ออก key ใหม่แล้วแก้ {env_var} ใน .env"
-        ),
-        "api_no_credit": (
-            "เครดิตไม่พอสำหรับ key นี้ -- เติมเครดิตก่อน "
-            "ไม่งั้นประชุมนี้จะได้แค่ transcript"
-        ),
-        "api_model_forbidden": (
-            "key ไม่มีสิทธิ์เรียก {model} (403) -- ตรวจสิทธิ์ของ key หรือแก้ CLAUDE_MODEL"
-        ),
-        "api_probe_failed": "ตรวจไม่สำเร็จ: {error}",
         "model_ok": "รองรับ",
         "model_unresolvable": (
             "ไม่รู้จักโมเดล {model} -- ที่รองรับตอนนี้: {known} -- อัดและถอดเสียงได้ปกติ "
@@ -105,7 +83,7 @@ MESSAGES = {
         "report_fail": "สรุป: ยังไม่ควรเริ่มอัด -- แก้ข้อที่ไม่ผ่านก่อน",
         "report_warn": "สรุป: พร้อมอัด แต่มีข้อเตือน อ่านให้ครบก่อนเริ่ม",
         "report_ok": "สรุป: พร้อมอัดประชุมได้เลย",
-        "preflight_checking_key": "กำลังตรวจ key ที่จะใช้สรุป ({model}) ...",
+        "preflight_checking_model": "กำลังตรวจว่าโมเดลที่จะใช้สรุปใช้งานได้ไหม ({model}) ...",
         "preflight_checking_audio": (
             "กำลังตรวจเสียง {seconds} วินาที -- พูดใส่ไมค์ และเปิดเสียงอะไรก็ได้ออกลำโพง"
         ),
@@ -159,7 +137,6 @@ MESSAGES = {
         "check_mic": "Microphone",
         "check_loopback": "Speaker (far end)",
         "check_samplerate": "sample rate",
-        "check_api": "Summary model API key",
         "check_model": "Summary model",
         "peak_silent": "completely silent",
         "peak_level": "peak {db} dB",
@@ -180,28 +157,6 @@ MESSAGES = {
             "match the Windows default"
         ),
         "samplerate_ok": "both at {rate} Hz",
-        "api_ok": "working",
-        "api_no_key": (
-            "{env_var} is not set in .env -- recording and transcription "
-            "still work, but there will be no automatic summary"
-        ),
-        "api_no_key_for": "{error}",
-        "api_rate_limited": (
-            "key works (rate-limited right now, but summarizing already retries)"
-        ),
-        "api_unauthorized": (
-            "key rejected (401) -- expired, revoked, or mistyped. Issue a new one "
-            "and update {env_var} in .env"
-        ),
-        "api_no_credit": (
-            "not enough credit for this key -- top it up, otherwise this meeting "
-            "only gets a transcript"
-        ),
-        "api_model_forbidden": (
-            "the key may not call {model} (403) -- check the key's permissions or "
-            "change CLAUDE_MODEL"
-        ),
-        "api_probe_failed": "check failed: {error}",
         "model_ok": "supported",
         "model_unresolvable": (
             "unknown model {model} -- supported right now: {known} -- recording and "
@@ -214,7 +169,7 @@ MESSAGES = {
         "report_fail": "Verdict: do not start recording yet -- fix what failed first",
         "report_warn": "Verdict: ready to record, but read the warnings first",
         "report_ok": "Verdict: ready to record",
-        "preflight_checking_key": "Checking the key used for summarizing ({model}) ...",
+        "preflight_checking_model": "Checking whether the summary model is usable ({model}) ...",
         "preflight_checking_audio": (
             "Checking audio for {seconds} seconds -- talk into the mic, and play "
             "anything through the speakers"
