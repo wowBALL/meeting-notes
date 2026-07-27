@@ -5,20 +5,20 @@ import numpy as np
 import pytest
 
 import src.preflight as preflight
-from src.config import DEFAULT_CLAUDE_MODEL
+from src.config import DEFAULT_SUMMARY_MODEL
+from src.job import NO_SUMMARY_MODEL
 from src.preflight import (
     LOOPBACK_SILENT_DBFS,
     MIC_GOOD_DBFS,
     MIC_WEAK_DBFS,
     CheckResult,
-    check_api_key,
-    classify_probe_error,
+    check_summary_model,
     evaluate_loopback,
     evaluate_mic,
     evaluate_samplerate,
     format_report,
     peak_dbfs,
-    read_api_settings,
+    read_summary_model,
     run_preflight,
 )
 
@@ -182,131 +182,86 @@ def measure_peaks_for_test(audio):
     return preflight.measure_peaks(audio, mic_device, loopback_device, seconds=1)
 
 
-class FakeAPIError(Exception):
-    """รูปร่างเดียวกับ anthropic.APIStatusError: exception ที่พก .status_code มาด้วย"""
-
-    def __init__(self, status_code: int, message: str):
-        super().__init__(message)
-        self.status_code = status_code
+# --- check_summary_model: ไม่มีการเรียก API จริง ----------------------------
 
 
-def failing_probe(error):
-    def probe(api_key, model):
-        raise error
-
-    return probe
-
-
-def test_check_api_key_reports_a_missing_key_without_calling_the_api():
-    called = []
-
-    result = check_api_key("", "claude-opus-5", probe=lambda k, m: called.append(k))
+def test_check_summary_model_warns_on_a_model_outside_the_registry():
+    # เคยเป็น "ส่ง CLAUDE_MODEL ตรงเข้า API" มาก่อน -- id อะไรที่ API รับก็ใช้ได้ พอ
+    # summarize_transcript หันมาเรียกผ่าน resolve() แล้ว id ที่ไม่อยู่ใน registry จะ
+    # โยน UnknownModelError กลางท่อ หลังถอดเสียงเสร็จไปแล้ว ต้องรู้ตอนนี้ ไม่ใช่ตอนนั้น
+    result = check_summary_model("claude-opus-4-8")
 
     assert result.status == "warn"
-    assert "ANTHROPIC_API_KEY" in result.detail
-    assert called == []
+    assert "claude-opus-4-8" in result.detail
+    assert "claude-opus-5" in result.detail
+    assert "claude-sonnet-5" in result.detail
+    # transcript-only ไม่ได้อยู่ใน PROVIDERS (resolve() ไม่รู้จักมัน) แต่เป็นค่าที่
+    # README/.env.example บอกว่าใช้ได้จริง -- รายชื่อที่พิมพ์ออกมาต้องไม่ทิ้งมันไว้
+    assert NO_SUMMARY_MODEL in result.detail
 
 
-def test_check_api_key_passes_when_the_probe_succeeds():
-    # บรรทัดเดียวสั้น ๆ -- รายงานนี้พิมพ์ลง console กว้าง 80 คอลัมน์ ข้อความยาวจะตัดบรรทัด
-    # จนอ่านยาก และกรณีผ่านคือกรณีที่ไม่ต้องให้ใครอ่านอะไรเพิ่ม
-    result = check_api_key("sk-ant-test", "claude-opus-5", probe=lambda k, m: None)
-
-    assert result.status == "ok"
-    assert result.detail == "ใช้งานได้ปกติ"
-
-
-def test_check_api_key_reports_an_expired_key():
-    result = check_api_key(
-        "sk-ant-test",
-        "claude-opus-5",
-        probe=failing_probe(FakeAPIError(401, "invalid x-api-key")),
-    )
-
-    assert result.status == "warn"
-    assert "หมดอายุ" in result.detail
-
-
-@pytest.mark.parametrize("status_code", [400, 403])
-def test_check_api_key_reports_an_exhausted_credit_balance(status_code):
-    result = check_api_key(
-        "sk-ant-test",
-        "claude-opus-5",
-        probe=failing_probe(
-            FakeAPIError(status_code, "Your credit balance is too low to access the API")
-        ),
-    )
-
-    assert result.status == "warn"
-    assert "เครดิต" in result.detail
-
-
-def test_check_api_key_treats_a_rate_limit_as_a_working_key():
-    # 429 แปลว่า key ผ่าน auth และมีเครดิตแล้ว แค่ยิงถี่เกินไปตอนนี้
-    result = check_api_key(
-        "sk-ant-test",
-        "claude-opus-5",
-        probe=failing_probe(FakeAPIError(429, "rate limit exceeded")),
-    )
+def test_check_summary_model_passes_for_a_registered_model():
+    result = check_summary_model("claude-opus-5")
 
     assert result.status == "ok"
 
 
-def test_check_api_key_surfaces_an_unrecognised_failure_verbatim():
-    result = check_api_key(
-        "sk-ant-test",
-        "claude-opus-5",
-        probe=failing_probe(OSError("getaddrinfo failed")),
-    )
+def test_check_summary_model_recognizes_transcript_only_as_deliberate():
+    # transcript-only ไม่อยู่ใน PROVIDERS ของ resolve() แต่ README/.env.example
+    # บอกว่าใช้ได้ -- ต้องได้ "ok" พร้อมข้อความบอกว่าปิดการสรุปไว้ตั้งใจ ไม่ใช่ "warn"
+    # แบบเดียวกับโมเดลที่พิมพ์ผิด
+    result = check_summary_model(NO_SUMMARY_MODEL)
 
-    assert result.status == "warn"
-    assert "getaddrinfo failed" in result.detail
+    assert result.status == "ok"
+    assert NO_SUMMARY_MODEL in result.detail
+
+
+def test_check_summary_model_recognizes_transcript_only_in_english():
+    result = check_summary_model(NO_SUMMARY_MODEL, "en")
+
+    assert result.status == "ok"
+    assert NO_SUMMARY_MODEL in result.detail
 
 
 @pytest.mark.parametrize(
-    "error",
-    [
-        None,
-        FakeAPIError(401, "invalid x-api-key"),
-        FakeAPIError(400, "Your credit balance is too low"),
-        FakeAPIError(429, "rate limit exceeded"),
-        FakeAPIError(500, "internal server error"),
-        OSError("network unreachable"),
-    ],
+    "model",
+    ["GLM-5.2", "claude-opus-5", "claude-sonnet-5", NO_SUMMARY_MODEL, "not-a-real-model"],
 )
-def test_check_api_key_never_blocks_recording(error):
-    # start-meeting.bat ถามยกเลิกการอัดเมื่อเจอ "fail" แต่ key เสียไม่ใช่เหตุให้ไม่อัด:
-    # transcript ยังได้ครบ เอาไปให้ Claude สรุปทีหลังได้ ส่วนประชุมที่ไม่ได้อัดนั้นหายถาวร
-    def probe(api_key, model):
-        if error is not None:
-            raise error
-
-    for api_key in ("", "sk-ant-test"):
-        assert check_api_key(api_key, "claude-opus-5", probe=probe).status != "fail"
+def test_check_summary_model_never_fails(model):
+    # โมเดลไม่อยู่ใน registry ไม่ได้ทำให้อัดหรือถอดเสียงไม่ได้ -- transcript ยังออกมา
+    # ครบ เอาไปสรุปด้วยมือทีหลังได้ -- พารามิเตอร์คือค่าที่ .env จริงเป็นไปได้ทั้งหมด
+    # (โมเดลที่รองรับทั้งสาม, transcript-only, และค่าที่พิมพ์ผิด) เคสเดียวคือสิ่งที่
+    # ปล่อยให้บั๊กนี้หลุดผ่านมาได้
+    assert check_summary_model(model).status != "fail"
 
 
-def test_read_api_settings_returns_an_empty_key_instead_of_raising(tmp_path, monkeypatch):
-    # load_config โยน KeyError เมื่อไม่มี ANTHROPIC_API_KEY -- ซึ่งคือกรณีที่ต้องรายงาน ไม่ใช่พัง
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+# --- read_summary_model: อ่านค่าจาก .env ตรง ๆ ไม่ตรวจสอบอะไรเพิ่ม -----------------
+
+
+def test_read_summary_model_returns_the_default_when_unset(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
 
-    api_key, model = read_api_settings(base_dir=tmp_path)
-
-    assert api_key == ""
-    assert model == DEFAULT_CLAUDE_MODEL
+    assert read_summary_model(base_dir=tmp_path) == DEFAULT_SUMMARY_MODEL
 
 
-def test_read_api_settings_reads_the_configured_model(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+def test_read_summary_model_reads_the_configured_model(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_MODEL", "claude-sonnet-5")
 
-    assert read_api_settings(base_dir=tmp_path) == ("sk-ant-test", "claude-sonnet-5")
+    assert read_summary_model(base_dir=tmp_path) == "claude-sonnet-5"
+
+
+def test_read_summary_model_does_not_validate_against_the_registry(tmp_path, monkeypatch):
+    # การตรวจว่าโมเดลอยู่ใน registry ไหมเป็นหน้าที่ของ check_summary_model แยกต่างหาก --
+    # read_summary_model แค่อ่านค่าดิบจาก .env เท่านั้น
+    monkeypatch.setenv("CLAUDE_MODEL", "not-a-real-model")
+
+    assert read_summary_model(base_dir=tmp_path) == "not-a-real-model"
 
 
 # --- สลับภาษา ------------------------------------------------------------
 
 
-def test_every_check_carries_a_message_code(tmp_path):
+def test_every_check_carries_a_message_code():
     """ผลตรวจต้องพก "รหัส" ไปด้วย ไม่ใช่มีแต่ข้อความที่ render แล้ว
 
     ถ้าข้อไหนไม่มีรหัส ข้อนั้นจะแปลไม่ได้และค้างเป็นไทยอยู่ในรายงานภาษาอังกฤษ
@@ -314,7 +269,7 @@ def test_every_check_carries_a_message_code(tmp_path):
     results = [
         evaluate_mic(-15.0),
         evaluate_loopback(-20.0, "Speakers"),
-        check_api_key("", "claude-opus-5"),
+        check_summary_model("claude-opus-5"),
     ]
 
     assert all(r.code for r in results)
@@ -337,15 +292,12 @@ def test_evaluate_loopback_keeps_the_device_name_untranslated():
     assert result.status == "warn"
 
 
-def test_api_failures_render_in_english():
-    class Unauthorized(Exception):
-        status_code = 401
+def test_check_summary_model_renders_in_english():
+    result = check_summary_model("claude-opus-4-8", "en")
 
-    result = classify_probe_error(Unauthorized("nope"), "claude-opus-5", "en")
-
-    assert result.name == "Claude API key"
-    assert "401" in result.detail
-    assert "expired" in result.detail
+    assert result.name == "Summary model"
+    assert "unknown model" in result.detail
+    assert "claude-opus-4-8" in result.detail
 
 
 def test_format_report_translates_results_that_were_built_in_thai():

@@ -9,10 +9,15 @@
    ทำให้ได้ยินแต่ฝั่งเราเอง)
 3. ไมค์กับลำโพงตั้ง sample rate ตรงกันไหม -- ไม่ตรง = ตัวอัดปฏิเสธการทำงาน
    แต่จะบอกก็ต่อเมื่อหน้าจอขึ้นคำว่าเริ่มอัดไปแล้ว
-4. key ที่จะใช้สรุปยังเรียกได้จริงไหม -- รู้ตอนนี้ ดีกว่ารู้ตอนประชุมเลิกแล้ว
+4. โมเดลที่ตั้งไว้จะใช้สรุปได้จริงไหม -- อยู่ใน registry ของ resolve() หรือเปล่า
 
 ข้อ 1-3 เป็น "ไม่ผ่าน" ได้ เพราะเสียงที่ไม่ได้อัดหายถาวร ข้อ 4 เป็นได้แค่ "เตือน"
-เพราะ transcript ยังได้ครบอยู่ดี เอาไปให้ Claude สรุปทีหลังได้
+เพราะ transcript ยังได้ครบอยู่ดี เอาไปสรุปทีหลังได้
+
+เดิมข้อ 4 ยิงคำขอจริงไปยัง API เพื่อตรวจว่า key ใช้ได้ด้วย แต่ถูกถอดออกแล้ว: มันคือ
+คำขอที่มีค่าใช้จ่ายจริงทุกครั้งก่อนอัดประชุม ต้องมี timeout ของตัวเอง และถึงจะรู้ว่า
+key ใช้ไม่ได้ก็ยังอัดต่อได้อยู่ดี (transcript ไม่ได้หายไปไหน สรุปทีหลังด้วยมือได้)
+ความคุ้มค่าจึงไม่พอเทียบกับต้นทุนที่ต้องจ่ายทุกครั้ง
 """
 
 import math
@@ -24,7 +29,9 @@ from pathlib import Path
 import numpy as np
 from dotenv import load_dotenv
 
-from src.config import DEFAULT_CLAUDE_MODEL, DEFAULT_UI_LANG
+from src.config import DEFAULT_SUMMARY_MODEL, DEFAULT_UI_LANG
+from src.job import NO_SUMMARY_MODEL
+from src.llm import PROVIDERS, UnknownModelError, resolve
 from src.messages import render
 from src.record import (
     get_common_samplerate,
@@ -46,10 +53,6 @@ MEASURE_SECONDS = 8
 TH = DEFAULT_UI_LANG
 
 SAMPLERATE_CHECK_NAME = render("check_samplerate", {}, TH)
-API_CHECK_NAME = render("check_api", {}, TH)
-# ตัดสั้นกว่า default ของ SDK (10 นาที) มาก -- นี่คือการตรวจก่อนอัด ไม่ใช่การเรียกจริง
-# เน็ตอืดจนเกินนี้ให้รายงานเป็นคำเตือนแล้วเดินหน้าต่อ ดีกว่าค้างคาหน้าจอก่อนประชุม
-API_PROBE_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass
@@ -127,8 +130,8 @@ def evaluate_samplerate(
     เขียนเงื่อนไขเทียบเอง -- คำตอบของ preflight จึงไม่มีทางขัดกับสิ่งที่ตัวอัดยอมรับจริง
     แม้เงื่อนไขนั้นจะเปลี่ยนไปในอนาคต
 
-    เป็น "fail" ได้ ต่างจากผลตรวจ API key: ค่าไม่ตรงกันแปลว่าอัดไม่ได้เลย ไม่ใช่แค่
-    ได้ผลลัพธ์ไม่ครบ
+    เป็น "fail" ได้ ต่างจาก check_summary_model ที่ได้แค่ "warn": ค่า sample rate ไม่
+    ตรงกันแปลว่าอัดไม่ได้เลย ส่วนโมเดลที่ใช้ไม่ได้แปลว่าได้ transcript แต่ไม่ได้สรุป
     """
     try:
         rate = get_common_samplerate(mic_device, loopback_device)
@@ -141,71 +144,49 @@ def evaluate_samplerate(
     return _result("check_samplerate", "ok", "samplerate_ok", {"rate": rate}, lang)
 
 
-def read_api_settings(base_dir: Path | None = None) -> tuple[str, str]:
-    """(API key, โมเดลที่ตั้งไว้) อ่านจาก .env ตรง ๆ ไม่ผ่าน load_config
+def read_summary_model(base_dir: Path | None = None) -> str:
+    """โมเดลที่ตั้งไว้ใช้สรุป อ่านจาก .env ตรง ๆ
 
-    load_config โยน KeyError เมื่อไม่มี ANTHROPIC_API_KEY -- ซึ่งเป็นหนึ่งในกรณีที่
-    หน้าที่ของโมดูลนี้คือรายงานให้อ่านรู้เรื่อง ไม่ใช่พังคาหน้าจอด้วย traceback
+    ไม่ผ่าน load_config เพราะหน้าที่ของโมดูลนี้คือรายงานปัญหาการตั้งค่าให้อ่านรู้เรื่อง
+    ไม่ใช่พังคาหน้าจอด้วย traceback
+
+    เดิมฟังก์ชันนี้ชื่อ read_summary_settings และคืน key คู่กับ model ด้วย เพราะตอนนั้น
+    ยังมี check_api_key ยิง API จริงเพื่อตรวจ key พอ probe ถูกถอดออก ไม่มีใครในโมดูลนี้
+    ต้องใช้ key อีกแล้ว จึงคืนแค่โมเดลและเปลี่ยนชื่อให้ตรงกับหน้าที่ที่เหลือ
     """
     load_dotenv((base_dir or Path.cwd()) / ".env")
-    return (
-        os.environ.get("ANTHROPIC_API_KEY", ""),
-        os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL),
-    )
+    return os.environ.get("CLAUDE_MODEL", DEFAULT_SUMMARY_MODEL)
 
 
-def probe_claude(api_key: str, model: str) -> None:
-    """ยิงคำขอที่เล็กที่สุดเท่าที่ยิงได้ ผ่าน = ไม่โยนอะไรออกมา
+def check_summary_model(model: str, lang: str = TH) -> CheckResult:
+    """model ที่จะใช้สรุปอยู่ใน registry ของ resolve() ไหม -- คืน "ok" หรือ "warn" เท่านั้น
+    ไม่มี "fail"
 
-    ต้องเรียกจริงเพราะ Anthropic ไม่มี endpoint ให้ถามสถานะ key หรือยอดเครดิตคงเหลือ
-    ทั้งสองอย่างอ่านได้จาก error ที่ตอบกลับมาเท่านั้น max_tokens=1 ทำให้ค่าใช้จ่ายต่อ
-    การตรวจหนึ่งครั้งอยู่ในหลักเศษสตางค์
+    ก่อนหน้านี้ CLAUDE_MODEL ถูกส่งตรงเข้า Anthropic API โดยไม่ผ่านที่นี่เลย id อะไรที่ API
+    รับก็ใช้ได้ พอ summarize_transcript หันมาเรียกผ่าน resolve() แล้ว id ที่ไม่อยู่ใน
+    PROVIDERS จะโยน UnknownModelError กลางท่อ -- หลังถอดเสียงเสร็จไปแล้ว ซึ่งเป็นขั้นที่
+    แพงที่สุด ต้องเช็คแยกจาก resolve() ตรง ๆ เท่านั้นถึงจะจับกรณีนี้ได้ก่อนอัด
+
+    NO_SUMMARY_MODEL (transcript-only) ไม่อยู่ใน PROVIDERS เลย -- resolve() ไม่รู้จักมัน
+    โดยเจตนา (ดู src/job.py) เพราะมันแปลว่า "อย่าเรียกโมเดลไหนเลย" ไม่ใช่ id ของโมเดล
+    จริง ๆ ตัวหนึ่ง ต้องเช็คแยกก่อน resolve() ไม่งั้นจะโดนตีความว่าเป็นโมเดลที่พิมพ์ผิด
+    ทั้งที่ผู้ใช้ตั้งค่าตามเอกสารทุกตัวอักษร (README.md, .env.example)
+
+    เป็น "warn" ไม่ใช่ "fail": resolve ไม่ผ่านไม่ได้ทำให้อัดหรือถอดเสียงไม่ได้ -- transcript
+    ยังออกมาครบ เอาไปสรุปด้วยมือทีหลังได้ ต่างจากอัดไม่ได้เลยซึ่งหายถาวร
     """
-    from anthropic import Anthropic
-
-    client = Anthropic(
-        api_key=api_key, timeout=API_PROBE_TIMEOUT_SECONDS, max_retries=0
-    )
-    client.messages.create(
-        model=model,
-        max_tokens=1,
-        messages=[{"role": "user", "content": "hi"}],
-    )
-
-
-def classify_probe_error(error: Exception, model: str, lang: str = TH) -> CheckResult:
-    status_code = getattr(error, "status_code", None)
-    message = str(error)
-    if status_code == 429:
-        # ผ่าน auth และมีเครดิตแล้วเท่านั้นถึงจะโดนจำกัดอัตรา -- ไม่ใช่ปัญหาของ key
-        return _result("check_api", "ok", "api_rate_limited", {}, lang)
-    if status_code == 401:
-        return _result("check_api", "warn", "api_unauthorized", {}, lang)
-    if status_code in (400, 403) and "credit balance" in message.lower():
-        return _result("check_api", "warn", "api_no_credit", {}, lang)
-    if status_code == 403:
-        return _result(
-            "check_api", "warn", "api_model_forbidden", {"model": model}, lang
-        )
-    return _result("check_api", "warn", "api_probe_failed", {"error": message}, lang)
-
-
-def check_api_key(api_key: str, model: str, probe=None, lang: str = TH) -> CheckResult:
-    """สถานะของ key ที่จะใช้สรุป -- คืน "ok" หรือ "warn" เท่านั้น ไม่มี "fail"
-
-    เพราะ start-meeting.bat ถามยกเลิกการอัดเมื่อเจอ "ไม่ผ่าน" และ key เสียไม่ใช่เหตุ
-    ให้ไม่อัด: transcript ยังได้ครบ เอาไปให้ Claude สรุปทีหลังได้ ส่วนประชุมที่ไม่ได้อัด
-    นั้นหายถาวร
-    """
-    if not api_key.strip():
-        return _result("check_api", "warn", "api_no_key", {}, lang)
+    if model == NO_SUMMARY_MODEL:
+        return _result("check_model", "ok", "model_transcript_only", {"model": model}, lang)
     try:
-        (probe or probe_claude)(api_key, model)
-    except Exception as e:
-        return classify_probe_error(e, model, lang)
-    # ไม่ต้องบอกชื่อโมเดล (บรรทัด "กำลังตรวจ..." บอกไปแล้ว) และไม่ต้องอธิบายว่าทำไม
-    # ถึงไม่มีตัวเลขเครดิต -- คนอ่านบรรทัดนี้ตอนกำลังจะเข้าประชุม ผ่านคือผ่าน จบ
-    return _result("check_api", "ok", "api_ok", {}, lang)
+        resolve(model)
+    except UnknownModelError:
+        # NO_SUMMARY_MODEL ต้องอยู่ในรายชื่อนี้ด้วย ไม่งั้นข้อความจะบอกไม่ครบว่า
+        # transcript-only ก็เป็นค่าที่ใช้ได้จริง (แค่ไม่ได้อยู่ใน PROVIDERS)
+        known = ", ".join(sorted((*PROVIDERS, NO_SUMMARY_MODEL)))
+        return _result(
+            "check_model", "warn", "model_unresolvable", {"model": model, "known": known}, lang
+        )
+    return _result("check_model", "ok", "model_ok", {}, lang)
 
 
 def format_report(results: list[CheckResult], lang: str = TH) -> str:
@@ -301,15 +282,15 @@ def run_preflight(seconds: int = MEASURE_SECONDS, lang: str = TH) -> list[CheckR
 
 
 def main() -> int:
-    # ต้องเรียกก่อนอ่าน UI_LANG: read_api_settings เป็นตัวที่ load_dotenv เข้ามา
+    # ต้องเรียกก่อนอ่าน UI_LANG: read_summary_model เป็นตัวที่ load_dotenv เข้ามา
     # ถ้าสลับลำดับ ค่า UI_LANG ที่ตั้งใน .env จะไม่มีผลเลย
-    api_key, claude_model = read_api_settings()
+    model = read_summary_model()
     lang = os.environ.get("UI_LANG", TH)
-    print(render("preflight_checking_key", {"model": claude_model}, lang))
-    api_result = check_api_key(api_key, claude_model, lang=lang)
+    print(render("preflight_checking_model", {"model": model}, lang))
+    model_result = check_summary_model(model, lang=lang)
 
     print(render("preflight_checking_audio", {"seconds": MEASURE_SECONDS}, lang))
-    results = [*run_preflight(lang=lang), api_result]
+    results = [*run_preflight(lang=lang), model_result]
     print()
     print(format_report(results, lang))
     return 1 if any(r.status == "fail" for r in results) else 0
