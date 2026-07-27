@@ -17,6 +17,7 @@ from src.llm import (
     MissingApiKeyError,
     UnknownModelError,
     UnusableAnswerError,
+    UpstreamBodyError,
     resolve,
 )
 
@@ -126,6 +127,19 @@ def _patch_urlopen(payload):
         captured["request"] = request
         captured["timeout"] = timeout
         return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    return patch("urllib.request.urlopen", side_effect=urlopen), captured
+
+
+def _patch_urlopen_raw(raw_body: str):
+    """เหมือน _patch_urlopen แต่ส่ง string ดิบๆ ตรงๆ ไม่ผ่าน json.dumps -- ใช้จำลอง
+    body ที่ไม่ใช่ JSON เลย (หน้า error HTML, สตริงว่าง, JSON ที่ถูกตัดกลางคัน)"""
+    captured = {}
+
+    def urlopen(request, timeout=None):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _FakeResponse(raw_body.encode("utf-8"))
 
     return patch("urllib.request.urlopen", side_effect=urlopen), captured
 
@@ -251,6 +265,53 @@ def test_glm_content_as_parts_list_does_not_raise_attributeerror():
         pytest.raises(UnusableAnswerError),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, [1, 2], "oops", 42],
+    ids=["null", "list", "string", "number"],
+)
+def test_glm_non_object_top_level_is_not_retried(payload):
+    """top-level ของ body เป็น JSON ที่ถูกต้อง แต่ไม่ใช่ object (null/list/string/
+    number) เดิม .get() แตกเป็น AttributeError ดิบๆ ตอนนี้ต้องเป็น UnusableAnswerError
+    ที่คงที่แน่นอน -- ยิงคำขอเดิมซ้ำก็ได้รูปร่างเดิม จึงต้องไม่ retryable"""
+    from src.summarize import is_retryable
+
+    patcher, _ = _patch_urlopen(payload)
+
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+        with pytest.raises(UnusableAnswerError) as caught:
+            resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+    assert is_retryable(caught.value) is False
+
+
+@pytest.mark.parametrize(
+    "raw_body,marker",
+    [
+        ("<html><body>502 Bad Gateway</body></html>", "502 Bad Gateway"),
+        ("", None),
+        ('{"choices": [', '{"choices": ['),
+    ],
+    ids=["html_error_page", "empty_body", "truncated_json"],
+)
+def test_glm_non_json_body_is_retried_with_body_preserved(raw_body, marker):
+    """body ที่ไม่ใช่ JSON เลย (gateway hiccup กลางทาง) มักหายเองรอบถัดไป -- ต้องยัง
+    retryable เหมือนเดิม แต่ข้อความ exception ต้องโชว์ raw body แทน JSONDecodeError
+    ดิบๆ ที่บอกอะไรไม่ได้ ('Expecting value: line 1 column 1')"""
+    from src.summarize import is_retryable
+
+    patcher, _ = _patch_urlopen_raw(raw_body)
+
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+        with pytest.raises(UpstreamBodyError) as caught:
+            resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+    assert not isinstance(caught.value, (UnusableAnswerError, MissingApiKeyError))
+    assert is_retryable(caught.value) is True
+    if marker:
+        assert marker in str(caught.value)
 
 
 def test_glm_malformed_response_is_not_retried():

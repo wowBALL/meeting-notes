@@ -29,6 +29,10 @@ GLM_REDUCE_MAX_TOKENS = 24576
 # เพราะการหมดเวลากลาง reduce แปลว่าเสียสรุปรายช่วงที่จ่ายไปแล้วทั้งหมด
 LLM_TIMEOUT_SECONDS = 900
 
+# ตัด detail ของ error/body ทุกจุดที่ 400 ตัวอักษรเท่ากัน -- ค่าเดียว ชื่อเดียว กันพลาด
+# แบบตอนที่มันแยกกัน 3 ที่ในไฟล์นี้แล้วแก้ไม่ครบ
+_RESPONSE_DETAIL_CHARS = 400
+
 
 class UnknownModelError(ValueError):
     """model id ที่ไม่มีใน registry -- ล้มตรงนี้ก่อนจ่ายค่าเรียก API"""
@@ -42,8 +46,11 @@ class MissingApiKeyError(RuntimeError):
 
 
 class UnusableAnswerError(RuntimeError):
-    """โมเดลตอบกลับมาแล้ว แต่คำตอบใช้เป็นสรุปไม่ได้ -- ไม่มี text block หรือ content ว่าง
-    เพราะ reasoning กิน budget หมด
+    """โมเดลตอบกลับมาแล้ว (HTTP 200) แต่คำตอบใช้เป็นสรุปไม่ได้ ไม่ว่าจะด้วยเหตุผลไหนใน
+    สองกลุ่มนี้: (1) ไม่มี text block หรือ content ว่างเพราะ reasoning กิน budget หมด
+    หรือ (2) รูปร่าง JSON ผิดคาดที่เป็นความผิดปกติถาวรของ proxy เอง เช่น top-level ไม่ใช่
+    JSON object, choices ว่างเปล่า/ไม่มี, หรือ choice ไม่มี message -- ทั้งสองกลุ่มมีจุด
+    ร่วมเดียวกัน: ยิงคำขอเดิมซ้ำก็ได้ผลเดิมเป๊ะ ไม่มีทางหายเอง
 
     แยกเป็นคลาสของตัวเองเพราะ is_retryable ต้องแยกมันออกจาก RuntimeError ทั่วไป: คำขอ
     เดิมยิงซ้ำก็ได้คำตอบเดิม ส่วน RuntimeError ที่มาจากที่อื่นอาจเป็นอาการชั่วคราวที่หายเอง
@@ -52,6 +59,18 @@ class UnusableAnswerError(RuntimeError):
     เฉพาะตอน complete() คืน Completion(truncated=True) มาเท่านั้น -- error นี้ raise
     ก่อนจะมี Completion ให้เห็นด้วยซ้ำ จึงไม่มีทางไปถึง path เพิ่ม budget นั้นเลย ความ
     ล้มเหลวแบบนี้จึงเป็นแบบถาวรจริงๆ ไม่มี retry ชั้นไหนกู้คืนให้ได้
+    """
+
+
+class UpstreamBodyError(RuntimeError):
+    """proxy ตอบ HTTP 200 แต่ body ไม่ใช่ JSON เลย (เช่น gateway ส่งหน้า HTML error มา,
+    body ว่างเปล่า, หรือ JSON ที่ถูกตัดกลางคัน) -- ต่างจาก UnusableAnswerError ตรงที่
+    นี่มักเป็นอาการชั่วคราวของ gateway/proxy กลางทาง ไม่ใช่ความผิดปกติถาวรของคำขอ ลองใหม่
+    รอบถัดไปมีโอกาสได้ JSON ที่ถูกต้องกลับมา
+
+    ไม่มี status_code ติดมา (ไม่ใช่ urllib.error.HTTPError) และไม่ใช่ UnusableAnswerError
+    หรือ MissingApiKeyError จึงถูก is_retryable ตัดสินว่า retryable โดยอัตโนมัติ -- ตรง
+    ตามเจตนา: ค่า backoff ที่เสียไปถูกกว่าการทิ้งสรุปทั้ง chunk ไปเฉยๆ
     """
 
 
@@ -133,18 +152,20 @@ def _claude(model_id: str) -> Provider:
 
 
 def _response_detail(payload: object) -> str:
-    """ข้อความอธิบายจากตัว proxy เอง ตัดที่ 400 ตัวอักษรแบบเดียวกับ branch HTTPError
+    """ข้อความอธิบายจากตัว proxy เอง ตัดที่ _RESPONSE_DETAIL_CHARS ตัวอักษรแบบเดียวกับ
+    branch HTTPError
 
     LiteLLM proxy ตอบ HTTP 200 พร้อม error envelope {"error": {"message": ...}}
     แทนคำตอบได้ (เช่น budget ของ key หมด) -- ถ้ามีให้ใช้ข้อความนั้นตรงๆ เพราะเป็นสิ่งที่
     คนอ่าน log ต้องการเห็นจริง ไม่ใช่แค่ KeyError ที่บอกอะไรไม่ได้ ถ้าไม่มี ให้ dump
-    payload ทั้งก้อนแทนเพื่อไม่ให้ข้อมูลหายไปเฉยๆ
+    payload ทั้งก้อนแทนเพื่อไม่ให้ข้อมูลหายไปเฉยๆ -- ใช้ได้แม้ payload จะไม่ใช่ dict เลย
+    (null/list/string/number) เพราะ json.dumps รับได้หมด
     """
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict) and error.get("message"):
-            return str(error["message"])[:400]
-    return json.dumps(payload, ensure_ascii=False)[:400]
+            return str(error["message"])[:_RESPONSE_DETAIL_CHARS]
+    return json.dumps(payload, ensure_ascii=False)[:_RESPONSE_DETAIL_CHARS]
 
 
 def _openai_compat_completer(
@@ -179,11 +200,36 @@ def _openai_compat_completer(
             with urllib.request.urlopen(
                 request, timeout=LLM_TIMEOUT_SECONDS
             ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                raw_body = response.read().decode("utf-8")
         except urllib.error.HTTPError as e:
-            # ตัดที่ 400 ตัวอักษร: body ของ error บาง proxy ยัด HTML มาทั้งหน้า
-            detail = e.read().decode("utf-8", "replace")[:400]
+            # ตัดที่ _RESPONSE_DETAIL_CHARS ตัวอักษร: body ของ error บาง proxy ยัด HTML
+            # มาทั้งหน้า
+            detail = e.read().decode("utf-8", "replace")[:_RESPONSE_DETAIL_CHARS]
             raise HttpStatusError(e.code, detail) from e
+
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as e:
+            # HTTP 200 แต่ body ไม่ใช่ JSON เลย -- gateway ส่งหน้า HTML error มา, body
+            # ว่างเปล่า, หรือ JSON ถูกตัดกลางคัน เดิมโผล่เป็น JSONDecodeError ดิบๆ
+            # ("Expecting value: line 1 column 1") ที่ไม่บอกว่า proxy พูดอะไรจริงๆ --
+            # ต้องจับเจาะจง (ไม่ใช่ Exception เฉยๆ) เพราะ JSONDecodeError เป็น
+            # ValueError ซึ่งอาจบังเอิญไปคาบเกี่ยว exception อื่นที่ไม่เกี่ยวกัน
+            # นี่มักเป็นอาการชั่วคราวของ gateway กลางทาง จึงยังต้อง retryable เหมือนเดิม
+            # (ดู UpstreamBodyError) ไม่ใช่ UnusableAnswerError แบบ top-level ผิดรูป
+            raise UpstreamBodyError(
+                f"{model_id} returned HTTP 200 but the body is not valid JSON: "
+                f"{raw_body[:_RESPONSE_DETAIL_CHARS]}"
+            ) from e
+
+        # ตรวจ top level ก่อน .get() เข้าไป: JSON ที่ถูกต้องแต่ top-level ไม่ใช่ object
+        # เลยก็เป็นไปได้ (null/list/string/number) -- proxy พังแบบนี้ยิงซ้ำก็ได้รูปร่าง
+        # เดิม จึงต้องเป็น UnusableAnswerError ไม่ใช่ retryable
+        if not isinstance(payload, dict):
+            raise UnusableAnswerError(
+                f"{model_id} returned HTTP 200 but the top-level body is not a "
+                f"JSON object: {_response_detail(payload)}"
+            )
 
         # ตรวจรูปร่างก่อน index เข้าไป: proxy ตอบ 200 พร้อม error envelope แทนคำตอบได้
         # ({"error": {...}}), choices ว่างเปล่าก็ได้ ({"choices": []}), หรือ choice
