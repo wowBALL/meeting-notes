@@ -211,9 +211,15 @@ def summarize_transcript(
         ) from first_error
 
     # The reduce stage sees real summaries only -- a placeholder here would invite
-    # the model to write about the outage instead of about the meeting.
+    # the model to write about the outage instead of about the meeting. Same
+    # reasoning for TRUNCATION_NOTICE: it's operational metadata about the call,
+    # not something a meeting participant said, and the reduce prompt only asks
+    # the model to merge/dedupe/group -- it would happily fold a stray blockquote
+    # into the summary prose. The notice still reaches the reader via `timeline`
+    # below, which reproduces each chunk's summary (untouched) verbatim.
     combined = "\n\n".join(
-        f"## ช่วง [{_time_range(chunk)}]\n\n{summary}" for chunk, summary in succeeded
+        f"## ช่วง [{_time_range(chunk)}]\n\n{summary.replace(TRUNCATION_NOTICE, '')}"
+        for chunk, summary in succeeded
     )
     # floor=2: the model likes to open with an H1 title, which would rank above
     # "## ไทม์ไลน์ตามช่วง" and nest the whole timeline inside the merged summary.

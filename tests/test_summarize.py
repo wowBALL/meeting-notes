@@ -498,6 +498,71 @@ def test_reduce_summary_headings_cannot_outrank_the_timeline_section():
     assert "## ไทม์ไลน์ตามช่วง" in result
 
 
+def test_a_doubly_truncated_chunk_reaches_the_timeline_but_not_the_reduce_input():
+    """chunk หนึ่งขาดทั้งสองครั้ง -- หมายเหตุต้องโผล่ในไทม์ไลน์ให้คนอ่านเห็น
+    แต่ต้องไม่หลุดเข้าไปในข้อความที่ส่งให้ reduce call (นั่นคือสิ่งที่ finding
+    ตัวนี้จับได้: reduce เห็นสรุปจริงเท่านั้น ไม่ใช่หมายเหตุเรื่อง call ที่ขาด)"""
+    transcript = _long_transcript(100)
+    assert _expected_chunk_count(transcript) >= 2
+    target_chunk = _chunk_texts(transcript)[0]
+    reduce_input_holder = {}
+    lock = threading.Lock()
+    calls_for_target = {"n": 0}
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            reduce_input_holder["content"] = kwargs["messages"][0]["content"]
+            return _response("สรุปรวมทั้งประชุม")
+        if kwargs["messages"][0]["content"] == target_chunk:
+            with lock:
+                calls_for_target["n"] += 1
+                n = calls_for_target["n"]
+            return _response(f"ท่อนที่ {n} ของช่วงนี้", "max_tokens")
+        return _response("สรุปช่วงปกติ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, model="claude-opus-5")
+
+    # the retry-once-at-double-budget escalation actually ran for this chunk
+    assert calls_for_target["n"] == 2
+
+    assert summarize_module.TRUNCATION_NOTICE not in reduce_input_holder["content"]
+
+    timeline_start = result.index("## ไทม์ไลน์ตามช่วง")
+    assert summarize_module.TRUNCATION_NOTICE in result[timeline_start:]
+
+
+def test_reduce_truncated_twice_notice_appears_above_the_timeline_separator():
+    """reduce เองก็ขาดทั้งสองครั้งได้เหมือนกัน -- หมายเหตุต้องอยู่ในสรุปรวม
+    (เหนือ --- ที่คั่นก่อนไทม์ไลน์) ไม่ใช่แค่ในสรุปรายช่วง"""
+    transcript = _long_transcript(100)
+    reduce_calls = {"n": 0}
+    lock = threading.Lock()
+
+    def create(**kwargs):
+        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+            with lock:
+                reduce_calls["n"] += 1
+            return _response("สรุปที่ยังไม่จบ", "max_tokens")
+        return _response("สรุปช่วงปกติ")
+
+    client = MagicMock()
+    client.messages.create.side_effect = create
+
+    with _patch_anthropic(client):
+        result = summarize_transcript(transcript, model="claude-opus-5")
+
+    # the retry-once-at-double-budget escalation ran for the reduce call too
+    assert reduce_calls["n"] == 2
+
+    before_separator, _, after_separator = result.partition("\n\n---\n\n")
+    assert summarize_module.TRUNCATION_NOTICE in before_separator
+    assert "## ไทม์ไลน์ตามช่วง" in after_separator
+
+
 def test_over_threshold_transcript_with_no_parseable_segments_falls_back_to_single_call():
     # Exceeds SINGLE_CALL_THRESHOLD_TOKENS but has no "**speaker** [MM:SS]:" blocks,
     # so parse_transcript_segments returns [] and chunks is [].
