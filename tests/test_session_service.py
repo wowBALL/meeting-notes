@@ -180,3 +180,33 @@ def test_a_worker_that_is_not_running_is_reported(config):
 
 def test_the_index_page_is_served(client):
     assert client.get("/").status_code == 200
+
+
+def test_activity_text_is_rendered_in_the_requested_language(client, config):
+    from src.activity import append
+
+    append(config.base_dir, "meet-1", "transcribe_started")
+
+    thai = client.get("/api/state").get_json()["activity"][-1]["text"]
+    english = client.get("/api/state?lang=en").get_json()["activity"][-1]["text"]
+
+    assert thai == "กำลังถอดเสียง"
+    assert english == "Transcribing"
+
+
+def test_warning_text_is_rendered_too(config):
+    def warning_recorder(name, model, cfg, stop_event, on_event=None):
+        on_event("device_changed", {"old": "A", "new": "B"}, "warn")
+        stop_event.wait(timeout=5)
+        return None
+
+    app = create_app(config, recorder=warning_recorder, worker_probe=lambda: True)
+    client = app.test_client()
+    client.post("/api/session", json={"model": "claude-opus-5", "name": "x"})
+
+    body = _wait_until(client, lambda b: b["warnings"])
+
+    assert "A" in body["warnings"][0]["text"]
+    assert "B" in body["warnings"][0]["text"]
+
+    client.post("/api/session/stop")
