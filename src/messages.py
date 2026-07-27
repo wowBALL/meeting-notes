@@ -12,6 +12,8 @@ MESSAGES = {
         # --- ตัวอัด ---
         "room_opened": "เปิดห้อง {room} · {model}",
         "devices_selected": "อัดจากไมค์ {mic} · เสียงคู่สนทนาจาก {loopback}",
+        "recording_started": "กำลังอัดเสียง...",
+        "press_ctrl_c": "กด Ctrl+C เพื่อหยุด",
         "part_closed": "ปิดไฟล์ส่วนที่ {count}",
         "device_changed": (
             'อุปกรณ์เสียงเปลี่ยนจาก "{old}" เป็น "{new}" — '
@@ -50,6 +52,8 @@ MESSAGES = {
         # --- recorder ---
         "room_opened": "Room opened: {room} · {model}",
         "devices_selected": "Recording mic {mic} · far end from {loopback}",
+        "recording_started": "Recording...",
+        "press_ctrl_c": "Press Ctrl+C to stop",
         "part_closed": "Closed part {count}",
         "device_changed": (
             'Audio device changed from "{old}" to "{new}" — the recorder is '

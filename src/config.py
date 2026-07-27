@@ -8,6 +8,11 @@ from dotenv import load_dotenv
 # ของ dataclass ที่แห่งเดียว
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 
+# ใช้โดย session_service และเป็นภาษาตั้งต้นของข้อความฝั่ง CLI -- หน้าเว็บจำภาษา
+# ของตัวเองใน localStorage จึงไม่ได้อ่านค่านี้
+DEFAULT_UI_PORT = 8765
+DEFAULT_UI_LANG = "th"
+
 
 @dataclass
 class Config:
@@ -19,6 +24,8 @@ class Config:
     hf_token: str
     claude_model: str = DEFAULT_CLAUDE_MODEL
     whisper_model: str = "small"
+    ui_port: int = DEFAULT_UI_PORT
+    ui_lang: str = DEFAULT_UI_LANG
 
 
 def load_config(base_dir: Path | None = None) -> Config:
@@ -29,6 +36,12 @@ def load_config(base_dir: Path | None = None) -> Config:
     hf_token = os.environ["HF_TOKEN"]
     claude_model = os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
     whisper_model = os.environ.get("WHISPER_MODEL", "small")
+    # พอร์ตที่ตั้งมาผิดต้องไม่ทำให้เปิดโปรแกรมไม่ได้ -- ตกกลับไปที่ default
+    try:
+        ui_port = int(os.environ.get("UI_PORT", DEFAULT_UI_PORT))
+    except ValueError:
+        ui_port = DEFAULT_UI_PORT
+    ui_lang = os.environ.get("UI_LANG", DEFAULT_UI_LANG)
 
     return Config(
         base_dir=base_dir,
@@ -39,4 +52,6 @@ def load_config(base_dir: Path | None = None) -> Config:
         hf_token=hf_token,
         claude_model=claude_model,
         whisper_model=whisper_model,
+        ui_port=ui_port,
+        ui_lang=ui_lang,
     )
