@@ -6,14 +6,17 @@ from dotenv import load_dotenv
 
 from src.llm import DEFAULT_LLM_BASE_URL
 
-# preflight อ่านค่านี้ด้วย โดยไม่ผ่าน load_config -- จึงต้องอยู่ตรงนี้ ไม่ใช่ฝังใน default
+# ค่าเริ่มต้นเป็น GLM-5.2 บน endpoint ของบริษัท ไม่ใช่ Claude เพราะเหตุผลเรื่องความเป็น
+# ส่วนตัวของข้อมูล: ทางที่ transcript ไม่ออกนอกบริษัทต้องเป็นทางที่ไม่ต้องคิด ถ้า Claude
+# เป็นค่าเริ่มต้น การกด Enter ผ่านเมนูจะส่งข้อมูลออกไปทุกครั้งโดยไม่มีใครตัดสินใจเรื่องนั้น
+#
+# preflight อ่านค่านี้ด้วยโดยไม่ผ่าน load_config -- จึงต้องอยู่ตรงนี้ ไม่ใช่ฝังใน default
 # ของ dataclass ที่แห่งเดียว
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
-
-# ชื่อใหม่ของค่าเดียวกัน: มันไม่ใช่ "Claude model" อีกแล้วเมื่อ provider มีมากกว่าหนึ่ง
-# ชื่อ field claude_model ใน Config และใน job.json คงไว้ตามเดิมโดยเจตนา -- การรีเนม
-# ไฟล์ sidecar ที่ค้างอยู่ใน inbox/ ไม่คุ้มกับความสวยของชื่อ
-DEFAULT_SUMMARY_MODEL = DEFAULT_CLAUDE_MODEL
+#
+# เคยมี DEFAULT_CLAUDE_MODEL เป็นชื่อของค่านี้ ลบทิ้งแล้วไม่เก็บเป็น alias เพราะชื่อที่
+# บอกว่า Claude แต่ถือค่า GLM คือชื่อที่โกหก ส่วนชื่อ field claude_model ใน Config และ
+# ใน job.json คงไว้ตามเดิมโดยเจตนา -- การรีเนมกระทบ sidecar ที่ค้างอยู่ใน inbox/
+DEFAULT_SUMMARY_MODEL = "GLM-5.2"
 
 # ใช้โดย session_service และเป็นภาษาตั้งต้นของข้อความฝั่ง CLI -- หน้าเว็บจำภาษา
 # ของตัวเองใน localStorage จึงไม่ได้อ่านค่านี้
@@ -31,7 +34,7 @@ class Config:
     hf_token: str
     llm_api_key: str = ""
     llm_base_url: str = DEFAULT_LLM_BASE_URL
-    claude_model: str = DEFAULT_CLAUDE_MODEL
+    claude_model: str = DEFAULT_SUMMARY_MODEL
     whisper_model: str = "small"
     ui_port: int = DEFAULT_UI_PORT
     ui_lang: str = DEFAULT_UI_LANG
@@ -41,16 +44,14 @@ def load_config(base_dir: Path | None = None) -> Config:
     base_dir = base_dir or Path.cwd()
     load_dotenv(base_dir / ".env")
 
-    # ไม่บังคับอีกแล้ว: GLM จะเป็นค่าเริ่มต้นซึ่งไม่ใช้ key ของ Anthropic เลย (ยังไม่ใช่
-    # ตอนนี้ -- DEFAULT_SUMMARY_MODEL ยังชี้ไป Claude อยู่) แต่โค้ดนี้เขียนไว้ล่วงหน้า
-    # แล้วว่า key ตัวนี้ต้องไม่บังคับ เพื่อให้คนตั้งเครื่องใหม่เริ่มงานได้โดยไม่มีมัน
-    # error ย้ายไปเกิดตอน llm.resolve() ของ provider ที่ต้องใช้จริง ซึ่งบอกได้ว่าต้อง
-    # ตั้งตัวไหน
+    # ไม่บังคับ: ค่าเริ่มต้นคือ GLM ซึ่งไม่ใช้ key ของ Anthropic เลย คนตั้งเครื่องใหม่จึง
+    # ต้องเริ่มงานได้โดยไม่มีมัน error ย้ายไปเกิดตอน llm.resolve() ของ provider ที่ต้อง
+    # ใช้จริง ซึ่งบอกได้ว่าต้องตั้ง env var ตัวไหน
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     hf_token = os.environ["HF_TOKEN"]
     llm_api_key = os.environ.get("LLM_API_KEY", "")
     llm_base_url = os.environ.get("LLM_BASE_URL", "").strip() or DEFAULT_LLM_BASE_URL
-    claude_model = os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
+    claude_model = os.environ.get("CLAUDE_MODEL", DEFAULT_SUMMARY_MODEL)
     whisper_model = os.environ.get("WHISPER_MODEL", "small")
     # พอร์ตที่ตั้งมาผิดต้องไม่ทำให้เปิดโปรแกรมไม่ได้ -- ตกกลับไปที่ default
     try:

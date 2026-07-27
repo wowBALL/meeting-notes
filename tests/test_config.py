@@ -13,7 +13,7 @@ def test_load_config_reads_required_env_vars(tmp_path, monkeypatch):
 
     assert config.anthropic_api_key == "sk-ant-test"
     assert config.hf_token == "hf-test-token"
-    assert config.claude_model == "claude-opus-5"
+    assert config.claude_model == "GLM-5.2"
     assert config.whisper_model == "small"
     assert config.inbox_dir == tmp_path / "inbox"
     assert config.failed_dir == tmp_path / "failed"
@@ -103,3 +103,26 @@ def test_llm_base_url_falls_back_to_the_default(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("", encoding="utf-8")
 
     assert load_config(tmp_path).llm_base_url == DEFAULT_LLM_BASE_URL
+
+
+def test_the_default_summary_model_is_the_one_that_keeps_data_in_house():
+    """ทางที่เป็นส่วนตัวต้องเป็นทางที่ไม่ต้องคิด
+
+    ถ้า Claude เป็นค่าเริ่มต้น การกด Enter ผ่านเมนูจะส่ง transcript ออกนอกบริษัททุกครั้ง
+    โดยไม่มีใครตัดสินใจเรื่องนั้นเลย -- ค่าเริ่มต้นจึงต้องเป็น provider ที่ข้อมูลไม่ออกไปไหน
+    """
+    from src.config import DEFAULT_SUMMARY_MODEL
+    from src.llm import resolve
+
+    assert DEFAULT_SUMMARY_MODEL == "GLM-5.2"
+    # ต้องอยู่ใน registry จริง ไม่ใช่แค่สตริงที่พิมพ์ถูก
+    assert resolve(DEFAULT_SUMMARY_MODEL).model_id == "GLM-5.2"
+
+
+def test_the_misnamed_claude_default_constant_is_gone():
+    """DEFAULT_CLAUDE_MODEL ถือค่าที่ไม่ใช่ Claude แล้วจะเป็นชื่อที่โกหก -- ลบทิ้ง
+    ไม่เก็บเป็น alias ส่วนชื่อ field claude_model กับใน job.json คงไว้ตามที่ตัดสินใจ
+    เพราะการรีเนมกระทบ sidecar ที่ค้างอยู่ใน inbox/"""
+    import src.config as config
+
+    assert not hasattr(config, "DEFAULT_CLAUDE_MODEL")
