@@ -8,6 +8,11 @@ from dotenv import load_dotenv
 # ของ dataclass ที่แห่งเดียว
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 
+# ชื่อใหม่ของค่าเดียวกัน: มันไม่ใช่ "Claude model" อีกแล้วเมื่อ provider มีมากกว่าหนึ่ง
+# ชื่อ field claude_model ใน Config และใน job.json คงไว้ตามเดิมโดยเจตนา -- การรีเนม
+# ไฟล์ sidecar ที่ค้างอยู่ใน inbox/ ไม่คุ้มกับความสวยของชื่อ
+DEFAULT_SUMMARY_MODEL = DEFAULT_CLAUDE_MODEL
+
 # ใช้โดย session_service และเป็นภาษาตั้งต้นของข้อความฝั่ง CLI -- หน้าเว็บจำภาษา
 # ของตัวเองใน localStorage จึงไม่ได้อ่านค่านี้
 DEFAULT_UI_PORT = 8765

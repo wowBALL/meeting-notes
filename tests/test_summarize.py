@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import threading
 import time
@@ -35,8 +36,18 @@ def _response(text: str, stop_reason: str = "end_turn"):
     return response
 
 
+@contextlib.contextmanager
 def _patch_anthropic(client):
-    return patch("anthropic.Anthropic", return_value=client)
+    """patch ทั้ง SDK และ env var เพราะ llm._require_key อ่าน ANTHROPIC_API_KEY จริง
+
+    เดิมโค้ดรับ api_key มาเป็น argument จึงไม่ต้องมี env ตอนเทส ตอนนี้ key เป็นเรื่อง
+    ของ provider ซึ่งอ่านจาก environment -- ใส่ให้ที่นี่ที่เดียวแทนการเติม 24 ที่
+    """
+    with (
+        patch("anthropic.Anthropic", return_value=client),
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
+    ):
+        yield
 
 
 def _single_response_client(text: str, stop_reason: str = "end_turn"):
@@ -85,12 +96,34 @@ def _expected_chunk_count(transcript: str) -> int:
     return len(_chunk_texts(transcript))
 
 
+def test_map_budget_comes_from_the_provider_not_a_module_constant():
+    """ค่า budget ต้องเดินทางมาจาก llm.resolve() เพื่อให้ provider ที่ต้องใช้
+    มากกว่านี้ตั้งค่าของตัวเองได้ โดยไม่ดัน budget ของ Claude ขึ้นตามไปด้วย"""
+    from src.llm import CLAUDE_MAP_MAX_TOKENS
+
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client), patch.dict(
+        "os.environ", {"ANTHROPIC_API_KEY": "test-key"}
+    ):
+        summarize_transcript("transcript", model="claude-opus-5")
+
+    assert client.messages.create.call_args.kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
+
+
+def test_summarize_transcript_no_longer_accepts_an_api_key():
+    """key เป็นเรื่องของ provider ไม่ใช่ของผู้เรียก การส่ง key ของ Anthropic เข้า
+    เส้นทางที่อาจไปจบที่ provider อื่นเป็นสิ่งที่ต้องเป็นไปไม่ได้"""
+    with pytest.raises(TypeError):
+        summarize_transcript("transcript", api_key="test-key")
+
+
 def test_short_transcript_returns_the_single_response_verbatim():
     client = _single_response_client("## ประเด็นสำคัญ\n- ทดสอบระบบ")
 
     with _patch_anthropic(client):
         result = summarize_transcript(
-            "# Transcript\n\n**ผู้พูด 1** [00:00]: สั้นมาก", api_key="test-key"
+            "# Transcript\n\n**ผู้พูด 1** [00:00]: สั้นมาก", model="claude-opus-5"
         )
 
     assert result == "## ประเด็นสำคัญ\n- ทดสอบระบบ"
@@ -102,13 +135,15 @@ def test_short_transcript_uses_given_model_and_original_prompt():
     client = _single_response_client("สรุป")
 
     with _patch_anthropic(client):
-        summarize_transcript("transcript", model="claude-sonnet-5", api_key="test-key")
+        summarize_transcript("transcript", model="claude-sonnet-5")
 
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["model"] == "claude-sonnet-5"
     assert "transcript" in kwargs["messages"][0]["content"]
     assert kwargs["system"] == summarize_module.SUMMARY_SYSTEM_PROMPT
-    assert kwargs["max_tokens"] == summarize_module.MAP_MAX_OUTPUT_TOKENS
+    from src.llm import CLAUDE_MAP_MAX_TOKENS
+
+    assert kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
 
 
 def test_response_without_a_text_block_raises_a_diagnosable_error():
@@ -125,14 +160,14 @@ def test_response_without_a_text_block_raises_a_diagnosable_error():
         patch("time.sleep"),
         pytest.raises(RuntimeError, match="no text block"),
     ):
-        summarize_transcript("สั้น", api_key="test-key")
+        summarize_transcript("สั้น", model="claude-opus-5")
 
 
 def test_truncated_summary_is_logged_as_a_warning(caplog):
     client = _single_response_client("สรุปที่ถูกตัด", stop_reason="max_tokens")
 
     with _patch_anthropic(client), caplog.at_level(logging.WARNING):
-        result = summarize_transcript("สั้น", api_key="test-key")
+        result = summarize_transcript("สั้น", model="claude-opus-5")
 
     assert result == "สรุปที่ถูกตัด"
     assert any("max_tokens" in record.getMessage() for record in caplog.records)
@@ -143,7 +178,7 @@ def test_long_transcript_makes_one_call_per_chunk_plus_one_reduce():
     client = _prompt_aware_client()
 
     with _patch_anthropic(client):
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
     assert client.messages.create.call_count == _expected_chunk_count(transcript) + 1
 
@@ -153,7 +188,7 @@ def test_long_transcript_output_has_merged_summary_then_timeline():
     client = _prompt_aware_client()
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert result.startswith("สรุปรวมทั้งประชุม")
     assert "## ไทม์ไลน์ตามช่วง" in result
@@ -162,27 +197,31 @@ def test_long_transcript_output_has_merged_summary_then_timeline():
 
 
 def test_long_transcript_chunk_calls_use_the_chunk_prompt():
+    from src.llm import CLAUDE_MAP_MAX_TOKENS
+
     transcript = _long_transcript(100)
     client = _prompt_aware_client()
 
     with _patch_anthropic(client):
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
     first_kwargs = client.messages.create.call_args_list[0].kwargs
     assert first_kwargs["system"] == summarize_module.CHUNK_SYSTEM_PROMPT
-    assert first_kwargs["max_tokens"] == summarize_module.MAP_MAX_OUTPUT_TOKENS
+    assert first_kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
 
 
 def test_long_transcript_reduce_call_uses_reduce_prompt_and_larger_cap():
+    from src.llm import CLAUDE_REDUCE_MAX_TOKENS
+
     transcript = _long_transcript(100)
     client = _prompt_aware_client()
 
     with _patch_anthropic(client):
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
     reduce_kwargs = client.messages.create.call_args_list[-1].kwargs
     assert reduce_kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT
-    assert reduce_kwargs["max_tokens"] == summarize_module.REDUCE_MAX_OUTPUT_TOKENS
+    assert reduce_kwargs["max_tokens"] == CLAUDE_REDUCE_MAX_TOKENS
 
 
 def test_a_failing_chunk_is_retried_individually():
@@ -207,7 +246,7 @@ def test_a_failing_chunk_is_retried_individually():
     client.messages.create.side_effect = flaky
 
     with _patch_anthropic(client), patch("time.sleep"):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert "ok" in result
     assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
@@ -229,7 +268,7 @@ def test_short_path_is_retried_inside_summarize():
     client.messages.create.side_effect = flaky
 
     with _patch_anthropic(client), patch("time.sleep"):
-        result = summarize_transcript("สั้น", api_key="test-key")
+        result = summarize_transcript("สั้น", model="claude-opus-5")
 
     # the pipeline no longer wraps this call, so the retry has to live here
     assert result == "สรุปสั้น"
@@ -253,7 +292,7 @@ def test_a_permanently_failing_chunk_becomes_a_placeholder():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client), patch("time.sleep"):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     # the healthy chunks still reach the user instead of the whole meeting failing
     assert result.startswith("สรุปรวมทั้งประชุม")
@@ -275,7 +314,7 @@ def test_every_chunk_failing_still_raises():
         patch("time.sleep"),
         pytest.raises(RuntimeError, match="permanent api error"),
     ):
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
 
 def test_map_calls_run_concurrently():
@@ -302,7 +341,7 @@ def test_map_calls_run_concurrently():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert state["peak"] >= 2
     assert summarize_module.CHUNK_FAILURE_PLACEHOLDER not in result
@@ -326,7 +365,7 @@ def test_chunk_summaries_keep_transcript_order_under_concurrency():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     positions = [result.index(f"สรุปช่วง {i}") for i in range(len(chunk_texts))]
     assert positions == sorted(positions)
@@ -351,7 +390,7 @@ def test_long_transcript_demotes_heading_levels_in_chunk_summaries():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     # ## and ### are demoted to the floor (####); ##### is left alone
     assert "#### หัวข้อระดับสอง" in result
@@ -384,7 +423,7 @@ def test_reduce_summary_headings_cannot_outrank_the_timeline_section():
     client.messages.create.side_effect = create
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     # an H1 from the model would swallow "## ไทม์ไลน์ตามช่วง" into its own section
     assert result.startswith("## สรุปการประชุม: เรื่องที่คุยกัน")
@@ -403,7 +442,7 @@ def test_over_threshold_transcript_with_no_parseable_segments_falls_back_to_sing
     client = _single_response_client("สรุปแบบเดียว")
 
     with _patch_anthropic(client):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert result == "สรุปแบบเดียว"
     assert client.messages.create.call_count == 1
@@ -432,7 +471,7 @@ def test_single_call_stops_after_one_attempt_when_the_key_is_rejected():
 
     with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
         with pytest.raises(FakeAPIError):
-            summarize_transcript("**ผู้พูด 1** [00:00]: สวัสดี", api_key="test-key")
+            summarize_transcript("**ผู้พูด 1** [00:00]: สวัสดี", model="claude-opus-5")
 
     assert client.messages.create.call_count == 1
     mock_sleep.assert_not_called()
@@ -446,7 +485,7 @@ def test_map_stage_sends_one_request_per_chunk_when_credit_runs_out():
 
     with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
         with pytest.raises(RuntimeError, match="Every one of the"):
-            summarize_transcript(transcript, api_key="test-key")
+            summarize_transcript(transcript, model="claude-opus-5")
 
     assert client.messages.create.call_count == _expected_chunk_count(transcript)
     mock_sleep.assert_not_called()
@@ -471,7 +510,7 @@ def test_reduce_stage_stops_after_one_attempt_when_the_key_is_rejected():
     client = _reduce_fails_client()
 
     with _patch_anthropic(client), patch("time.sleep") as mock_sleep:
-        summarize_transcript(transcript, api_key="test-key")
+        summarize_transcript(transcript, model="claude-opus-5")
 
     assert client.messages.create.call_count == _expected_chunk_count(transcript) + 1
     mock_sleep.assert_not_called()
@@ -484,7 +523,7 @@ def test_reduce_failure_keeps_the_chunk_summaries_that_were_already_paid_for():
     client = _reduce_fails_client()
 
     with _patch_anthropic(client), patch("time.sleep"):
-        result = summarize_transcript(transcript, api_key="test-key")
+        result = summarize_transcript(transcript, model="claude-opus-5")
 
     assert REDUCE_FAILURE_NOTICE in result
     assert "## ไทม์ไลน์ตามช่วง" in result
@@ -499,4 +538,4 @@ def test_reduce_failure_still_raises_when_no_chunk_ever_succeeded():
 
     with _patch_anthropic(client), patch("time.sleep"):
         with pytest.raises(RuntimeError, match="Every one of the"):
-            summarize_transcript(transcript, api_key="test-key")
+            summarize_transcript(transcript, model="claude-opus-5")

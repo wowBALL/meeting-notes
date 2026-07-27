@@ -180,7 +180,7 @@ def _finish_meeting(
         )
         try:
             summary_markdown = summarize_transcript(
-                transcript_markdown, model=claude_model, api_key=config.anthropic_api_key
+                transcript_markdown, model=claude_model
             )
         except Exception as e:
             activity.append(

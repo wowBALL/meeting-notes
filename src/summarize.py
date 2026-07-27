@@ -3,6 +3,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
+from src.config import DEFAULT_SUMMARY_MODEL
+from src.llm import Provider, resolve
 from src.render import format_timestamp
 from src.retry import retry_with_backoff
 
@@ -11,8 +13,6 @@ logger = logging.getLogger(__name__)
 SINGLE_CALL_THRESHOLD_TOKENS = 20_000
 CHUNK_MAX_TOKENS = 15_000
 CHUNK_OVERLAP_TOKENS = 1_500
-MAP_MAX_OUTPUT_TOKENS = 4096
-REDUCE_MAX_OUTPUT_TOKENS = 8192
 # Chunks are independent, so the map stage is bound by its slowest call rather
 # than by their sum. 4 keeps a 13-chunk (5-hour) meeting well inside the API's
 # rate limits while cutting the map stage to roughly a quarter of its wall clock.
@@ -20,12 +20,12 @@ MAP_MAX_CONCURRENCY = 4
 
 # Substituted for a chunk whose summary failed every retry, so the surrounding
 # chunks' summaries still reach the reader and the gap is visible in the timeline.
-CHUNK_FAILURE_PLACEHOLDER = "> ⚠️ สรุปช่วงนี้ล้มเหลว (เรียก Claude ไม่สำเร็จหลังลองใหม่ครบทุกครั้ง)"
+CHUNK_FAILURE_PLACEHOLDER = "> ⚠️ สรุปช่วงนี้ล้มเหลว (เรียกโมเดลไม่สำเร็จหลังลองใหม่ครบทุกครั้ง)"
 
 # ใช้แทนบทสรุปรวมเมื่อ reduce ล้มเหลว สรุปรายช่วงด้านล่างเรียกสำเร็จและจ่ายเงินไปแล้ว
 # การโยน exception ทิ้งทั้งหมดจึงแพงกว่าการส่งงานที่ยังไม่ได้ยุบรวมให้คนอ่าน
 REDUCE_FAILURE_NOTICE = (
-    "> ⚠️ รวมเป็นสรุปฉบับเดียวไม่สำเร็จ (เรียก Claude ไม่ผ่านหลังลองใหม่ครบทุกครั้ง)\n"
+    "> ⚠️ รวมเป็นสรุปฉบับเดียวไม่สำเร็จ (เรียกโมเดลไม่ผ่านหลังลองใหม่ครบทุกครั้ง)\n"
     ">\n"
     "> ด้านล่างคือสรุปรายช่วงที่ทำสำเร็จแล้ว ยังไม่ได้ยุบรวมและยังไม่ได้แยก Action Items"
 )
@@ -88,30 +88,18 @@ def is_retryable(error: Exception) -> bool:
     return status_code in _RETRYABLE_STATUS_CODES or status_code >= 500
 
 
-def _summarize(client, model: str, system: str, content: str, max_tokens: int) -> str:
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": content}],
-    )
-    stop_reason = getattr(response, "stop_reason", None)
-    text = next((block.text for block in response.content if block.type == "text"), None)
-    if text is None:
-        raise RuntimeError(
-            f"Claude returned no text block (stop_reason={stop_reason!r}); "
-            "nothing to use as a summary"
-        )
-    if stop_reason == "max_tokens":
+def _summarize(provider: Provider, system: str, content: str, max_tokens: int) -> str:
+    completion = provider.complete(system, content, max_tokens)
+    if completion.truncated:
         # The summary stops mid-sentence but still reads as if it were complete,
         # so the only way anyone learns about it is this log line.
         logger.warning(
             "Summary hit the max_tokens cap (%d) and is truncated; "
-            "stop_reason=max_tokens, %d characters returned",
+            "%d characters returned",
             max_tokens,
-            len(text),
+            len(completion.text),
         )
-    return text
+    return completion.text
 
 
 def _time_range(chunk: dict) -> str:
@@ -119,7 +107,7 @@ def _time_range(chunk: dict) -> str:
 
 
 def _summarize_chunk(
-    client, model: str, chunk: dict, index: int, total: int
+    provider: Provider, chunk: dict, index: int, total: int
 ) -> str | Exception:
     """The chunk's summary, or the exception that ended it after every retry.
     Returning the failure instead of raising keeps one dead chunk from throwing
@@ -128,7 +116,7 @@ def _summarize_chunk(
         return _demote_headings(
             retry_with_backoff(
                 lambda: _summarize(
-                    client, model, CHUNK_SYSTEM_PROMPT, chunk["text"], MAP_MAX_OUTPUT_TOKENS
+                    provider, CHUNK_SYSTEM_PROMPT, chunk["text"], provider.map_max_tokens
                 ),
                 should_retry=is_retryable,
             )
@@ -146,12 +134,9 @@ def _summarize_chunk(
 
 def summarize_transcript(
     transcript_markdown: str,
-    model: str = "claude-opus-5",
-    api_key: str | None = None,
+    model: str = DEFAULT_SUMMARY_MODEL,
 ) -> str:
-    from anthropic import Anthropic
-
-    client = Anthropic(api_key=api_key) if api_key else Anthropic()
+    provider = resolve(model)
 
     # Every API call below is retried here, inside summarize_transcript. Callers
     # must not add a retry of their own: with per-chunk retries in place, an outer
@@ -161,11 +146,10 @@ def summarize_transcript(
         # the map call's output budget so tuning one doesn't silently change the other.
         return retry_with_backoff(
             lambda: _summarize(
-                client,
-                model,
+                provider,
                 SUMMARY_SYSTEM_PROMPT,
                 transcript_markdown,
-                MAP_MAX_OUTPUT_TOKENS,
+                provider.map_max_tokens,
             ),
             should_retry=is_retryable,
         )
@@ -185,7 +169,7 @@ def summarize_transcript(
     with ThreadPoolExecutor(max_workers=min(MAP_MAX_CONCURRENCY, len(chunks))) as pool:
         chunk_summaries = list(
             pool.map(
-                lambda item: _summarize_chunk(client, model, item[1], item[0], len(chunks)),
+                lambda item: _summarize_chunk(provider, item[1], item[0], len(chunks)),
                 enumerate(chunks),
             )
         )
@@ -213,7 +197,10 @@ def summarize_transcript(
         overall = _demote_headings(
             retry_with_backoff(
                 lambda: _summarize(
-                    client, model, REDUCE_SYSTEM_PROMPT, combined, REDUCE_MAX_OUTPUT_TOKENS
+                    provider,
+                    REDUCE_SYSTEM_PROMPT,
+                    combined,
+                    provider.reduce_max_tokens,
                 ),
                 should_retry=is_retryable,
             ),

@@ -400,6 +400,29 @@ def test_process_file_falls_back_to_the_config_model_without_a_job_file(tmp_path
     assert summarize.call_args.kwargs["model"] == config.claude_model
 
 
+def test_summarize_is_called_without_an_api_key(tmp_path):
+    """key เป็นเรื่องของ provider -- pipeline ต้องไม่ส่ง key ของ Anthropic เข้าไปใน
+    เส้นทางที่อาจไปจบที่ provider อื่น"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    summarize = MagicMock(return_value="## สรุป")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.summarize_transcript", summarize),
+    ):
+        process_file(audio_path, config)
+
+    assert "api_key" not in summarize.call_args.kwargs
+
+
 def test_process_file_falls_back_when_the_job_file_is_corrupt(tmp_path):
     # the transcript costs a full GPU pass -- unreadable job bytes must not
     # throw that away
