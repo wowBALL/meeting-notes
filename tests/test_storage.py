@@ -46,6 +46,56 @@ def test_create_meeting_folder_builds_the_new_format_and_makes_the_dir(tmp_path)
     assert result.is_dir()
 
 
+def test_create_meeting_folder_disambiguates_a_second_recording_in_the_same_minute(tmp_path):
+    # the folder name drops the seconds, so two recordings of the same meeting
+    # started within one minute ask for the same folder
+    meetings_dir = tmp_path / "meetings"
+    inbox = tmp_path / "inbox"
+
+    first = create_meeting_folder(inbox / "test-12-07-11.ogg", meetings_dir, today=TODAY)
+    second = create_meeting_folder(inbox / "test-12-07-44.ogg", meetings_dir, today=TODAY)
+
+    assert first == meetings_dir / "2026-07-22_12-07-test"
+    assert second == meetings_dir / "2026-07-22_12-07-test-2"
+    assert second.is_dir()
+
+
+def test_create_meeting_folder_keeps_counting_up_past_the_second_collision(tmp_path):
+    meetings_dir = tmp_path / "meetings"
+    inbox = tmp_path / "inbox"
+    create_meeting_folder(inbox / "test-12-07-11.ogg", meetings_dir, today=TODAY)
+    create_meeting_folder(inbox / "test-12-07-44.ogg", meetings_dir, today=TODAY)
+
+    third = create_meeting_folder(inbox / "test-12-07-52.ogg", meetings_dir, today=TODAY)
+
+    assert third == meetings_dir / "2026-07-22_12-07-test-3"
+
+
+def test_create_meeting_folder_disambiguates_an_unnamed_recording_too(tmp_path):
+    meetings_dir = tmp_path / "meetings"
+    inbox = tmp_path / "inbox"
+    create_meeting_folder(inbox / "2026-07-24_19-01-45.ogg", meetings_dir, today=TODAY)
+
+    second = create_meeting_folder(inbox / "2026-07-24_19-01-58.ogg", meetings_dir, today=TODAY)
+
+    assert second == meetings_dir / "2026-07-24_19-01-2"
+
+
+def test_a_second_recording_never_overwrites_the_first_ones_transcript(tmp_path):
+    # the bug this guards: both recordings landed in one folder and the second
+    # transcript.md replaced the first, while both .ogg files survived
+    meetings_dir = tmp_path / "meetings"
+    inbox = tmp_path / "inbox"
+    first = create_meeting_folder(inbox / "test-12-07-11.ogg", meetings_dir, today=TODAY)
+    save_transcript(first, "# First recording")
+
+    second = create_meeting_folder(inbox / "test-12-07-44.ogg", meetings_dir, today=TODAY)
+    save_transcript(second, "# Second recording")
+
+    assert (first / "transcript.md").read_text(encoding="utf-8") == "# First recording"
+    assert (second / "transcript.md").read_text(encoding="utf-8") == "# Second recording"
+
+
 def test_save_transcript_writes_the_transcript_file(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
