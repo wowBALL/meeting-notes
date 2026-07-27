@@ -63,6 +63,15 @@ def _single_response_client(text: str, stop_reason: str = "end_turn"):
     return client
 
 
+def _truncating_client(texts_and_reasons):
+    """ตอบตามลำดับที่กำหนด เพื่อ assert ได้ว่าการลองใหม่เกิดขึ้นกี่ครั้งและด้วย budget เท่าไร"""
+    client = MagicMock()
+    client.messages.create.side_effect = [
+        _response(text, reason) for text, reason in texts_and_reasons
+    ]
+    return client
+
+
 def _prompt_aware_client():
     """Answers map calls with a numbered chunk summary and the reduce call with a
     fixed marker, keyed off the system prompt. Keeps assertions independent of how
@@ -178,14 +187,57 @@ def test_response_without_a_text_block_raises_a_diagnosable_error():
         summarize_transcript("สั้น", model="claude-opus-5")
 
 
-def test_truncated_summary_is_logged_as_a_warning(caplog):
-    client = _single_response_client("สรุปที่ถูกตัด", stop_reason="max_tokens")
+def test_a_truncated_answer_is_logged_as_a_warning(caplog):
+    """log ยังต้องมี เพราะการลองใหม่คือค่าใช้จ่ายที่ควรมองเห็นย้อนหลังได้"""
+    client = _truncating_client([("ขาด", "max_tokens"), ("จบ", "end_turn")])
 
     with _patch_anthropic(client), caplog.at_level(logging.WARNING):
         result = summarize_transcript("สั้น", model="claude-opus-5")
 
-    assert result == "สรุปที่ถูกตัด"
-    assert any("max_tokens" in record.getMessage() for record in caplog.records)
+    assert result == "จบ"
+    assert any("truncated" in record.getMessage().lower() for record in caplog.records)
+
+
+def test_a_truncated_answer_is_retried_once_with_double_the_budget():
+    from src.llm import CLAUDE_MAP_MAX_TOKENS
+
+    client = _truncating_client(
+        [("ขาดกลางประโยค", "max_tokens"), ("เต็มแล้ว", "end_turn")]
+    )
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert result == "เต็มแล้ว"
+    assert client.messages.create.call_count == 2
+    budgets = [c.kwargs["max_tokens"] for c in client.messages.create.call_args_list]
+    assert budgets == [CLAUDE_MAP_MAX_TOKENS, CLAUDE_MAP_MAX_TOKENS * 2]
+
+
+def test_still_truncated_after_the_retry_keeps_the_text_and_appends_a_notice():
+    """ลองใหม่แค่ครั้งเดียว: การเรียกซ้ำแพงและช้า (GLM หนึ่ง call ถึง 155 วินาที)
+    ข้อความที่ได้มาแล้วมีค่ากว่าการทิ้ง แต่คนอ่านต้องรู้ว่ามันไม่จบ"""
+    client = _truncating_client(
+        [("ท่อนแรก", "max_tokens"), ("ท่อนแรกที่ยาวขึ้นแต่ยังไม่จบ", "max_tokens")]
+    )
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert client.messages.create.call_count == 2
+    assert "ท่อนแรกที่ยาวขึ้นแต่ยังไม่จบ" in result
+    assert summarize_module.TRUNCATION_NOTICE in result
+
+
+def test_an_answer_that_fits_is_not_retried():
+    client = _single_response_client("พอดี")
+
+    with _patch_anthropic(client):
+        result = summarize_transcript("สั้น", model="claude-opus-5")
+
+    assert result == "พอดี"
+    assert client.messages.create.call_count == 1
+    assert summarize_module.TRUNCATION_NOTICE not in result
 
 
 def test_long_transcript_makes_one_call_per_chunk_plus_one_reduce():

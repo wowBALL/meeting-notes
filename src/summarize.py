@@ -30,6 +30,13 @@ REDUCE_FAILURE_NOTICE = (
     "> ด้านล่างคือสรุปรายช่วงที่ทำสำเร็จแล้ว ยังไม่ได้ยุบรวมและยังไม่ได้แยก Action Items"
 )
 
+# ต่อท้ายสรุปที่ยังไม่จบหลังลองใหม่ด้วย budget สองเท่าแล้ว -- ต้องอยู่ในไฟล์ที่คนอ่าน
+# ไม่ใช่แค่ใน log เพราะสรุปที่ขาดกลางประโยคยังอ่านเหมือนสรุปที่สมบูรณ์
+TRUNCATION_NOTICE = (
+    "\n\n> ⚠️ สรุปส่วนนี้ถูกตัดกลางทาง "
+    "(โมเดลใช้โควตาคำตอบหมดทั้งสองครั้ง) เนื้อหาช่วงท้ายขาดไป"
+)
+
 # ^ requires whitespace so "#1 ..." in prose is not mangled
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
 
@@ -89,17 +96,35 @@ def is_retryable(error: Exception) -> bool:
 
 
 def _summarize(provider: Provider, system: str, content: str, max_tokens: int) -> str:
+    """ข้อความจากโมเดล ถูกตัดแล้วลองใหม่หนึ่งครั้งด้วย budget สองเท่า
+
+    ลองใหม่ครั้งเดียวเพราะการเรียกซ้ำแพงและช้า (GLM หนึ่ง call ถึง 155 วินาที) และ
+    การเพิ่มเป็นสองเท่าครอบกรณีที่วัดเจอทั้งหมดแล้ว ถ้ายังไม่จบอีกก็คืนของที่ได้พร้อม
+    หมายเหตุ ดีกว่าทิ้งงานที่จ่ายเงินไปแล้วทั้งก้อน
+    """
     completion = provider.complete(system, content, max_tokens)
-    if completion.truncated:
-        # The summary stops mid-sentence but still reads as if it were complete,
-        # so the only way anyone learns about it is this log line.
-        logger.warning(
-            "Summary hit the max_tokens cap (%d) and is truncated; "
-            "%d characters returned",
-            max_tokens,
-            len(completion.text),
-        )
-    return completion.text
+    if not completion.truncated:
+        return completion.text
+
+    logger.warning(
+        "%s truncated the answer at the %d-token cap (%d characters); "
+        "retrying once at %d",
+        provider.model_id,
+        max_tokens,
+        len(completion.text),
+        max_tokens * 2,
+    )
+    retried = provider.complete(system, content, max_tokens * 2)
+    if not retried.truncated:
+        return retried.text
+
+    logger.error(
+        "%s truncated the answer again at %d tokens; keeping the partial text "
+        "and marking it in the summary",
+        provider.model_id,
+        max_tokens * 2,
+    )
+    return retried.text + TRUNCATION_NOTICE
 
 
 def _time_range(chunk: dict) -> str:
