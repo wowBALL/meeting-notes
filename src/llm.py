@@ -47,7 +47,11 @@ class UnusableAnswerError(RuntimeError):
 
     แยกเป็นคลาสของตัวเองเพราะ is_retryable ต้องแยกมันออกจาก RuntimeError ทั่วไป: คำขอ
     เดิมยิงซ้ำก็ได้คำตอบเดิม ส่วน RuntimeError ที่มาจากที่อื่นอาจเป็นอาการชั่วคราวที่หายเอง
-    การเพิ่ม budget เป็นหน้าที่ของ _summarize ไม่ใช่ของ retry
+
+    หมายเหตุ: การเพิ่ม budget เป็นสองเท่าที่ _summarize ทำ (src/summarize.py) ทำงาน
+    เฉพาะตอน complete() คืน Completion(truncated=True) มาเท่านั้น -- error นี้ raise
+    ก่อนจะมี Completion ให้เห็นด้วยซ้ำ จึงไม่มีทางไปถึง path เพิ่ม budget นั้นเลย ความ
+    ล้มเหลวแบบนี้จึงเป็นแบบถาวรจริงๆ ไม่มี retry ชั้นไหนกู้คืนให้ได้
     """
 
 
@@ -128,6 +132,21 @@ def _claude(model_id: str) -> Provider:
     )
 
 
+def _response_detail(payload: object) -> str:
+    """ข้อความอธิบายจากตัว proxy เอง ตัดที่ 400 ตัวอักษรแบบเดียวกับ branch HTTPError
+
+    LiteLLM proxy ตอบ HTTP 200 พร้อม error envelope {"error": {"message": ...}}
+    แทนคำตอบได้ (เช่น budget ของ key หมด) -- ถ้ามีให้ใช้ข้อความนั้นตรงๆ เพราะเป็นสิ่งที่
+    คนอ่าน log ต้องการเห็นจริง ไม่ใช่แค่ KeyError ที่บอกอะไรไม่ได้ ถ้าไม่มี ให้ dump
+    payload ทั้งก้อนแทนเพื่อไม่ให้ข้อมูลหายไปเฉยๆ
+    """
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])[:400]
+    return json.dumps(payload, ensure_ascii=False)[:400]
+
+
 def _openai_compat_completer(
     model_id: str, key_env: str, base_url_env: str, default_base_url: str
 ) -> Callable[[str, str, int], Completion]:
@@ -166,8 +185,31 @@ def _openai_compat_completer(
             detail = e.read().decode("utf-8", "replace")[:400]
             raise HttpStatusError(e.code, detail) from e
 
-        choice = payload["choices"][0]
-        text = choice["message"].get("content") or ""
+        # ตรวจรูปร่างก่อน index เข้าไป: proxy ตอบ 200 พร้อม error envelope แทนคำตอบได้
+        # ({"error": {...}}), choices ว่างเปล่าก็ได้ ({"choices": []}), หรือ choice
+        # ไม่มี message เลยก็ได้ -- ทั้งหมดนี้เดิมโผล่เป็น KeyError/IndexError ดิบๆ ที่
+        # ทิ้งข้อความจริงของ proxy (เช่น "budget exceeded for key") ไปเฉยๆ แล้วยัง
+        # ถูก is_retryable เดาว่า retryable เพราะไม่มี status_code (ดูไม่ต่างจาก
+        # "ไปไม่ถึง API") ทั้งที่ยิงซ้ำก็ได้ผลเดิมทุกครั้ง
+        choices = payload.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if not isinstance(message, dict):
+            raise UnusableAnswerError(
+                f"{model_id} returned HTTP 200 but the body is not a usable "
+                f"completion: {_response_detail(payload)}"
+            )
+        answer_content = message.get("content")
+        if answer_content is not None and not isinstance(answer_content, str):
+            # OpenAI content parts ([{"type": "text", "text": "..."}]) เป็น list ที่
+            # truthy อยู่แล้ว ผ่าน `or ""` ไปได้ แล้วไปแตกที่ .strip() ด้านล่างแทน --
+            # กันไว้ตรงนี้ก่อนเลย
+            raise UnusableAnswerError(
+                f"{model_id} returned non-string content "
+                f"({type(answer_content).__name__}); cannot use as a summary: "
+                f"{_response_detail(payload)}"
+            )
+        text = answer_content or ""
         finish_reason = choice.get("finish_reason")
         if not text.strip():
             # reasoning model ใช้ budget หมดไปกับ reasoning_content ได้ โดย content

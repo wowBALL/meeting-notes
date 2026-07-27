@@ -687,8 +687,6 @@ def test_reduce_failure_still_raises_when_no_chunk_ever_succeeded():
 
 
 def test_a_provider_that_returns_no_text_is_not_retried():
-    from src.llm import Completion
-
     calls = {"n": 0}
 
     def complete(system, content, max_tokens):

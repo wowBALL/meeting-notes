@@ -41,9 +41,11 @@ def load_config(base_dir: Path | None = None) -> Config:
     base_dir = base_dir or Path.cwd()
     load_dotenv(base_dir / ".env")
 
-    # ไม่บังคับอีกแล้ว: ค่าเริ่มต้นคือ GLM ซึ่งไม่ใช้ key ของ Anthropic เลย คนตั้งเครื่อง
-    # ใหม่ต้องเริ่มงานได้โดยไม่มี key ตัวนี้ error ย้ายไปเกิดตอน llm.resolve() ของ
-    # provider ที่ต้องใช้จริง ซึ่งบอกได้ว่าต้องตั้งตัวไหน
+    # ไม่บังคับอีกแล้ว: GLM จะเป็นค่าเริ่มต้นซึ่งไม่ใช้ key ของ Anthropic เลย (ยังไม่ใช่
+    # ตอนนี้ -- DEFAULT_SUMMARY_MODEL ยังชี้ไป Claude อยู่) แต่โค้ดนี้เขียนไว้ล่วงหน้า
+    # แล้วว่า key ตัวนี้ต้องไม่บังคับ เพื่อให้คนตั้งเครื่องใหม่เริ่มงานได้โดยไม่มีมัน
+    # error ย้ายไปเกิดตอน llm.resolve() ของ provider ที่ต้องใช้จริง ซึ่งบอกได้ว่าต้อง
+    # ตั้งตัวไหน
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     hf_token = os.environ["HF_TOKEN"]
     llm_api_key = os.environ.get("LLM_API_KEY", "")

@@ -9,6 +9,7 @@ from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
     DEFAULT_LLM_BASE_URL,
+    LLM_TIMEOUT_SECONDS,
     GLM_MAP_MAX_TOKENS,
     GLM_REDUCE_MAX_TOKENS,
     Completion,
@@ -153,6 +154,7 @@ def test_glm_sends_thai_as_utf8_not_escape_sequences():
     assert request.headers["Content-type"] == "application/json; charset=utf-8"
     assert request.headers["Authorization"] == "Bearer test-key"
     assert request.full_url == f"{DEFAULT_LLM_BASE_URL}/chat/completions"
+    assert captured["timeout"] == LLM_TIMEOUT_SECONDS
 
     sent = json.loads(body)
     assert sent["model"] == "GLM-5.2"
@@ -198,6 +200,72 @@ def test_glm_whitespace_only_content_is_also_a_failure():
         pytest.raises(UnusableAnswerError, match="no text"),
     ):
         resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+
+def test_glm_200_error_envelope_surfaces_the_proxys_own_message():
+    """LiteLLM ตอบ 200 พร้อม error envelope แทนคำตอบได้ (เช่น เกิน budget ของ key)
+    payload["choices"] จะ KeyError ถ้าไม่ระวัง -- ต้องจับก่อนแล้วโชว์ข้อความของ proxy
+    เอง ไม่ใช่แค่ 'choices'"""
+    patcher, _ = _patch_urlopen({"error": {"message": "budget exceeded for key", "type": "budget"}})
+
+    with (
+        patcher,
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        pytest.raises(UnusableAnswerError, match="budget exceeded for key"),
+    ):
+        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+
+def test_glm_empty_choices_list_does_not_raise_indexerror():
+    patcher, _ = _patch_urlopen({"choices": []})
+
+    with (
+        patcher,
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        pytest.raises(UnusableAnswerError),
+    ):
+        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+
+def test_glm_choice_with_no_message_key_does_not_raise_keyerror():
+    patcher, _ = _patch_urlopen({"choices": [{"finish_reason": "stop"}]})
+
+    with (
+        patcher,
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        pytest.raises(UnusableAnswerError),
+    ):
+        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+
+def test_glm_content_as_parts_list_does_not_raise_attributeerror():
+    """OpenAI content parts: content เป็น list ของ {"type": "text", "text": ...} ได้
+    ค่านี้ truthy อยู่แล้วเลยผ่าน `or ""` ไป แล้วไป .strip() แตกด้วย AttributeError"""
+    patcher, _ = _patch_urlopen(
+        {"choices": [{"finish_reason": "stop", "message": {"content": [{"type": "text", "text": "สรุป"}]}}]}
+    )
+
+    with (
+        patcher,
+        patch.dict("os.environ", {"LLM_API_KEY": "test-key"}),
+        pytest.raises(UnusableAnswerError),
+    ):
+        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+
+
+def test_glm_malformed_response_is_not_retried():
+    """เรียกซ้ำคำขอเดิมก็ได้ error envelope เดิม -- ต้องไม่ใช่ประเภทที่ is_retryable
+    เดาว่า retryable (ดู src/summarize.py::is_retryable)"""
+    from src.summarize import is_retryable
+
+    patcher, _ = _patch_urlopen({"error": {"message": "budget exceeded"}})
+
+    with patcher, patch.dict("os.environ", {"LLM_API_KEY": "test-key"}):
+        try:
+            resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 10)
+            pytest.fail("expected an exception")
+        except Exception as e:
+            assert is_retryable(e) is False
 
 
 def test_glm_http_error_carries_a_status_code_for_is_retryable():
