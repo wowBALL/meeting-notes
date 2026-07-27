@@ -3,6 +3,7 @@ import queue
 import shutil
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,10 @@ from src.segments import (  # noqa: F401 -- write_manifest re-exported for tests
 
 ROTATE_SECONDS = 1800
 DEVICE_POLL_SECONDS = 5.0
+# How long to keep waiting for the block that pairs with one we already have. Two
+# capture callbacks never fire in step, so the counterpart is usually already
+# queued and this wait costs nothing -- it only has to cover the gap between them.
+PAIR_GRACE_SECONDS = 0.05
 
 
 def _ffmpeg_error_detail(error: Exception) -> str:
@@ -114,11 +119,56 @@ def record_streams_to_session(
         if on_part_closed is not None:
             on_part_closed(list(parts))
 
+    # Waiting block_timeout on EACH queue in turn is what made one dead stream
+    # fatal. An open WASAPI loopback whose endpoint is idle can deliver no
+    # callbacks at all -- measured on this machine, two of four loopback devices
+    # deliver silence blocks and the other two deliver nothing -- so its queue
+    # stays empty forever. The loop then burned a whole timeout per iteration on
+    # that queue while the mic kept filling its own at full rate: the recording
+    # ran at ~19% of real time, the mic queue grew without bound, and the exit
+    # condition below (both queues empty) could never become true, so stopping
+    # never finished.
+    #
+    # So the two streams are paired only while both are actually delivering. A
+    # stream that has produced nothing for a whole block_timeout is treated as
+    # dead and read without waiting. "In the last block_timeout" rather than "on
+    # the previous iteration" on purpose: a live stream legitimately misses
+    # individual iterations, and dropping the pairing wait for it would write each
+    # stream's blocks on their own and double the length of the recording.
+    last_delivery = {"mic": time.monotonic(), "speaker": time.monotonic()}
+
+    def read_pair() -> tuple[np.ndarray, np.ndarray]:
+        if stop_event.is_set():
+            # Nothing can arrive any more -- run_recording closes both streams
+            # before it waits for this drain -- so take what is queued and never
+            # wait. Every iteration then removes at least one block, which is what
+            # makes the drain guaranteed to finish rather than merely likely to.
+            return (
+                drain_next_block(mic_queue, 0.0),
+                drain_next_block(speaker_queue, 0.0),
+            )
+        now = time.monotonic()
+        mic_live = now - last_delivery["mic"] < block_timeout
+        speaker_live = now - last_delivery["speaker"] < block_timeout
+        # Someone has to wait, or a lull on both streams turns into a busy loop.
+        # The mic takes that role unless it is the dead one.
+        mic_wait = block_timeout if mic_live or not speaker_live else PAIR_GRACE_SECONDS
+        mic_block = drain_next_block(mic_queue, mic_wait)
+        speaker_block = drain_next_block(
+            speaker_queue, PAIR_GRACE_SECONDS if speaker_live else 0.0
+        )
+        if len(mic_block):
+            last_delivery["mic"] = time.monotonic()
+        if len(speaker_block):
+            last_delivery["speaker"] = time.monotonic()
+        return mic_block, speaker_block
+
     open_next_part()
     try:
-        while not stop_event.is_set() or not mic_queue.empty() or not speaker_queue.empty():
-            mic_block = drain_next_block(mic_queue, block_timeout)
-            speaker_block = drain_next_block(speaker_queue, block_timeout)
+        while True:
+            if stop_event.is_set() and mic_queue.empty() and speaker_queue.empty():
+                break
+            mic_block, speaker_block = read_pair()
             if len(mic_block) == 0 and len(speaker_block) == 0:
                 continue
             mixed = mix_recordings(mic_block, speaker_block)
@@ -149,6 +199,18 @@ def record_streams_to_session(
             elif on_part_closed is not None:
                 on_part_closed(list(parts))
     return parts
+
+
+def _close_quietly(stream) -> None:
+    # Closing a stream is now on the path to waiting for the recorder to drain, so
+    # a failure here must not leave the other stream open: its callbacks would keep
+    # refilling a queue the drain is waiting to see empty. PortAudio close errors
+    # are not actionable and must not replace the recording's own result.
+    for step in (stream.stop_stream, stream.close):
+        try:
+            step()
+        except Exception:
+            pass
 
 
 def pyaudio_instance():
@@ -414,23 +476,33 @@ def run_recording(
                 {"mic": mic_device["name"], "loopback": speaker_device["name"]},
             )
             emit("recording_started", {})
-            while recorder_thread.is_alive():
-                recorder_thread.join(timeout=0.2)
+            # Wait for the stop request, NOT for the recorder to finish. The
+            # recorder cannot finish until the capture callbacks stop pushing into
+            # its queues, and closing the streams to make that happen is this
+            # thread's job -- see the finally below. Waiting on the recorder here
+            # was the deadlock: it can only end once the streams are closed, and
+            # they were only closed once it ended.
+            # is_alive() stays in the condition so a recorder that dies on its own
+            # (a disk error mid-meeting) still releases this thread.
+            while recorder_thread.is_alive() and not stop_event.wait(timeout=0.2):
+                pass
         except KeyboardInterrupt:
             # Swallowed on purpose, exactly as before: Ctrl+C is a request to STOP
             # the meeting, not to abandon it. Letting it propagate would skip the
             # encode below and leave the audio as raw parts every single time.
+            # The join belongs to the finally below, which closes the streams
+            # first -- joining here would wait for a drain that is still being fed.
             stop_event.set()
-            if thread_started:
-                recorder_thread.join()
         finally:
             stop_event.set()
+            # Close the streams BEFORE waiting for the drain. The capture callbacks
+            # keep pushing into the queues until the streams are closed, and the
+            # recorder only finishes once both queues are empty, so waiting first
+            # means waiting for something that is still being refilled.
+            _close_quietly(mic_stream)
+            _close_quietly(speaker_stream)
             if thread_started:
                 recorder_thread.join()
-            mic_stream.stop_stream()
-            mic_stream.close()
-            speaker_stream.stop_stream()
-            speaker_stream.close()
 
         emit("encode_started", {})
         try:
