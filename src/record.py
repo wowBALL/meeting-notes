@@ -11,6 +11,7 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 
 from src.config import load_config
+from src.messages import render
 from src.segments import (  # noqa: F401 -- write_manifest re-exported for tests
     NoAudioRecorded,
     find_orphan_sessions,
@@ -219,37 +220,44 @@ def get_common_samplerate(mic_device: dict, speaker_device: dict) -> int:
     return mic_rate
 
 
+def _noop_event(code: str, params: dict | None = None, level: str = "info") -> None:
+    pass
+
+
 def finish_or_discard(session_dir: Path, inbox_dir: Path) -> Path | None:
     # A session that captured no audio at all (stopped before the first block was
     # written) can never be encoded. Keeping it would make every later startup try
     # to recover it and fail again, forever -- so discard it and report nothing.
     # A genuine encode failure is the opposite case: those parts hold real audio,
     # so the error propagates and the directory survives for the next attempt.
+    # Returning None rather than reporting it here: the caller owns the output
+    # channel, which is a console for the CLI and a web page for the UI.
     try:
         return finish_session(session_dir, inbox_dir)
     except NoAudioRecorded:
         shutil.rmtree(session_dir, ignore_errors=True)
-        print("ไม่มีเสียงถูกบันทึกในรอบนี้ (หยุดเร็วเกินไปหรือไมค์ไม่ส่งเสียงมา) ไม่ได้สร้างไฟล์")
         return None
 
 
-def recover_orphan_sessions(inbox_dir: Path) -> list[Path]:
+def recover_orphan_sessions(inbox_dir: Path, emit=None) -> list[Path]:
     # A leftover session directory means a previous run died before encoding.
     # Finish what we can; one bad session must not stop the others or the new run.
+    emit = emit or _noop_event
     for swept in sweep_unrecoverable_sessions(inbox_dir):
-        print(f"ลบเศษ session ที่ปิดงานไม่หมดจากรอบก่อน: {swept.name}")
+        emit("orphan_swept", {"name": swept.name})
     recovered = []
     for session_dir in find_orphan_sessions(inbox_dir):
-        print(f"พบการอัดค้างจากรอบก่อน กำลังกู้ {session_dir.name} ...")
+        emit("orphan_found", {"name": session_dir.name})
         try:
             destination = finish_session(session_dir, inbox_dir)
         except Exception as e:
-            print(
-                f"กู้ {session_dir.name} ไม่สำเร็จ ข้ามไปก่อน (ชิ้นส่วนยังอยู่): "
-                f"{_ffmpeg_error_detail(e)}"
+            emit(
+                "orphan_failed",
+                {"name": session_dir.name, "error": _ffmpeg_error_detail(e)},
+                "error",
             )
             continue
-        print(f"กู้สำเร็จ: {destination}")
+        emit("orphan_recovered", {"path": str(destination)})
         recovered.append(session_dir)
     return recovered
 
@@ -265,30 +273,43 @@ def parse_args(argv: list[str]) -> tuple[str | None, str | None]:
     return (args.name or None), args.model
 
 
-def main() -> None:
-    name, claude_model = parse_args(sys.argv[1:])
+def run_recording(
+    name: str | None,
+    claude_model: str | None,
+    config,
+    stop_event: threading.Event,
+    on_event=None,
+) -> Path | None:
+    """อัดจนกว่า stop_event จะถูก set แล้วคืน path ของไฟล์ที่ encode แล้ว
 
-    config = load_config()
+    คืน None เมื่อไม่ได้ไฟล์ (ไม่มีเสียง, เปิดอุปกรณ์ไม่ได้, encode ล้ม) — ทุกกรณี
+    รายงานผ่าน on_event แทนการ raise เพราะผู้เรียกคือ CLI หรือหน้าจอที่ต้องแสดงผล
+    ต่อได้ ไม่ใช่ล้มทั้ง process
+
+    stop_event รับมาจากผู้เรียก นั่นคือทั้งหมดที่ทำให้ปุ่มบนหน้าจอหยุดการอัดได้
+    โดยไม่ต้องปลอมสัญญาณ Ctrl+C ข้าม process บน Windows
+    """
+    emit = on_event or _noop_event
+
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
-    recover_orphan_sessions(config.inbox_dir)
+    recover_orphan_sessions(config.inbox_dir, emit)
 
     p = pyaudio.PyAudio()
     recorder_thread = None
     thread_started = False
-    stop_event = threading.Event()
     try:
         try:
             mic_device = get_wasapi_mic_device(p)
             speaker_device = get_wasapi_loopback_device(p)
         except Exception as e:
-            print(f"ไม่พบไมค์/ลำโพง default กรุณาตรวจสอบการตั้งค่าเสียงของ Windows: {e}")
-            return
+            emit("device_open_failed", {"error": str(e)}, "error")
+            return None
 
         try:
             samplerate = get_common_samplerate(mic_device, speaker_device)
         except RuntimeError as e:
-            print(str(e))
-            return
+            emit("samplerate_mismatch", {"error": str(e)}, "error")
+            return None
 
         mic_queue: "queue.Queue[np.ndarray]" = queue.Queue()
         speaker_queue: "queue.Queue[np.ndarray]" = queue.Queue()
@@ -318,11 +339,8 @@ def main() -> None:
                 ),
             )
         except Exception as e:
-            print(
-                "อัดเสียงไม่สำเร็จ (อาจไม่มีสิทธิ์เข้าถึงไมค์ - ตรวจสอบที่ "
-                f"Settings > Privacy > Microphone): {e}"
-            )
-            return
+            emit("stream_open_failed", {"error": str(e)}, "error")
+            return None
 
         # Only create the session directory (and let the watcher's orphan-recovery
         # machinery become aware of it) once both streams are confirmed open --
@@ -353,17 +371,12 @@ def main() -> None:
                 devices,
                 claude_model=claude_model,
             )
+            emit("part_closed", {"count": len(parts)})
 
         def warn_output_changed(old_name: str, new_name: str) -> None:
-            print()
-            print("*" * 70)
-            print(f"!! อุปกรณ์เสียงเปลี่ยนจาก \"{old_name}\" เป็น \"{new_name}\"")
-            print(f"!! เครื่องอัดยังดักฟัง \"{speaker_device['name']}\" อยู่")
-            print("!! เสียงคู่สนทนาที่ออกอุปกรณ์ใหม่จะไม่ถูกอัด")
-            print("!! ให้สลับกลับเป็นอุปกรณ์เดิม หรือหยุดแล้วเริ่มอัดใหม่")
-            print("*" * 70)
+            emit("device_changed", {"old": old_name, "new": new_name}, "warn")
 
-        # Daemon: an audio device probe must never be the reason Ctrl+C hangs.
+        # Daemon: an audio device probe must never be the reason a stop hangs.
         device_watch_thread = threading.Thread(
             target=watch_output_device,
             args=(
@@ -392,12 +405,21 @@ def main() -> None:
             recorder_thread.start()
             thread_started = True
 
-            print(f"อัดจากไมค์: {mic_device['name']}")
-            print(f"อัดเสียงคู่สนทนาจาก: {speaker_device['name']}")
-            print("กำลังอัดเสียง... กด Ctrl+C เพื่อหยุด")
+            emit(
+                "room_opened",
+                {"room": name or "", "model": claude_model or ""},
+            )
+            emit(
+                "devices_selected",
+                {"mic": mic_device["name"], "loopback": speaker_device["name"]},
+            )
+            emit("recording_started", {})
             while recorder_thread.is_alive():
                 recorder_thread.join(timeout=0.2)
         except KeyboardInterrupt:
+            # Swallowed on purpose, exactly as before: Ctrl+C is a request to STOP
+            # the meeting, not to abandon it. Letting it propagate would skip the
+            # encode below and leave the audio as raw parts every single time.
             stop_event.set()
             if thread_started:
                 recorder_thread.join()
@@ -410,23 +432,42 @@ def main() -> None:
             speaker_stream.stop_stream()
             speaker_stream.close()
 
-        print("กำลังบีบอัดไฟล์เสียง...")
+        emit("encode_started", {})
         try:
             destination = finish_or_discard(session_dir, config.inbox_dir)
         except Exception as e:
-            print(
-                f"บีบอัดไม่สำเร็จ ชิ้นส่วนเสียงยังอยู่ที่ {session_dir} : "
-                f"{_ffmpeg_error_detail(e)}"
+            emit(
+                "encode_failed",
+                {"path": str(session_dir), "error": _ffmpeg_error_detail(e)},
+                "error",
             )
-            return
+            return None
         if destination is None:
-            return
-        print(f"หยุดอัดแล้ว บันทึกไปที่ {destination}")
+            emit("no_audio", {}, "warn")
+            return None
+        emit("encode_done", {"path": str(destination)})
+        return destination
     finally:
         stop_event.set()
         if thread_started:
             recorder_thread.join()
         p.terminate()
+
+
+def main() -> None:
+    """ทางเข้าแบบ CLI ที่ start-meeting.bat เรียก: Ctrl+C หยุด ข้อความออก stdout"""
+    name, claude_model = parse_args(sys.argv[1:])
+    config = load_config()
+    lang = config.ui_lang
+
+    def emit(code, params=None, level="info"):
+        print(render(code, params, lang))
+        # The hint belongs right after the recorder actually starts, not before
+        # the device lines -- it is the last thing the user reads before waiting.
+        if code == "recording_started":
+            print(render("press_ctrl_c", {}, lang))
+
+    run_recording(name, claude_model, config, threading.Event(), emit)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from src import activity
 from src.audio_convert import convert_to_wav
 from src.config import Config
 from src.diarize import diarize_audio
@@ -69,6 +70,11 @@ def process_file(
     # once at startup and cannot know what this meeting asked for.
     claude_model = read_model(audio_path) or config.claude_model
 
+    # ทุก activity.append ที่นี่ไม่มีทาง raise (ดู src/activity.py) จึงไม่ห่อ try --
+    # ห่อแล้วจะบังคับให้คนอ่านคิดว่ามันอาจ raise ได้ ซึ่งไม่จริง
+    job = audio_path.stem
+    activity.append(config.base_dir, job, "queued")
+
     reused = _reuse_saved_transcript(audio_path)
     if reused is not None:
         meeting_dir, transcript_path, transcript_markdown = reused
@@ -86,9 +92,11 @@ def process_file(
         try:
             convert_to_wav(audio_path, wav_path)
         except Exception as e:
+            activity.append(config.base_dir, job, "job_failed", "error", {"error": str(e)})
             move_to_failed(audio_path, config.failed_dir, f"Audio conversion failed: {e}")
             raise
 
+        activity.append(config.base_dir, job, "transcribe_started")
         try:
             whisper_segments = retry_with_backoff(
                 lambda: transcribe_audio(
@@ -96,9 +104,11 @@ def process_file(
                 )
             )
         except Exception as e:
+            activity.append(config.base_dir, job, "job_failed", "error", {"error": str(e)})
             move_to_failed(audio_path, config.failed_dir, f"Transcription failed: {e}")
             raise
 
+        activity.append(config.base_dir, job, "diarize_started")
         diarization_failed = False
         try:
             speaker_turns = diarize_audio(
@@ -106,6 +116,9 @@ def process_file(
             )
         except Exception as e:
             logger.warning("Diarization failed, continuing without speaker labels: %s", e)
+            activity.append(
+                config.base_dir, job, "diarize_failed", "warn", {"error": str(e)}
+            )
             speaker_turns = []
             diarization_failed = True
 
@@ -115,6 +128,7 @@ def process_file(
             merged, diarization_failed=diarization_failed
         )
     except Exception as e:
+        activity.append(config.base_dir, job, "job_failed", "error", {"error": str(e)})
         move_to_failed(audio_path, config.failed_dir, f"Rendering failed: {e}")
         raise
 
@@ -126,6 +140,7 @@ def process_file(
         meeting_dir = create_meeting_folder(audio_path, config.meetings_dir)
         transcript_path = save_transcript(meeting_dir, transcript_markdown)
     except Exception as e:
+        activity.append(config.base_dir, job, "job_failed", "error", {"error": str(e)})
         move_to_failed(audio_path, config.failed_dir, f"Save failed: {e}")
         raise
 
@@ -157,13 +172,20 @@ def _finish_meeting(
     # No retry here on purpose: summarize_transcript retries every API call it
     # makes, per chunk. Wrapping it again would re-run a whole map-reduce
     # (8 chunks, ~27 calls) because of one permanently failing chunk.
+    job = audio_path.stem
     summary_markdown = None
     if claude_model != NO_SUMMARY_MODEL:
+        activity.append(
+            config.base_dir, job, "summarize_started", params={"model": claude_model}
+        )
         try:
             summary_markdown = summarize_transcript(
                 transcript_markdown, model=claude_model, api_key=config.anthropic_api_key
             )
         except Exception as e:
+            activity.append(
+                config.base_dir, job, "job_failed", "error", {"error": str(e)}
+            )
             move_to_failed(
                 audio_path,
                 config.failed_dir,
@@ -181,7 +203,11 @@ def _finish_meeting(
         archive_audio(meeting_dir, audio_path)
         discard_job(audio_path)
     except Exception as e:
+        activity.append(config.base_dir, job, "job_failed", "error", {"error": str(e)})
         move_to_failed(audio_path, config.failed_dir, f"Save failed: {e}")
         raise
 
+    activity.append(
+        config.base_dir, job, "meeting_done", params={"path": str(meeting_dir)}
+    )
     return meeting_dir

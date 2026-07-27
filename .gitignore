@@ -2,6 +2,7 @@
 inbox/
 failed/
 meetings/
+state/
 __pycache__/
 *.pyc
 .venv/
@@ -12,3 +13,7 @@ watcher_*.log
 # Design specs and implementation plans: kept on disk for the workflow that
 # writes them, but out of version control so they are not published.
 docs/superpowers/
+
+# หน้าตาที่ใช้ตกลงดีไซน์กันตอนแรก มันจะ drift จาก web/ ที่เป็นของจริงแน่นอน
+# เก็บไว้บนดิสก์ ไม่เข้า repo
+runner-mock.html

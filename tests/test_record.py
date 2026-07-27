@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 import queue
 import threading
 from unittest.mock import MagicMock, patch
@@ -505,3 +506,211 @@ def test_parse_args_accepts_a_name_starting_with_a_dash_after_the_separator():
         "-standup",
         "claude-opus-5",
     )
+
+
+# --- orchestration ของ run_recording -------------------------------------
+# main() ไม่เคยมีเทสต์คุมมาก่อน เทสต์ชุดนี้จึงเป็นนั่งร้านที่ต้องขึ้นก่อนแยก
+# ฟังก์ชันออกมา ไม่ใช่หลังจากนั้น
+
+
+class FakeStream:
+    def __init__(self):
+        self.stopped = False
+        self.closed = False
+
+    def stop_stream(self):
+        self.stopped = True
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_audio(monkeypatch):
+    """แทนที่ทุกอย่างที่แตะฮาร์ดแวร์เสียง คืน dict ของสิ่งที่ถูกเรียก"""
+    calls = {"streams": [], "terminated": False}
+
+    mic = {
+        "index": 1,
+        "name": "FakeMic",
+        "maxInputChannels": 1,
+        "defaultSampleRate": 48000.0,
+    }
+    speaker = {
+        "index": 2,
+        "name": "FakeLoopback",
+        "maxInputChannels": 1,
+        "defaultSampleRate": 48000.0,
+        "isLoopbackDevice": True,
+    }
+
+    class FakePyAudio:
+        def open(self, **kwargs):
+            stream = FakeStream()
+            calls["streams"].append(stream)
+            return stream
+
+        def terminate(self):
+            calls["terminated"] = True
+
+    monkeypatch.setattr(record.pyaudio, "PyAudio", lambda: FakePyAudio())
+    monkeypatch.setattr(record, "get_wasapi_mic_device", lambda p: mic)
+    monkeypatch.setattr(record, "get_wasapi_loopback_device", lambda p: speaker)
+    monkeypatch.setattr(record, "default_output_name", lambda: "FakeLoopback")
+    return calls
+
+
+def _config(tmp_path):
+    from src.config import Config
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir(exist_ok=True)
+    return Config(
+        base_dir=tmp_path,
+        inbox_dir=inbox,
+        failed_dir=tmp_path / "failed",
+        meetings_dir=tmp_path / "meetings",
+        anthropic_api_key="k",
+        hf_token="h",
+    )
+
+
+def test_run_recording_stops_when_the_event_is_set(tmp_path, monkeypatch):
+    calls = _fake_audio(monkeypatch)
+    config = _config(tmp_path)
+    expected = config.inbox_dir / "meet.ogg"
+
+    # ตัวอัดจริงถูกแทนที่: เทสต์นี้ตรวจลำดับการประกอบ ไม่ใช่การเขียนไฟล์เสียง
+    monkeypatch.setattr(
+        record, "record_streams_to_session", lambda *a, **k: ["part0001.wav"]
+    )
+    monkeypatch.setattr(record, "finish_or_discard", lambda s, i: expected)
+
+    stop_event = threading.Event()
+    stop_event.set()
+    events = []
+    result = record.run_recording(
+        "meet",
+        "claude-opus-5",
+        config,
+        stop_event,
+        on_event=lambda code, params=None, level="info": events.append(code),
+    )
+
+    assert result == expected
+    assert [s.closed for s in calls["streams"]] == [True, True]
+    assert calls["terminated"] is True
+    assert "encode_done" in events
+
+
+def test_run_recording_writes_the_manifest_before_recording_starts(
+    tmp_path, monkeypatch
+):
+    """manifest ต้องมีอยู่ตอน record_streams_to_session เริ่มทำงาน
+
+    ลำดับนี้คือสิ่งที่ทำให้ session ที่ค้างจากเครื่องดับกู้กลับมาได้ ถ้า manifest
+    ถูกเขียนทีหลัง เสียงที่อัดไว้จะกลายเป็นโฟลเดอร์ที่ไม่มีใครกู้ได้
+    """
+    _fake_audio(monkeypatch)
+    config = _config(tmp_path)
+    seen = {}
+
+    def fake_record(*args, **kwargs):
+        session_dir = args[2]
+        seen["manifest_exists"] = (session_dir / "session.json").exists()
+        seen["manifest"] = json.loads(
+            (session_dir / "session.json").read_text(encoding="utf-8")
+        )
+        return ["part0001.wav"]
+
+    monkeypatch.setattr(record, "record_streams_to_session", fake_record)
+    monkeypatch.setattr(
+        record, "finish_or_discard", lambda s, i: config.inbox_dir / "meet.ogg"
+    )
+
+    stop_event = threading.Event()
+    stop_event.set()
+    record.run_recording("meet", NO_SUMMARY_MODEL, config, stop_event)
+
+    assert seen["manifest_exists"] is True
+    assert seen["manifest"]["claude_model"] == NO_SUMMARY_MODEL
+    assert seen["manifest"]["status"] == "recording"
+    assert seen["manifest"]["devices"] == {
+        "mic": "FakeMic",
+        "loopback": "FakeLoopback",
+    }
+
+
+def test_run_recording_reports_no_audio_and_returns_none(tmp_path, monkeypatch):
+    _fake_audio(monkeypatch)
+    config = _config(tmp_path)
+    monkeypatch.setattr(record, "record_streams_to_session", lambda *a, **k: [])
+    monkeypatch.setattr(record, "finish_or_discard", lambda s, i: None)
+
+    stop_event = threading.Event()
+    stop_event.set()
+    events = []
+    result = record.run_recording(
+        None,
+        "claude-opus-5",
+        config,
+        stop_event,
+        on_event=lambda code, params=None, level="info": events.append(code),
+    )
+
+    assert result is None
+    assert "no_audio" in events
+    assert "encode_done" not in events
+
+
+def test_run_recording_reports_a_device_open_failure_without_raising(
+    tmp_path, monkeypatch
+):
+    _fake_audio(monkeypatch)
+
+    def boom(p):
+        raise RuntimeError("ไม่มีไมค์")
+
+    monkeypatch.setattr(record, "get_wasapi_mic_device", boom)
+    config = _config(tmp_path)
+    events = []
+    result = record.run_recording(
+        "meet",
+        "claude-opus-5",
+        config,
+        threading.Event(),
+        on_event=lambda code, params=None, level="info": events.append(code),
+    )
+
+    assert result is None
+    assert "device_open_failed" in events
+
+
+def test_run_recording_reports_an_encode_failure_and_keeps_the_session(
+    tmp_path, monkeypatch
+):
+    """encode ที่ล้มต้องไม่ทิ้งชิ้นส่วน -- มันคือเสียงประชุมที่อัดซ้ำไม่ได้"""
+    _fake_audio(monkeypatch)
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        record, "record_streams_to_session", lambda *a, **k: ["part0001.wav"]
+    )
+
+    def boom(session_dir, inbox_dir):
+        raise RuntimeError("ffmpeg พัง")
+
+    monkeypatch.setattr(record, "finish_or_discard", boom)
+
+    stop_event = threading.Event()
+    stop_event.set()
+    events = []
+    result = record.run_recording(
+        "meet",
+        "claude-opus-5",
+        config,
+        stop_event,
+        on_event=lambda code, params=None, level="info": events.append(code),
+    )
+
+    assert result is None
+    assert "encode_failed" in events
+    assert list(config.inbox_dir.glob(".session-*"))

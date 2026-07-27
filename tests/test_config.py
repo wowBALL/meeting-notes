@@ -46,3 +46,38 @@ def test_load_config_raises_when_required_env_var_missing(tmp_path, monkeypatch)
 
     with pytest.raises(KeyError):
         load_config(base_dir=tmp_path)
+
+
+def test_load_config_defaults_the_ui_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("HF_TOKEN", "h")
+    monkeypatch.delenv("UI_PORT", raising=False)
+    monkeypatch.delenv("UI_LANG", raising=False)
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.ui_port == 8765
+    assert config.ui_lang == "th"
+
+
+def test_load_config_reads_the_ui_settings_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("HF_TOKEN", "h")
+    monkeypatch.setenv("UI_PORT", "9000")
+    monkeypatch.setenv("UI_LANG", "en")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.ui_port == 9000
+    assert config.ui_lang == "en"
+
+
+def test_load_config_falls_back_when_the_port_is_not_a_number(tmp_path, monkeypatch):
+    # พอร์ตที่พิมพ์ผิดใน .env ต้องไม่ทำให้เปิดโปรแกรมไม่ได้
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("HF_TOKEN", "h")
+    monkeypatch.setenv("UI_PORT", "not-a-number")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.ui_port == 8765
