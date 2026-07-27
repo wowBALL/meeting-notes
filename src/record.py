@@ -263,7 +263,7 @@ def recover_orphan_sessions(inbox_dir: Path, emit=None) -> list[Path]:
 
 
 def parse_args(argv: list[str]) -> tuple[str | None, str | None]:
-    """(meeting name, chosen Claude model) from the command line."""
+    """(meeting name, chosen summary model) from the command line."""
     parser = argparse.ArgumentParser(prog="src.record")
     parser.add_argument("name", nargs="?", default=None)
     parser.add_argument("--model", default=None)
