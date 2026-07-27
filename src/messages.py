@@ -73,6 +73,10 @@ MESSAGES = {
         ),
         "samplerate_ok": "ตรงกันที่ {rate} Hz",
         "model_ok": "รองรับ",
+        "model_transcript_only": (
+            "ตั้งใจปิดการสรุปไว้ (CLAUDE_MODEL={model}) -- อัดและถอดเสียงได้ปกติ "
+            "จะไม่มี summary.md เกิดขึ้น เพราะเป็นโหมดที่เลือกไว้เอง ไม่ใช่การตั้งค่าที่ผิด"
+        ),
         "model_unresolvable": (
             "ไม่รู้จักโมเดล {model} -- ที่รองรับตอนนี้: {known} -- อัดและถอดเสียงได้ปกติ "
             "แต่จะสรุปไม่สำเร็จ แก้ CLAUDE_MODEL ใน .env ให้เป็นหนึ่งในรายชื่อนี้"
@@ -158,6 +162,11 @@ MESSAGES = {
         ),
         "samplerate_ok": "both at {rate} Hz",
         "model_ok": "supported",
+        "model_transcript_only": (
+            "Summarizing is switched off on purpose (CLAUDE_MODEL={model}) -- "
+            "recording and transcription still work as normal. No summary.md will be "
+            "produced, because this is a deliberate choice, not a broken setting"
+        ),
         "model_unresolvable": (
             "unknown model {model} -- supported right now: {known} -- recording and "
             "transcription still work, but summarizing will fail. Fix CLAUDE_MODEL in "

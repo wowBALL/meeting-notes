@@ -12,12 +12,12 @@
 4. โมเดลที่ตั้งไว้จะใช้สรุปได้จริงไหม -- อยู่ใน registry ของ resolve() หรือเปล่า
 
 ข้อ 1-3 เป็น "ไม่ผ่าน" ได้ เพราะเสียงที่ไม่ได้อัดหายถาวร ข้อ 4 เป็นได้แค่ "เตือน"
-เพราะ transcript ยังได้ครบอยู่ดี เอาไปให้ Claude สรุปทีหลังได้
+เพราะ transcript ยังได้ครบอยู่ดี เอาไปสรุปทีหลังได้
 
-เดิมข้อ 4 ยิงคำขอจริงไปยัง API เพื่อตรวจว่า key ใช้ได้ด้วย (probe_summary_model) แต่
-ถูกถอดออกแล้ว: มันคือคำขอที่มีค่าใช้จ่ายจริงทุกครั้งก่อนอัดประชุม ต้องมี timeout ของ
-ตัวเอง และถึงจะรู้ว่า key ใช้ไม่ได้ก็ยังอัดต่อได้อยู่ดี (transcript ไม่ได้หายไปไหน
-สรุปทีหลังด้วยมือได้) ความคุ้มค่าจึงไม่พอเทียบกับต้นทุนที่ต้องจ่ายทุกครั้ง
+เดิมข้อ 4 ยิงคำขอจริงไปยัง API เพื่อตรวจว่า key ใช้ได้ด้วย แต่ถูกถอดออกแล้ว: มันคือ
+คำขอที่มีค่าใช้จ่ายจริงทุกครั้งก่อนอัดประชุม ต้องมี timeout ของตัวเอง และถึงจะรู้ว่า
+key ใช้ไม่ได้ก็ยังอัดต่อได้อยู่ดี (transcript ไม่ได้หายไปไหน สรุปทีหลังด้วยมือได้)
+ความคุ้มค่าจึงไม่พอเทียบกับต้นทุนที่ต้องจ่ายทุกครั้ง
 """
 
 import math
@@ -30,6 +30,7 @@ import numpy as np
 from dotenv import load_dotenv
 
 from src.config import DEFAULT_SUMMARY_MODEL, DEFAULT_UI_LANG
+from src.job import NO_SUMMARY_MODEL
 from src.llm import PROVIDERS, UnknownModelError, resolve
 from src.messages import render
 from src.record import (
@@ -166,13 +167,22 @@ def check_summary_model(model: str, lang: str = TH) -> CheckResult:
     PROVIDERS จะโยน UnknownModelError กลางท่อ -- หลังถอดเสียงเสร็จไปแล้ว ซึ่งเป็นขั้นที่
     แพงที่สุด ต้องเช็คแยกจาก resolve() ตรง ๆ เท่านั้นถึงจะจับกรณีนี้ได้ก่อนอัด
 
+    NO_SUMMARY_MODEL (transcript-only) ไม่อยู่ใน PROVIDERS เลย -- resolve() ไม่รู้จักมัน
+    โดยเจตนา (ดู src/job.py) เพราะมันแปลว่า "อย่าเรียกโมเดลไหนเลย" ไม่ใช่ id ของโมเดล
+    จริง ๆ ตัวหนึ่ง ต้องเช็คแยกก่อน resolve() ไม่งั้นจะโดนตีความว่าเป็นโมเดลที่พิมพ์ผิด
+    ทั้งที่ผู้ใช้ตั้งค่าตามเอกสารทุกตัวอักษร (README.md, .env.example)
+
     เป็น "warn" ไม่ใช่ "fail": resolve ไม่ผ่านไม่ได้ทำให้อัดหรือถอดเสียงไม่ได้ -- transcript
     ยังออกมาครบ เอาไปสรุปด้วยมือทีหลังได้ ต่างจากอัดไม่ได้เลยซึ่งหายถาวร
     """
+    if model == NO_SUMMARY_MODEL:
+        return _result("check_model", "ok", "model_transcript_only", {"model": model}, lang)
     try:
         resolve(model)
     except UnknownModelError:
-        known = ", ".join(sorted(PROVIDERS))
+        # NO_SUMMARY_MODEL ต้องอยู่ในรายชื่อนี้ด้วย ไม่งั้นข้อความจะบอกไม่ครบว่า
+        # transcript-only ก็เป็นค่าที่ใช้ได้จริง (แค่ไม่ได้อยู่ใน PROVIDERS)
+        known = ", ".join(sorted((*PROVIDERS, NO_SUMMARY_MODEL)))
         return _result(
             "check_model", "warn", "model_unresolvable", {"model": model, "known": known}, lang
         )

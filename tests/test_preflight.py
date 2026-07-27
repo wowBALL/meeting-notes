@@ -6,6 +6,7 @@ import pytest
 
 import src.preflight as preflight
 from src.config import DEFAULT_SUMMARY_MODEL
+from src.job import NO_SUMMARY_MODEL
 from src.preflight import (
     LOOPBACK_SILENT_DBFS,
     MIC_GOOD_DBFS,
@@ -194,6 +195,9 @@ def test_check_summary_model_warns_on_a_model_outside_the_registry():
     assert "claude-opus-4-8" in result.detail
     assert "claude-opus-5" in result.detail
     assert "claude-sonnet-5" in result.detail
+    # transcript-only ไม่ได้อยู่ใน PROVIDERS (resolve() ไม่รู้จักมัน) แต่เป็นค่าที่
+    # README/.env.example บอกว่าใช้ได้จริง -- รายชื่อที่พิมพ์ออกมาต้องไม่ทิ้งมันไว้
+    assert NO_SUMMARY_MODEL in result.detail
 
 
 def test_check_summary_model_passes_for_a_registered_model():
@@ -202,10 +206,33 @@ def test_check_summary_model_passes_for_a_registered_model():
     assert result.status == "ok"
 
 
-def test_check_summary_model_never_fails():
+def test_check_summary_model_recognizes_transcript_only_as_deliberate():
+    # transcript-only ไม่อยู่ใน PROVIDERS ของ resolve() แต่ README/.env.example
+    # บอกว่าใช้ได้ -- ต้องได้ "ok" พร้อมข้อความบอกว่าปิดการสรุปไว้ตั้งใจ ไม่ใช่ "warn"
+    # แบบเดียวกับโมเดลที่พิมพ์ผิด
+    result = check_summary_model(NO_SUMMARY_MODEL)
+
+    assert result.status == "ok"
+    assert NO_SUMMARY_MODEL in result.detail
+
+
+def test_check_summary_model_recognizes_transcript_only_in_english():
+    result = check_summary_model(NO_SUMMARY_MODEL, "en")
+
+    assert result.status == "ok"
+    assert NO_SUMMARY_MODEL in result.detail
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["GLM-5.2", "claude-opus-5", "claude-sonnet-5", NO_SUMMARY_MODEL, "not-a-real-model"],
+)
+def test_check_summary_model_never_fails(model):
     # โมเดลไม่อยู่ใน registry ไม่ได้ทำให้อัดหรือถอดเสียงไม่ได้ -- transcript ยังออกมา
-    # ครบ เอาไปสรุปด้วยมือทีหลังได้
-    assert check_summary_model("not-a-real-model").status != "fail"
+    # ครบ เอาไปสรุปด้วยมือทีหลังได้ -- พารามิเตอร์คือค่าที่ .env จริงเป็นไปได้ทั้งหมด
+    # (โมเดลที่รองรับทั้งสาม, transcript-only, และค่าที่พิมพ์ผิด) เคสเดียวคือสิ่งที่
+    # ปล่อยให้บั๊กนี้หลุดผ่านมาได้
+    assert check_summary_model(model).status != "fail"
 
 
 # --- read_summary_model: อ่านค่าจาก .env ตรง ๆ ไม่ตรวจสอบอะไรเพิ่ม -----------------
