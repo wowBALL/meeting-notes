@@ -252,5 +252,29 @@ def test_rename_speaker_in_transcript_survives_the_crlf_files_this_project_write
 
     assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 2", "พี่เอ็ม") is True
 
-    text = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
-    assert "**พี่เอ็ม** [00:00]: ครับ" in text
+    # ต้องอ่านเป็น bytes: read_text แปลง \r\n ให้เป็น \n ตั้งแต่ขาเข้า เทสที่อ่านด้วย
+    # read_text จึงผ่านเหมือนกันหมดไม่ว่าไฟล์บนดิสก์จะเป็น CRLF หรือ LF -- พิสูจน์
+    # อะไรเกี่ยวกับ CRLF ไม่ได้เลย ทั้งที่ชื่อเทสบอกว่าพิสูจน์
+    raw = (meeting_dir / "transcript.md").read_bytes()
+    assert "**พี่เอ็ม** [00:00]: ครับ".encode("utf-8") in raw
+    assert raw.count(b"\r\n") > 0
+    assert raw.count(b"\n") == raw.count(b"\r\n")
+
+
+def test_rename_speaker_in_transcript_treats_a_name_with_backslashes_literally(tmp_path):
+    # ชื่อเดินทางมาจาก HTTP request และ clean_name ไม่ได้กรอง backslash ออก ถ้าเอาไป
+    # ต่อเป็น replacement template ตรง ๆ ชื่ออย่าง "\1" จะทำให้ raise และ "\g<0>" จะยัด
+    # ข้อความที่ match ได้กลับเข้าไฟล์แทนชื่อ
+    meeting_dir = tmp_path / "m1"
+    meeting_dir.mkdir()
+    transcript = meeting_dir / "transcript.md"
+    original = "# Transcript\n\n**ผู้พูด 1** [00:00]: ครับ\n"
+
+    for hostile in ("\\1", "\\g<0>", "\\g<name>", "back\\slash", "\\0"):
+        transcript.write_text(original, encoding="utf-8")
+
+        assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 1", hostile) is True
+
+        text = transcript.read_text(encoding="utf-8")
+        assert f"**{hostile}** [00:00]: ครับ" in text
+        assert "\x00" not in text

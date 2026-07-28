@@ -128,11 +128,25 @@ def rename_speaker_in_transcript(
     except OSError:
         return False
     pattern = re.compile(rf"^\*\*{re.escape(old_label)}\*\* \[", re.MULTILINE)
-    updated, replaced = pattern.subn(f"**{new_name}** [", text)
+    # ต้องแทนที่ด้วย "ฟังก์ชัน" ไม่ใช่สตริง: อาร์กิวเมนต์ตัวที่สองของ subn ถูกตีความเป็น
+    # template ที่มี \1, \g<0>, \0 เป็นความหมายพิเศษ ชื่อที่ผู้ใช้พิมพ์เดินทางมาจาก
+    # HTTP request และ clean_name ไม่ได้กรอง backslash ออก -- ชื่ออย่าง "\1" จะทำให้
+    # ฟังก์ชันนี้ raise ทั้งที่สัญญาว่าคืน bool ส่วน "\g<0>" จะยัดข้อความที่ match ได้
+    # กลับเข้าไฟล์แทนชื่อ ทำให้ transcript เสียรูปแบบเงียบ ๆ ฟังก์ชันไม่ตีความอะไรเลย
+    updated, replaced = pattern.subn(lambda _match: f"**{new_name}** [", text)
     if not replaced:
         return False
+    # เขียนผ่านไฟล์ชั่วคราวแล้วค่อยสลับ: write_text เปิดโหมด "w" ซึ่งตัดไฟล์ทิ้งก่อน
+    # เขียน ถ้าล้มกลางทาง transcript ที่จ่ายไปด้วย GPU หนึ่งรอบเต็มจะหายไปเลย ทั้งที่
+    # ผู้เรียกได้ False กลับไปแล้วแปลว่า "ไม่มีอะไรเปลี่ยน"
+    temp = path.with_name(path.name + ".tmp")
     try:
-        path.write_text(updated, encoding="utf-8")
+        temp.write_text(updated, encoding="utf-8")
+        temp.replace(path)
     except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
         return False
     return True
