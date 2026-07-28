@@ -113,6 +113,27 @@ def test_diarize_audio_survives_an_unreadable_embedding_array(tmp_path):
     assert result.embeddings == {}
 
 
+def test_diarize_audio_keeps_the_turns_when_reading_embeddings_raises_anything(tmp_path):
+    # _speaker_embeddings runs AFTER turns is already built successfully; any
+    # exception type escaping it -- not just TypeError/ValueError/IndexError/KeyError --
+    # must not propagate out of diarize_audio, or pipeline.py's broad except will wipe
+    # out speaker_turns for a recording that cannot be made again.
+    audio_path = tmp_path / "sample.mp3"
+    audio_path.write_bytes(b"fake audio data")
+
+    fake_diarization = MagicMock()
+    fake_diarization.itertracks.return_value = [(FakeTurn(0.0, 3.0), None, "SPEAKER_00")]
+    fake_diarization.labels.side_effect = AttributeError("boom")
+    fake_output = MagicMock(
+        speaker_diarization=fake_diarization, speaker_embeddings=[[1.0, 0.0]]
+    )
+
+    result = diarize_audio(audio_path, hf_token="t", pipeline=MagicMock(return_value=fake_output))
+
+    assert result.turns == [{"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"}]
+    assert result.embeddings == {}
+
+
 def test_load_diarization_pipeline_moves_to_gpu_when_available():
     loaded = MagicMock()
     mock_pipeline_cls = MagicMock()

@@ -69,7 +69,12 @@ def _speaker_embeddings(result: Any, diarization: Any) -> dict[str, list[float]]
             for index, label in enumerate(labels)
             if index < len(embeddings)
         }
-    except (TypeError, ValueError, IndexError, KeyError) as e:
+    except Exception as e:
+        # กว้างโดยตั้งใจ ไม่ใช่ความมักง่าย: ฟังก์ชันนี้ต้องไม่ปล่อยอะไรออกไปเลย
+        # เพราะ diarize_audio สร้าง turns เสร็จแล้วก่อนเรียกมัน และ exception ที่
+        # หลุดออกไปจะไปโดน except ของ pipeline ซึ่งเซ็ต speaker_turns = [] --
+        # ความล้มเหลวของ "การจำเสียง" จะไปทำลาย "การแยกผู้พูด" ของประชุมที่อัดซ้ำ
+        # ไม่ได้ ซึ่งเป็นความไม่สมมาตรที่ทั้ง spec และ docstring ข้างบนห้ามไว้
         logger.warning("อ่าน speaker embeddings ไม่ได้ ไปต่อโดยไม่จำเสียง: %s", e)
         return {}
 
