@@ -5,6 +5,7 @@ from src.pending import (
     build_pending_speakers,
     find_pending,
     load_all_pending,
+    load_pending,
     pending_dir,
     resolve_pending,
     write_pending,
@@ -121,6 +122,24 @@ def test_load_all_pending_skips_a_corrupt_file(tmp_path):
     loaded = load_all_pending(tmp_path)
 
     assert [entry["meeting_dir"] for entry in loaded] == ["ดี"]
+
+
+def test_load_pending_returns_the_record_for_a_queued_meeting(tmp_path):
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+
+    record = load_pending(tmp_path, "m1")
+
+    assert record["meeting_dir"] == "m1"
+    assert record["audio_file"] == "a.ogg"
+    assert [entry["label"] for entry in record["speakers"]] == ["ผู้พูด 1", "ผู้พูด 2"]
+
+
+def test_load_pending_returns_none_for_an_unknown_meeting(tmp_path):
+    assert load_pending(tmp_path, "ไม่มีจริง") is None
+
+
+def test_load_pending_refuses_a_hostile_meeting_name(tmp_path):
+    assert load_pending(tmp_path, "../../x") is None
 
 
 def test_find_pending_returns_the_entry_without_changing_the_file(tmp_path):

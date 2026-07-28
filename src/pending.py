@@ -170,6 +170,19 @@ def load_all_pending(base_dir: Path) -> list[dict]:
     return entries
 
 
+def load_pending(base_dir: Path, meeting_name: str) -> dict | None:
+    """ข้อมูลคิวของการประชุมเดียว ไม่แตะหรือ parse ไฟล์ของการประชุมอื่นเลย
+
+    ต่างจาก load_all_pending ตรงที่ผู้เรียกรู้อยู่แล้วว่าอยากได้การประชุมไหน จึงไม่มี
+    เหตุผลต้อง glob และ parse ไฟล์คิวทุกไฟล์ (พร้อมเวกเตอร์เสียงของคนอื่นข้างใน) เพื่อ
+    หาไฟล์เดียว
+    """
+    path = _pending_path(base_dir, meeting_name)
+    if path is None or not path.is_file():
+        return None
+    return _read_pending_file(path)
+
+
 def find_pending(base_dir: Path, meeting_name: str, label: str) -> dict | None:
     """ข้อมูลของผู้พูดหนึ่งคนโดยไม่แตะไฟล์
 

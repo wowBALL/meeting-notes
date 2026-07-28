@@ -4,7 +4,7 @@ import time
 import pytest
 
 from src.config import Config
-from src.pending import build_pending_speakers, write_pending
+from src.pending import build_pending_speakers, pending_dir, write_pending
 from src.session_service import create_app
 from src.speakers import add_sample, load_registry, save_registry
 
@@ -479,6 +479,25 @@ def test_speaker_audio_endpoint_refuses_a_path_that_escapes_meetings(client, con
     outside.write_bytes("ห้ามอ่าน".encode("utf-8"))
 
     response = client.get("/api/speakers/audio/..%2fความลับ.ogg")
+
+    assert response.status_code == 404
+    assert "ห้ามอ่าน".encode("utf-8") not in response.get_data()
+
+
+def test_speaker_audio_endpoint_refuses_a_tampered_meeting_dir(client, config):
+    # เทสข้างบน 404 ตั้งแต่ guard แรก (ไม่มีการประชุมชื่อนั้นในคิว) จึงไม่เคยไปถึง
+    # safe_meeting_dir เลย -- ลบตัวกันนั้นทิ้งก็ยังผ่าน ตัวนี้บังคับให้เดินไปถึงจริง
+    # โดยแก้ field meeting_dir ในไฟล์คิวให้พาออกนอกโฟลเดอร์ ซึ่งเป็นสิ่งเดียวที่
+    # safe_meeting_dir มีไว้กัน
+    outside = config.base_dir / "ความลับ.ogg"
+    outside.write_bytes("ห้ามอ่าน".encode("utf-8"))
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["meeting_dir"] = "../ความลับ.ogg"
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    response = client.get(f"/api/speakers/audio/{record['meeting_dir']}")
 
     assert response.status_code == 404
     assert "ห้ามอ่าน".encode("utf-8") not in response.get_data()

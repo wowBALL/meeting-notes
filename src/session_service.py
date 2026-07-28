@@ -293,14 +293,10 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         คือ endpoint นี้เสิร์ฟได้เฉพาะการประชุมที่มีงานค้างจริง ไม่ได้กลายเป็นช่องอ่าน
         ไฟล์ทั่ว meetings/
         """
-        record = next(
-            (
-                entry
-                for entry in pending.load_all_pending(config.base_dir)
-                if entry.get("meeting_dir") == meeting
-            ),
-            None,
-        )
+        # อ่านเฉพาะไฟล์ของการประชุมนี้ ไม่ใช่ load_all_pending: ตัวเล่นเสียงยิง Range
+        # request หลายครั้งตอน seek และ load_all_pending จะ glob + parse ไฟล์คิว
+        # "ทุกไฟล์" (พร้อมเวกเตอร์เสียงข้างใน) ใหม่ทุกครั้งเพื่อหาสตริงเดียว
+        record = pending.load_pending(config.base_dir, meeting)
         if record is None:
             return jsonify({"error": "not_found"}), 404
         audio_file = record.get("audio_file")
