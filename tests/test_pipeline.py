@@ -922,3 +922,97 @@ def test_process_file_survives_an_activity_log_that_cannot_be_written(tmp_path):
         meeting_dir = process_file(audio_path, config)
 
     assert (meeting_dir / "summary.md").exists()
+
+
+def _registry_with(tmp_path, name, embedding):
+    from src.speakers import add_sample, save_registry
+
+    save_registry(tmp_path, add_sample([], name, embedding, source="ก่อนหน้า"))
+
+
+def test_process_file_writes_a_known_speakers_real_name_into_the_transcript(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+                {"SPEAKER_00": [1.0, 0.0]},
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "**พี่เอ็ม** [00:00]: สวัสดีครับ" in transcript
+    assert "ผู้พูด 1" not in transcript
+
+
+def test_process_file_keeps_the_anonymous_label_below_the_high_threshold(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            # cos = 0.6 -> ระหว่างเกณฑ์: เสนอได้ แต่ห้ามใส่ชื่อให้เอง
+            return_value=_diarization(
+                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+                {"SPEAKER_00": [0.6, 0.8]},
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "**ผู้พูด 1** [00:00]: สวัสดีครับ" in transcript
+    assert "พี่เอ็ม" not in transcript
+
+
+def test_process_file_finishes_the_meeting_when_the_registry_cannot_be_read(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+                {"SPEAKER_00": [1.0, 0.0]},
+            ),
+        ),
+        patch("src.pipeline.load_registry", side_effect=OSError("ดิสก์พัง")),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    # การจำเสียงพังต้องไม่ทำให้ประชุมที่อัดซ้ำไม่ได้พังตาม
+    assert (meeting_dir / "transcript.md").exists()
+    assert (meeting_dir / "summary.md").exists()

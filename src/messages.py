@@ -44,6 +44,9 @@ MESSAGES = {
         "transcribe_started": "กำลังถอดเสียง",
         "diarize_started": "กำลังแยกผู้พูด",
         "diarize_failed": "แยกผู้พูดไม่สำเร็จ ไปต่อโดยไม่มีชื่อผู้พูด: {error}",
+        "speakers_matched": "จำเสียงได้ {count} คนจากทะเบียน",
+        "speakers_pending": "มีผู้พูด {count} คนรอตั้งชื่อ",
+        "speakers_failed": "ระบบจำเสียงทำงานไม่สำเร็จ ไฟล์ที่ได้ไม่ได้รับผลกระทบ: {error}",
         "summarize_started": "กำลังสรุปด้วย {model}",
         "meeting_done": "เสร็จแล้ว: {path}",
         "job_failed": "ประมวลผลล้มเหลว: {error}",
@@ -134,6 +137,9 @@ MESSAGES = {
         "diarize_failed": (
             "Speaker separation failed, continuing without labels: {error}"
         ),
+        "speakers_matched": "Recognized {count} speaker(s) from the registry",
+        "speakers_pending": "{count} speaker(s) waiting to be named",
+        "speakers_failed": "Speaker identification failed; the saved files are unaffected: {error}",
         "summarize_started": "Summarizing with {model}",
         "meeting_done": "Done: {path}",
         "job_failed": "Processing failed: {error}",

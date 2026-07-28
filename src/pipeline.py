@@ -15,8 +15,9 @@ from src.job import (
     record_transcript,
 )
 from src.merge import merge_transcript_and_speakers
-from src.render import render_transcript_markdown
+from src.render import build_speaker_labels, render_transcript_markdown
 from src.retry import retry_with_backoff
+from src.speakers import Match, load_registry, match_known
 from src.storage import (
     archive_audio,
     create_meeting_folder,
@@ -58,6 +59,35 @@ def _reuse_saved_transcript(audio_path: Path) -> tuple[Path, Path, str] | None:
         return None
     logger.info("Reusing the transcript from an earlier run: %s", transcript_path)
     return transcript_path.parent, transcript_path, transcript_markdown
+
+
+def _match_known_speakers(
+    embeddings: dict[str, list[float]], config: Config, job: str
+) -> dict[str, Match]:
+    """ผู้พูดในไฟล์นี้ที่ตรงกับคนในทะเบียนเสียง
+
+    ล้มเหลวแล้วคืน dict ว่าง ไม่ปล่อย exception ขึ้นไป: ผลลัพธ์ที่แย่ที่สุดของฟีเจอร์นี้
+    ต้องเท่ากับสภาพก่อนมีมัน (ป้าย "ผู้พูด N") ไม่ใช่การประชุมที่หายไปทั้งครั้ง
+    """
+    if not embeddings:
+        return {}
+    try:
+        matches = match_known(
+            embeddings,
+            load_registry(config.base_dir),
+            high=config.speaker_match_high,
+            low=config.speaker_match_low,
+        )
+    except Exception as e:
+        logger.warning("จับคู่เสียงกับทะเบียนไม่สำเร็จ ไปต่อโดยไม่ใส่ชื่อ: %s", e)
+        activity.append(config.base_dir, job, "speakers_failed", "warn", {"error": str(e)})
+        return {}
+    recognized = sum(1 for match in matches.values() if match.confident)
+    if recognized:
+        activity.append(
+            config.base_dir, job, "speakers_matched", params={"count": recognized}
+        )
+    return matches
 
 
 def process_file(
@@ -125,10 +155,16 @@ def process_file(
             speaker_turns = []
             diarization_failed = True
 
+    matches = _match_known_speakers(embeddings, config, job)
+
     try:
         merged = merge_transcript_and_speakers(whisper_segments, speaker_turns)
+        speaker_names = {
+            label: match.name for label, match in matches.items() if match.confident
+        }
+        speaker_labels = build_speaker_labels(merged, speaker_names)
         transcript_markdown = render_transcript_markdown(
-            merged, diarization_failed=diarization_failed
+            merged, diarization_failed=diarization_failed, speaker_names=speaker_names
         )
     except Exception as e:
         activity.append(config.base_dir, job, "job_failed", "error", {"error": str(e)})
