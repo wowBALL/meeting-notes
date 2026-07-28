@@ -818,6 +818,13 @@ def _stage_codes(config: Config) -> list[str]:
     return [e["code"] for e in tail(config.base_dir)]
 
 
+def _activity_events(config: Config, code: str) -> list[dict]:
+    """เหตุการณ์ทั้งหมดในบันทึกที่มี code ตรงกับที่ขอ พร้อม params/level ของมัน"""
+    from src.activity import tail
+
+    return [e for e in tail(config.base_dir) if e["code"] == code]
+
+
 def test_process_file_records_each_stage(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
@@ -958,6 +965,54 @@ def test_process_file_writes_a_known_speakers_real_name_into_the_transcript(tmp_
     assert "**พี่เอ็ม** [00:00]: สวัสดีครับ" in transcript
     assert "ผู้พูด 1" not in transcript
 
+    matched = _activity_events(config, "speakers_matched")
+    assert len(matched) == 1
+    assert matched[0]["params"] == {"count": 1}
+
+
+def test_process_file_only_counts_confident_matches_in_speakers_matched(tmp_path):
+    """recognized ใน speakers_matched ต้องนับเฉพาะคนที่ confident=True เท่านั้น
+
+    match_known คืนคนที่คะแนนอยู่แค่ระหว่าง low กับ high มาด้วย (แค่ข้อเสนอให้เลือก
+    ไม่ใช่คนที่ระบุตัวได้แน่นอน) ถ้า pipeline สลับไปนับ len(matches) แทน เทสต์นี้
+    ต้องพังเพราะจะรายงาน 2 คนทั้งที่มั่นใจแค่คนเดียว
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"},
+                {"start": 2.0, "end": 4.0, "text": "สวัสดีค่ะ"},
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [
+                    {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+                    {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_01"},
+                ],
+                {
+                    "SPEAKER_00": [1.0, 0.0],  # cos = 1.0 -- confident
+                    "SPEAKER_01": [0.6, 0.8],  # cos = 0.6 -- แค่ข้อเสนอ ไม่ confident
+                },
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    matched = _activity_events(config, "speakers_matched")
+    assert len(matched) == 1
+    assert matched[0]["params"] == {"count": 1}
+
 
 def test_process_file_keeps_the_anonymous_label_below_the_high_threshold(tmp_path):
     config = make_config(tmp_path)
@@ -1016,3 +1071,7 @@ def test_process_file_finishes_the_meeting_when_the_registry_cannot_be_read(tmp_
     # การจำเสียงพังต้องไม่ทำให้ประชุมที่อัดซ้ำไม่ได้พังตาม
     assert (meeting_dir / "transcript.md").exists()
     assert (meeting_dir / "summary.md").exists()
+
+    failed = _activity_events(config, "speakers_failed")
+    assert len(failed) == 1
+    assert failed[0]["level"] == "warn"
