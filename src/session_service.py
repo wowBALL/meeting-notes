@@ -302,6 +302,12 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         audio_file = record.get("audio_file")
         if not isinstance(audio_file, str) or audio_file != Path(audio_file).name:
             return jsonify({"error": "not_found"}), 404
+        # หมายเหตุที่คนอ่านต้องรู้: วันนี้ safe_meeting_dir ปฏิเสธอะไรไม่ได้เลยที่นี่
+        # เพราะ load_pending ข้างบนผ่าน _is_safe_name มาแล้ว ซึ่งบังคับให้ meeting เป็น
+        # ชื่อไฟล์เปล่า ๆ (วัดแล้ว: ทุกชื่อที่ผ่าน _is_safe_name ผ่านตัวนี้หมด) เก็บไว้
+        # เป็นชั้นที่สองโดยตั้งใจ เพราะสองด่านนี้อยู่คนละไฟล์และถูกแก้แยกกันได้ -- แต่
+        # อย่าเข้าใจผิดว่านี่คือด่านหลัก ถ้าจะแก้ _is_safe_name ให้หลวมลง ต้องกลับมา
+        # ดูตรงนี้ว่ายังกันได้จริงไหม
         directory = safe_meeting_dir(config.meetings_dir, meeting)
         if directory is None or not (directory / audio_file).is_file():
             return jsonify({"error": "not_found"}), 404
