@@ -1075,3 +1075,157 @@ def test_process_file_finishes_the_meeting_when_the_registry_cannot_be_read(tmp_
     failed = _activity_events(config, "speakers_failed")
     assert len(failed) == 1
     assert failed[0]["level"] == "warn"
+
+
+def _run_with_two_speakers(config, guess=None, guess_error=None):
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    guess_mock = MagicMock(
+        return_value=guess or {}, side_effect=guess_error
+    )
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 30.0, "text": "สวัสดีครับ ผมขอเริ่มเลยนะครับ"},
+                {"start": 30.0, "end": 70.0, "text": "ครับผม ผมเห็นด้วยกับที่ว่ามา"},
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [
+                    {"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"},
+                    {"start": 30.0, "end": 70.0, "speaker": "SPEAKER_01"},
+                ],
+                {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]},
+            ),
+        ),
+        patch("src.pipeline.guess_speaker_names", guess_mock),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+    return meeting_dir, guess_mock
+
+
+def test_process_file_queues_unknown_speakers_for_naming(tmp_path):
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+
+    meeting_dir, _ = _run_with_two_speakers(config)
+
+    pending = load_all_pending(tmp_path)
+    assert len(pending) == 1
+    assert pending[0]["meeting_dir"] == meeting_dir.name
+    assert pending[0]["audio_file"] == "weekly-standup.mp3"
+    assert [entry["label"] for entry in pending[0]["speakers"]] == ["ผู้พูด 1", "ผู้พูด 2"]
+
+
+def test_process_file_attaches_the_model_guess_to_the_queue(tmp_path):
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+
+    _, guess_mock = _run_with_two_speakers(
+        config,
+        guess={"ผู้พูด 2": {"name": "พี่เอ็ม", "evidence": "มีคนเรียกชื่อ"}},
+    )
+
+    speakers = load_all_pending(tmp_path)[0]["speakers"]
+    assert speakers[0]["guess"] is None
+    assert speakers[1]["guess"] == {"name": "พี่เอ็ม", "evidence": "มีคนเรียกชื่อ"}
+    # ต้องส่งป้ายที่เขียนลงไฟล์จริงไปให้โมเดล ไม่ใช่ label ดิบของ pyannote
+    assert guess_mock.call_args.args[1] == ["ผู้พูด 1", "ผู้พูด 2"]
+
+
+def test_process_file_still_queues_speakers_when_the_guess_call_fails(tmp_path):
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+
+    _run_with_two_speakers(config, guess_error=RuntimeError("โมเดลล่ม"))
+
+    speakers = load_all_pending(tmp_path)[0]["speakers"]
+    assert len(speakers) == 2
+    assert all(entry["guess"] is None for entry in speakers)
+
+
+def test_process_file_guesses_with_the_model_the_meeting_chose(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    write_job(config.inbox_dir, "weekly-standup", "claude-sonnet-5")
+
+    _, guess_mock = _run_with_two_speakers(config)
+
+    assert guess_mock.call_args.kwargs["model"] == "claude-sonnet-5"
+
+
+def test_process_file_queues_nobody_when_diarization_gave_no_embeddings(tmp_path):
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 30.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    assert load_all_pending(tmp_path) == []
+
+
+def test_process_file_finishes_the_meeting_when_writing_the_queue_fails(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 30.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}],
+                {"SPEAKER_00": [1.0, 0.0]},
+            ),
+        ),
+        patch("src.pipeline.write_pending", side_effect=OSError("ดิสก์เต็ม")),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    assert (meeting_dir / "transcript.md").exists()
+    assert (meeting_dir / "summary.md").exists()
+
+
+def test_process_file_records_the_queue_only_after_the_meeting_is_done(tmp_path):
+    from src import activity
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+
+    _run_with_two_speakers(config)
+
+    codes = [entry["code"] for entry in activity.tail(tmp_path)]
+    # ผู้ใช้ต้องเห็น "เสร็จแล้ว" ก่อนงานหลังบ้าน ไม่ใช่รองานหลังบ้านก่อนถึงจะเสร็จ
+    assert codes.index("meeting_done") < codes.index("speakers_pending")

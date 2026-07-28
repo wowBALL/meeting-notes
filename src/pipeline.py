@@ -15,8 +15,10 @@ from src.job import (
     record_transcript,
 )
 from src.merge import merge_transcript_and_speakers
+from src.pending import build_pending_speakers, write_pending
 from src.render import build_speaker_labels, render_transcript_markdown
 from src.retry import retry_with_backoff
+from src.speaker_guess import guess_speaker_names
 from src.speakers import Match, load_registry, match_known
 from src.storage import (
     archive_audio,
@@ -88,6 +90,51 @@ def _match_known_speakers(
             config.base_dir, job, "speakers_matched", params={"count": recognized}
         )
     return matches
+
+
+def _record_pending_speakers(
+    config: Config,
+    job: str,
+    meeting_dir: Path,
+    audio_file: str,
+    transcript_markdown: str,
+    claude_model: str,
+    merged: list[dict],
+    labels: dict[str, str],
+    embeddings: dict[str, list[float]],
+    matches: dict[str, Match],
+) -> None:
+    """งานหลังบ้านที่รันหลังการประชุมเสร็จสมบูรณ์แล้ว
+
+    ทุกอย่างในนี้เป็นของแถม: ไฟล์ที่ผู้ใช้รออยู่ถูกเซฟไปหมดแล้วก่อนถูกเรียก และ
+    เหตุการณ์ meeting_done ถูกบันทึกไปแล้ว จึงห้ามมีอะไรในนี้ raise ออกไป
+
+    การเรียกโมเดลเพื่อเดาชื่ออยู่ตรงนี้ ไม่ใช่ก่อนหน้า เพราะมันคือ call เดียวที่เพิ่ม
+    เข้ามาในท่อทั้งหมด -- วางไว้ก่อน save จะทำให้เวลาที่ผู้ใช้รอ transcript ยาวขึ้น
+    เพื่อสิ่งที่เขาจะมาดูทีหลังเมื่อไหร่ก็ได้
+    """
+    try:
+        candidates = build_pending_speakers(merged, labels, embeddings, matches=matches)
+        if not candidates:
+            return
+        try:
+            guesses = guess_speaker_names(
+                transcript_markdown,
+                [candidate["label"] for candidate in candidates],
+                model=claude_model,
+            )
+        except Exception as e:
+            logger.warning("เดาชื่อผู้พูดไม่สำเร็จ ไปต่อโดยไม่มีคำใบ้: %s", e)
+            guesses = {}
+        for candidate in candidates:
+            candidate["guess"] = guesses.get(candidate["label"])
+        write_pending(config.base_dir, meeting_dir.name, audio_file, candidates)
+        activity.append(
+            config.base_dir, job, "speakers_pending", params={"count": len(candidates)}
+        )
+    except Exception as e:
+        logger.warning("บันทึกรายการผู้พูดที่รอตั้งชื่อไม่สำเร็จ: %s", e)
+        activity.append(config.base_dir, job, "speakers_failed", "warn", {"error": str(e)})
 
 
 def process_file(
@@ -189,7 +236,9 @@ def process_file(
     # written down next to the audio and travels with it into failed/.
     record_transcript(audio_path, transcript_path)
 
-    return _finish_meeting(
+    # ชื่อไฟล์ต้องอ่านก่อน _finish_meeting เพราะมันย้ายไฟล์เข้าโฟลเดอร์การประชุม
+    audio_file = audio_path.name
+    meeting_dir = _finish_meeting(
         audio_path,
         config,
         claude_model,
@@ -197,6 +246,19 @@ def process_file(
         transcript_path,
         transcript_markdown,
     )
+    _record_pending_speakers(
+        config,
+        job,
+        meeting_dir,
+        audio_file,
+        transcript_markdown,
+        claude_model,
+        merged,
+        speaker_labels,
+        embeddings,
+        matches,
+    )
+    return meeting_dir
 
 
 def _finish_meeting(
