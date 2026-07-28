@@ -14,7 +14,6 @@ from src.job import (
     record_transcript,
     write_job,
 )
-from src.diarize import DiarizationResult
 from src.llm import UnknownModelError
 from src.pipeline import process_file
 from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, session_dir_for, write_manifest
@@ -22,6 +21,8 @@ from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, se
 # See tests/test_segments.py: finish_session decides which parts are "real" by
 # size on disk, so a fixture part must be comfortably larger than the allowance.
 _FAKE_WAV_BYTES = b"fake wav bytes " * (WAV_HEADER_ALLOWANCE // 16 + 2)
+
+from src.diarize import DiarizationResult
 
 
 def _diarization(turns=None, embeddings=None) -> DiarizationResult:
