@@ -285,6 +285,32 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             )
         return jsonify({"ok": True, "renamed": renamed, "name": cleaned})
 
+    @app.get("/api/speakers/audio/<path:meeting>")
+    def speaker_audio(meeting):
+        """ไฟล์เสียงของการประชุมที่ยังมีคนรอตั้งชื่อ ให้กดฟังเพื่อนึกออกว่าใครพูด
+
+        ชื่อไฟล์อ่านจากรายการในคิว ไม่ใช่จากการไล่ดูว่ามีไฟล์อะไรในโฟลเดอร์ -- ผลพลอยได้
+        คือ endpoint นี้เสิร์ฟได้เฉพาะการประชุมที่มีงานค้างจริง ไม่ได้กลายเป็นช่องอ่าน
+        ไฟล์ทั่ว meetings/
+        """
+        record = next(
+            (
+                entry
+                for entry in pending.load_all_pending(config.base_dir)
+                if entry.get("meeting_dir") == meeting
+            ),
+            None,
+        )
+        if record is None:
+            return jsonify({"error": "not_found"}), 404
+        audio_file = record.get("audio_file")
+        if not isinstance(audio_file, str) or audio_file != Path(audio_file).name:
+            return jsonify({"error": "not_found"}), 404
+        directory = safe_meeting_dir(config.meetings_dir, meeting)
+        if directory is None or not (directory / audio_file).is_file():
+            return jsonify({"error": "not_found"}), 404
+        return send_from_directory(directory, audio_file, conditional=True)
+
     @app.get("/<path:filename>")
     def static_file(filename):
         return send_from_directory(WEB_DIR, filename)

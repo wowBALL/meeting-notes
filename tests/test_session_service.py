@@ -444,3 +444,56 @@ def test_skipping_when_the_dequeue_fails_is_a_500_and_the_registry_stays_empty(
 
     assert response.status_code == 500
     assert load_registry(config.base_dir) == []
+
+
+def test_speaker_audio_endpoint_serves_the_archived_recording(client, config):
+    meeting = _queue_two_speakers(config)
+    meeting_dir = config.meetings_dir / meeting
+    meeting_dir.mkdir(parents=True)
+    (meeting_dir / "standup.ogg").write_bytes(b"OggS-fake-audio")
+
+    response = client.get(f"/api/speakers/audio/{meeting}")
+
+    assert response.status_code == 200
+    assert response.get_data() == b"OggS-fake-audio"
+
+
+def test_speaker_audio_endpoint_supports_seeking(client, config):
+    # หน้าเว็บกระโดดไปยังช่วงที่คนนั้นพูด การเล่นตั้งแต่ต้นไฟล์ประชุมชั่วโมงหนึ่ง
+    # เพื่อฟังหกวินาทีคือสิ่งที่ทำให้ไม่มีใครใช้ปุ่มนี้
+    meeting = _queue_two_speakers(config)
+    meeting_dir = config.meetings_dir / meeting
+    meeting_dir.mkdir(parents=True)
+    (meeting_dir / "standup.ogg").write_bytes(b"0123456789")
+
+    response = client.get(
+        f"/api/speakers/audio/{meeting}", headers={"Range": "bytes=2-5"}
+    )
+
+    assert response.status_code == 206
+    assert response.get_data() == b"2345"
+
+
+def test_speaker_audio_endpoint_refuses_a_path_that_escapes_meetings(client, config):
+    outside = config.base_dir / "ความลับ.ogg"
+    outside.write_bytes("ห้ามอ่าน".encode("utf-8"))
+
+    response = client.get("/api/speakers/audio/..%2fความลับ.ogg")
+
+    assert response.status_code == 404
+    assert "ห้ามอ่าน".encode("utf-8") not in response.get_data()
+
+
+def test_speaker_audio_endpoint_is_404_for_a_meeting_with_nothing_queued(client, config):
+    meeting_dir = config.meetings_dir / "ไม่ได้อยู่ในคิว"
+    meeting_dir.mkdir(parents=True)
+    (meeting_dir / "a.ogg").write_bytes(b"x")
+
+    assert client.get("/api/speakers/audio/ไม่ได้อยู่ในคิว").status_code == 404
+
+
+def test_speaker_audio_endpoint_is_404_when_the_file_was_moved(client, config):
+    meeting = _queue_two_speakers(config)
+    (config.meetings_dir / meeting).mkdir(parents=True)
+
+    assert client.get(f"/api/speakers/audio/{meeting}").status_code == 404
