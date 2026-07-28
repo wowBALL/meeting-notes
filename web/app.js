@@ -286,6 +286,16 @@ async function refreshPending() {
   render(lastState);
 }
 
+// หา <input> ของผู้พูดคนนี้จาก data-name แทนการเดา selector -- ใช้ค่าที่ผู้ใช้เห็น
+// อยู่ตรงหน้าจอจริง ๆ (ไม่ว่าจะเป็นชื่อที่โมเดลเดาให้ตอนวาดครั้งแรก หรือที่พิมพ์แก้)
+// ไม่ใช่ nameDrafts ซึ่งว่างเปล่าจนกว่าจะมี oninput ยิงสักครั้ง
+function findNameInput(key) {
+  for (const input of document.querySelectorAll("[data-name]")) {
+    if (input.dataset.name === key) return input;
+  }
+  return null;
+}
+
 async function confirmSpeaker(key, skip) {
   const found = speakerAt(key);
   if (!found) return;
@@ -293,7 +303,13 @@ async function confirmSpeaker(key, skip) {
   if (skip) {
     payload.skip = true;
   } else {
-    const name = (nameDrafts[key] || "").trim();
+    // ช่องชื่อถูก prefill ด้วยชื่อที่โมเดลเดาให้เป็นค่า value ตั้งแต่วาดครั้งแรก แต่
+    // nameDrafts[key] มีค่าเฉพาะเมื่อผู้ใช้เคยพิมพ์ (oninput ยิงแล้ว) เท่านั้น -- กด
+    // บันทึกทันทีโดยไม่แตะช่องเลยตอนเดาถูกอยู่แล้วต้องส่งชื่อที่เห็นบนจอ ไม่ใช่ส่งค่า
+    // ว่างเพราะ nameDrafts ยังไม่เคยถูกเติม (nameDrafts ยังต้องอยู่ต่อ เพราะการวาดใหม่
+    // ทั้งก้อนตอนคิวเปลี่ยนจะดีดสิ่งที่พิมพ์ค้างไว้ทิ้งถ้าไม่มีมันเก็บสำรอง)
+    const input = findNameInput(key);
+    const name = (input ? input.value : nameDrafts[key] || "").trim();
     if (!name) return;
     payload.name = name;
   }

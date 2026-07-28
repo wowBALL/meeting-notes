@@ -394,6 +394,45 @@ def test_confirming_an_empty_name_is_rejected_and_keeps_the_queue_intact(client,
     assert len(body["meetings"][0]["speakers"]) == 2
 
 
+def test_confirming_is_a_400_when_the_queued_embedding_is_missing(client, config):
+    # find_pending คืนสิ่งที่อ่านจากไฟล์คิวตรง ๆ โดยไม่ตรวจอะไรเลย -- ไฟล์คิวที่ถูก
+    # แก้มือหรือมาจากเวอร์ชันเก่ากว่านี้อาจไม่มีคีย์ embedding เลย ต้องได้ 400 ที่อธิบาย
+    # ได้ ไม่ใช่ KeyError ที่กลายเป็น 500
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    del record["speakers"][0]["embedding"]
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 1", "name": "พี่เอ็ม"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "bad_embedding"
+    assert load_registry(config.base_dir) == []
+
+
+def test_confirming_is_a_400_when_the_queued_embedding_is_a_zero_vector(client, config):
+    # pyannote pad ศูนย์เข้ามาเมื่อจำนวน label มากกว่าจำนวน centroid -- เวกเตอร์ศูนย์
+    # ล้วนไม่มีทิศทาง cosine และ "เหมือน" กับเวกเตอร์ศูนย์อื่นทุกตัวถ้าปล่อยเข้าทะเบียน
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["speakers"][0]["embedding"] = [0.0, 0.0]
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 1", "name": "พี่เอ็ม"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "bad_embedding"
+    assert load_registry(config.base_dir) == []
+
+
 def test_confirming_an_unknown_meeting_or_label_is_a_404(client, config):
     _queue_two_speakers(config)
 

@@ -27,6 +27,12 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 WORKER_PROBE_CACHE_SECONDS = 10
 ACTIVITY_LIMIT = 200
 
+# ทะเบียนเสียงถูกอ่าน-แก้-เขียนทับใน confirm, การตัดคิวของ skip, และ delete โดยไม่มี
+# ตัวกัน ทั้งที่ service รันด้วย threaded=True -- สอง request ที่แก้พร้อมกันชนะกันได้
+# ทำให้ฝ่ายที่แพ้เสียชื่อที่เพิ่งพิมพ์ไปทั้งที่ได้รับ ok กลับไปแล้ว ล็อกเดียวพอเพราะ
+# ผู้ใช้มีคนเดียวและเว็บนี้ bind 127.0.0.1 เท่านั้น -- ไม่ต้องถึงขั้นล็อกระดับไฟล์
+_registry_lock = threading.Lock()
+
 # คำสั่งเดียวกับที่ start-meeting.bat:36 ใช้ตรวจว่า watcher รันอยู่หรือไม่
 _WORKER_PROBE_COMMAND = [
     "powershell",
@@ -218,11 +224,12 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
 
     @app.delete("/api/speakers/<speaker_id>")
     def delete_speaker(speaker_id):
-        registry = speakers.load_registry(config.base_dir)
-        remaining = speakers.remove_speaker(registry, speaker_id)
-        if len(remaining) == len(registry):
-            return jsonify({"error": "not_found"}), 404
-        speakers.save_registry(config.base_dir, remaining)
+        with _registry_lock:
+            registry = speakers.load_registry(config.base_dir)
+            remaining = speakers.remove_speaker(registry, speaker_id)
+            if len(remaining) == len(registry):
+                return jsonify({"error": "not_found"}), 404
+            speakers.save_registry(config.base_dir, remaining)
         return jsonify({"ok": True})
 
     @app.post("/api/speakers/confirm")
@@ -246,29 +253,45 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         if payload.get("skip") is True:
             # ทางนี้ไม่ได้ทำอะไรอย่างอื่นเลย ถ้าตัดคิวไม่สำเร็จก็แปลว่าไม่มีอะไรเกิดขึ้น
             # จริง ๆ การตอบ ok จึงเป็นการโกหก
-            if not pending.resolve_pending(config.base_dir, meeting, label):
+            with _registry_lock:
+                dequeued = pending.resolve_pending(config.base_dir, meeting, label)
+            if not dequeued:
                 return jsonify({"error": "resolve_failed"}), 500
             return jsonify({"ok": True, "renamed": False, "name": None})
 
-        registry = speakers.load_registry(config.base_dir)
+        # find_pending คืนสิ่งที่อ่านจากไฟล์คิวตรง ๆ โดยไม่ตรวจอะไรเลย (ดู docstring
+        # ของมัน) -- ไฟล์คิวที่ถูกแก้มือหรือมาจากเวอร์ชันเก่ากว่านี้อาจไม่มีคีย์
+        # embedding เลย หรือมีแต่เป็นเวกเตอร์ศูนย์ (pyannote pad เข้ามาเมื่อ label เกิน
+        # จำนวน centroid) ปล่อยให้หลุดไปถึง save_registry จะได้ KeyError (500 ที่ไม่มี
+        # ใครอธิบาย) หรือแย่กว่านั้นคือเก็บเวกเตอร์ศูนย์ลงทะเบียนถาวรซึ่ง "เหมือน" กับ
+        # เวกเตอร์ศูนย์อื่นทุกตัว ต้องเช็คให้ผ่านก่อนแตะทะเบียนเลย
+        if not speakers.is_usable_embedding(entry.get("embedding")):
+            return jsonify({"error": "bad_embedding"}), 400
+
         name = payload.get("name")
         speaker_id = payload.get("speaker_id")
-        if isinstance(speaker_id, str) and speaker_id:
-            existing = next((s for s in registry if s["id"] == speaker_id), None)
-            if existing is None:
-                return jsonify({"error": "unknown_speaker"}), 404
-            name = existing["name"]
-        if not isinstance(name, str) or not speakers.clean_name(name):
-            return jsonify({"error": "bad_name"}), 400
-        cleaned = speakers.clean_name(name)
+        # ล็อกคุมช่วง อ่านทะเบียน -> แก้ -> เขียนทับ เท่านั้น: service รันด้วย
+        # threaded=True และสอง request ที่แก้พร้อมกันแบบไม่มีล็อกจะชนะกันได้ ทำให้ฝ่าย
+        # แพ้เสียชื่อที่เพิ่งพิมพ์ไปทั้งที่ได้ ok กลับไปแล้ว
+        with _registry_lock:
+            registry = speakers.load_registry(config.base_dir)
+            if isinstance(speaker_id, str) and speaker_id:
+                existing = next((s for s in registry if s["id"] == speaker_id), None)
+                if existing is None:
+                    return jsonify({"error": "unknown_speaker"}), 404
+                name = existing["name"]
+            if not isinstance(name, str) or not speakers.clean_name(name):
+                return jsonify({"error": "bad_name"}), 400
+            cleaned = speakers.clean_name(name)
 
-        speakers.save_registry(
-            config.base_dir,
-            speakers.add_sample(registry, cleaned, entry["embedding"], source=meeting),
-        )
+            speakers.save_registry(
+                config.base_dir,
+                speakers.add_sample(registry, cleaned, entry["embedding"], source=meeting),
+            )
 
         # การแก้ไฟล์เก่าเป็นของแถม ทะเบียนคือของจริงเพราะมันไปออกดอกที่การประชุม
-        # ครั้งหน้า -- โฟลเดอร์ที่ผู้ใช้ย้ายไปแล้วจึงต้องไม่ทำให้คำขอนี้ล้มเหลว
+        # ครั้งหน้า -- โฟลเดอร์ที่ผู้ใช้ย้ายไปแล้วจึงต้องไม่ทำให้คำขอนี้ล้มเหลว การรีไรต์
+        # transcript ไม่ต้องอยู่ในล็อก: มันแตะไฟล์คนละไฟล์กับทะเบียน/คิว ไม่มีอะไรแข่งกัน
         meeting_dir = safe_meeting_dir(config.meetings_dir, meeting)
         renamed = (
             rename_speaker_in_transcript(meeting_dir, label, cleaned)
@@ -279,7 +302,9 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         # กลายเป็น 500 ที่บอกผู้ใช้ว่าล้มเหลว เพราะเขาจะพิมพ์ใหม่ และถ้าพิมพ์ชื่อไม่
         # เหมือนเดิมจะได้คนซ้ำในทะเบียนสำหรับเสียงเดียวกัน ปล่อยให้รายการค้างไว้แล้ว
         # โผล่ในหน้าเว็บรอบหน้าดีกว่า -- ผู้ใช้กดข้ามได้ และเสียงก็จำไปแล้ว
-        if not pending.resolve_pending(config.base_dir, meeting, label):
+        with _registry_lock:
+            dequeued = pending.resolve_pending(config.base_dir, meeting, label)
+        if not dequeued:
             logger.warning(
                 "จำเสียง %s สำเร็จแล้วแต่ตัดออกจากคิวไม่ได้ (%s/%s)", cleaned, meeting, label
             )

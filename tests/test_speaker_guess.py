@@ -55,6 +55,30 @@ def test_guess_speaker_names_ignores_a_null_or_empty_guess():
     assert result == {}
 
 
+def test_guess_speaker_names_uses_the_first_object_when_the_answer_has_two():
+    # regex เดิมที่ greedy จะจับตั้งแต่ "{" ตัวแรกถึง "}" ตัวสุดท้าย ซึ่งไม่ใช่ JSON
+    # ที่ถูกต้องเมื่อมีสอง object แยกกัน แล้วทิ้งคำตอบทั้งก้อนทั้งที่ตัวแรกอ่านได้ปกติ
+    provider = _provider(
+        '{"ผู้พูด 1": {"name": "เอ"}} ลองอีกแบบด้วย {"ผู้พูด 1": {"name": "บี"}}'
+    )
+
+    with patch("src.speaker_guess.resolve", return_value=provider):
+        result = guess_speaker_names("# T", ["ผู้พูด 1"], model="fake-model")
+
+    assert result == {"ผู้พูด 1": {"name": "เอ", "evidence": ""}}
+
+
+def test_guess_speaker_names_skips_a_stray_brace_in_prose_before_the_real_object():
+    provider = _provider(
+        'เขาพิมพ์ { เฉย ๆ ตรงนี้ แล้วสรุปว่า {"ผู้พูด 1": {"name": "ซี"}}'
+    )
+
+    with patch("src.speaker_guess.resolve", return_value=provider):
+        result = guess_speaker_names("# T", ["ผู้พูด 1"], model="fake-model")
+
+    assert result == {"ผู้พูด 1": {"name": "ซี", "evidence": ""}}
+
+
 def test_guess_speaker_names_returns_nothing_when_the_answer_is_not_json():
     provider = _provider("ผมเดาไม่ได้ครับ")
 

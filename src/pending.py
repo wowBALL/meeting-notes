@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.speakers import MIN_SPEAKING_SECONDS, REGISTRY_DIRNAME, is_usable_embedding
+from src.storage import replace_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -126,19 +127,31 @@ def write_pending(
     if path is None:
         return None
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "meeting_dir": meeting_name,
-                "audio_file": audio_file,
-                "created": datetime.now().isoformat(timespec="seconds"),
-                "speakers": speakers,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    payload = json.dumps(
+        {
+            "meeting_dir": meeting_name,
+            "audio_file": audio_file,
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "speakers": speakers,
+        },
+        ensure_ascii=False,
+        indent=2,
     )
+    # เขียนผ่านไฟล์ชั่วคราวแล้วค่อยสลับ แบบเดียวกับ save_registry และ
+    # rename_speaker_in_transcript: การเขียนทับตรง ๆ (write_text โหมด "w") ตัดไฟล์
+    # เดิมทิ้งก่อนเขียน ถ้าล้มกลางทาง (OSError) ไฟล์คิวจะพังแล้ว _read_pending_file
+    # จะข้ามมันไป -- ผู้พูดที่ยังไม่ได้ตั้งชื่อคนอื่น ๆ ในการประชุมนี้จะหายจากหน้าเว็บไป
+    # พร้อมเวกเตอร์เสียงที่กู้กลับมาไม่ได้แล้ว
+    temp = path.with_name(path.name + ".tmp")
+    try:
+        temp.write_text(payload, encoding="utf-8")
+        replace_with_retry(temp, path)
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        raise
     return path
 
 
@@ -239,12 +252,21 @@ def resolve_pending(base_dir: Path, meeting_name: str, label: str) -> bool:
                 return False
         return True
     parsed["speakers"] = remaining
+    # เขียนผ่านไฟล์ชั่วคราวแล้วค่อยสลับ (แบบเดียวกับ write_pending/save_registry)
+    # แทนการเขียนทับตรง ๆ -- ล้มกลางทางแบบเก่าจะทำให้ผู้พูดที่ "เหลือ" ของการประชุมนี้
+    # หายไปด้วย ทั้งที่คนพวกนั้นยังไม่ถูกตัดออกจากคิวจริง ๆ
+    temp = path.with_name(path.name + ".tmp")
     try:
-        path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
+        replace_with_retry(temp, path)
     except OSError as e:
         # กิ่งนี้เป็นกรณีที่พบบ่อยที่สุด (ตั้งชื่อทีละคนจากหลายคน) แต่เดิมไม่มี try เลย
         # ทั้งที่กิ่ง unlink ข้างบนมี -- ผู้เรียกเซฟทะเบียนสำเร็จไปแล้วก่อนถึงตรงนี้
         # exception ที่หลุดออกไปจึงกลายเป็น HTTP 500 ทั้งที่เสียงถูกจำไปเรียบร้อย
         logger.warning("ตัดผู้พูดออกจากรายการรอตั้งชื่อไม่ได้ (%s): %s", path.name, e)
+        try:
+            temp.unlink()
+        except OSError:
+            pass
         return False
     return True

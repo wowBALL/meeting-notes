@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from src.pending import (
     build_pending_speakers,
@@ -212,6 +213,38 @@ def test_resolve_pending_survives_a_delete_that_fails_on_the_last_speaker(tmp_pa
     # แม้ unlink ล้มเหลว ไฟล์ต้องถูกเขียนทับด้วยรายการว่าง ผู้พูดที่เพิ่งตั้งชื่อไปแล้ว
     # ต้องไม่โผล่กลับมาในคิวอีก
     assert load_all_pending(tmp_path) == []
+
+
+def test_resolve_pending_survives_a_failed_swap_on_the_rewrite_branch(tmp_path):
+    # เขียนผ่านไฟล์ชั่วคราวแล้วค่อยสลับ (replace_with_retry) -- ถ้า replace ล้มกลางทาง
+    # ไฟล์เดิมต้องยังอ่านได้ครบเหมือนก่อนเรียก และห้ามมี .tmp ตกค้าง ไม่งั้นผู้พูดที่
+    # "เหลือ" ของการประชุมนี้จะหายไปจากหน้าเว็บทั้งที่ยังไม่ถูกตัดออกจากคิวจริง
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    path = pending_dir(tmp_path) / "m1.json"
+    original = path.read_text(encoding="utf-8")
+
+    with patch("pathlib.Path.replace", side_effect=OSError("disk full")):
+        assert resolve_pending(tmp_path, "m1", "ผู้พูด 1") is False
+
+    assert path.read_text(encoding="utf-8") == original
+    assert not path.with_name(path.name + ".tmp").exists()
+    assert [entry["label"] for entry in load_all_pending(tmp_path)[0]["speakers"]] == [
+        "ผู้พูด 1",
+        "ผู้พูด 2",
+    ]
+
+
+def test_write_pending_leaves_no_tmp_litter_when_the_swap_fails(tmp_path):
+    speakers = build_pending_speakers(MERGED, LABELS, EMBEDDINGS)
+
+    with patch("pathlib.Path.replace", side_effect=OSError("disk full")):
+        try:
+            write_pending(tmp_path, "m1", "a.ogg", speakers)
+        except OSError:
+            pass
+
+    assert load_all_pending(tmp_path) == []
+    assert not (pending_dir(tmp_path) / "m1.json.tmp").exists()
 
 
 def test_resolve_pending_returns_false_when_the_trimmed_rewrite_fails(tmp_path, monkeypatch):
