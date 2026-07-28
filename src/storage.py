@@ -1,10 +1,29 @@
 import re
 import shutil
+import time
 from datetime import date
 from itertools import count
 from pathlib import Path
 
 from src.job import move_job
+
+# Windows จับไฟล์ที่เพิ่งเขียนเสร็จค้างได้ราวหนึ่งวินาที (ตัวสแกนไวรัส/indexer)
+# วัดมาแล้วในโปรเจกต์นี้กับการลบไฟล์ .wav -- การเขียนครั้งเดียวแล้วยอมแพ้แปลว่า
+# ผู้ใช้เสียชื่อที่เพิ่งตั้งไปเฉย ๆ
+_REPLACE_ATTEMPTS = 5
+_REPLACE_DELAY_SECONDS = 0.2
+
+
+def replace_with_retry(temp: Path, target: Path) -> None:
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            temp.replace(target)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_DELAY_SECONDS)
+
 
 # Stems produced by record.build_output_filename:
 #   named:   "<topic>-HH-MM-SS"
@@ -142,7 +161,7 @@ def rename_speaker_in_transcript(
     temp = path.with_name(path.name + ".tmp")
     try:
         temp.write_text(updated, encoding="utf-8")
-        temp.replace(path)
+        replace_with_retry(temp, path)
     except OSError:
         try:
             temp.unlink()

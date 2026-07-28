@@ -11,11 +11,12 @@
 import json
 import logging
 import math
-import time
 import uuid
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+
+from src.storage import replace_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +35,6 @@ MAX_NAME_LENGTH = 60
 # ผู้พูดที่พูดรวมกันน้อยกว่านี้ไม่ถูกเสนอให้ตั้งชื่อและไม่ถูกเก็บเข้าทะเบียน --
 # เวกเตอร์จากเสียงไม่กี่วินาทีเชื่อถือไม่ได้พอที่จะเอาไปเทียบข้ามการประชุม
 MIN_SPEAKING_SECONDS = 10.0
-
-# Windows จับไฟล์ที่เพิ่งเขียนเสร็จค้างได้ราวหนึ่งวินาที (ตัวสแกนไวรัส/indexer)
-# วัดมาแล้วในโปรเจกต์นี้กับการลบไฟล์ .wav -- การเขียนครั้งเดียวแล้วยอมแพ้แปลว่า
-# ผู้ใช้เสียชื่อที่เพิ่งตั้งไปเฉย ๆ
-_REPLACE_ATTEMPTS = 5
-_REPLACE_DELAY_SECONDS = 0.2
 
 
 def registry_path(base_dir: Path) -> Path:
@@ -75,17 +70,6 @@ def load_registry(base_dir: Path) -> list[dict]:
     ]
 
 
-def _replace_with_retry(temp: Path, target: Path) -> None:
-    for attempt in range(_REPLACE_ATTEMPTS):
-        try:
-            temp.replace(target)
-            return
-        except PermissionError:
-            if attempt == _REPLACE_ATTEMPTS - 1:
-                raise
-            time.sleep(_REPLACE_DELAY_SECONDS)
-
-
 def save_registry(base_dir: Path, speakers: list[dict]) -> None:
     """เขียนทะเบียนแบบ atomic
 
@@ -103,7 +87,7 @@ def save_registry(base_dir: Path, speakers: list[dict]) -> None:
         ),
         encoding="utf-8",
     )
-    _replace_with_retry(temp, path)
+    replace_with_retry(temp, path)
 
 
 def clean_name(name: str) -> str:

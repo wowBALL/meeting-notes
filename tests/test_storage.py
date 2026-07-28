@@ -1,4 +1,5 @@
 from datetime import date
+from unittest.mock import patch
 
 from src.job import JOB_SUFFIX, read_model, write_job
 from src.storage import (
@@ -270,7 +271,7 @@ def test_rename_speaker_in_transcript_treats_a_name_with_backslashes_literally(t
     transcript = meeting_dir / "transcript.md"
     original = "# Transcript\n\n**ผู้พูด 1** [00:00]: ครับ\n"
 
-    for hostile in ("\\1", "\\g<0>", "\\g<name>", "back\\slash", "\\0"):
+    for hostile in ("\\1", "\\g<0>", "\\g<name>", "back\\slash", "\\0", "\\\\"):
         transcript.write_text(original, encoding="utf-8")
 
         assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 1", hostile) is True
@@ -278,3 +279,29 @@ def test_rename_speaker_in_transcript_treats_a_name_with_backslashes_literally(t
         text = transcript.read_text(encoding="utf-8")
         assert f"**{hostile}** [00:00]: ครับ" in text
         assert "\x00" not in text
+
+
+def test_rename_speaker_in_transcript_retries_when_windows_holds_the_old_file(tmp_path):
+    # WinError 32: ตัวสแกนไวรัส/indexer จับไฟล์ที่เพิ่งปิดไปค้างได้ราวหนึ่งวินาที
+    # การเขียนครั้งเดียวแล้วยอมแพ้คือวิธีทำให้ผู้ใช้เสียชื่อที่เพิ่งตั้งไปเฉย ๆ
+    meeting_dir = tmp_path / "m1"
+    meeting_dir.mkdir()
+    transcript = meeting_dir / "transcript.md"
+    transcript.write_text(
+        "# Transcript\n\n**ผู้พูด 1** [00:00]: ครับ\n", encoding="utf-8"
+    )
+    attempts = {"count": 0}
+    real_replace = type(transcript).replace
+
+    def flaky_replace(self, target):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise PermissionError("WinError 32")
+        return real_replace(self, target)
+
+    with patch("pathlib.Path.replace", flaky_replace), patch("time.sleep"):
+        assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 1", "พี่เอ็ม") is True
+
+    assert attempts["count"] == 3
+    text = transcript.read_text(encoding="utf-8")
+    assert "**พี่เอ็ม** [00:00]: ครับ" in text
