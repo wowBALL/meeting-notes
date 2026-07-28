@@ -119,3 +119,35 @@ def test_the_misnamed_claude_default_constant_is_gone():
     import src.config as config
 
     assert not hasattr(config, "DEFAULT_CLAUDE_MODEL")
+
+
+def test_load_config_reads_speaker_match_thresholds(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("SPEAKER_MATCH_HIGH", "0.82")
+    monkeypatch.setenv("SPEAKER_MATCH_LOW", "0.61")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.82
+    assert config.speaker_match_low == 0.61
+
+
+def test_load_config_uses_default_speaker_thresholds(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("SPEAKER_MATCH_HIGH", raising=False)
+    monkeypatch.delenv("SPEAKER_MATCH_LOW", raising=False)
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.70
+    assert config.speaker_match_low == 0.50
+
+
+def test_load_config_falls_back_when_a_threshold_is_not_a_number(tmp_path, monkeypatch):
+    # ค่าที่พิมพ์ผิดใน .env ต้องไม่ทำให้เปิดโปรแกรมไม่ได้ -- แบบเดียวกับ UI_PORT
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("SPEAKER_MATCH_HIGH", "สูงมาก")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.70

@@ -21,6 +21,14 @@ DEFAULT_SUMMARY_MODEL = "GLM-5.2"
 DEFAULT_UI_PORT = 8765
 DEFAULT_UI_LANG = "th"
 
+# เกณฑ์ความเหมือนของน้ำเสียง (cosine similarity): สูงกว่า HIGH = ใส่ชื่อให้เลย,
+# ระหว่าง LOW กับ HIGH = เสนอให้คนยืนยัน, ต่ำกว่า LOW = ถือว่าไม่รู้จัก
+#
+# ค่าพวกนี้ยังไม่ผ่านการวัดกับข้อมูลจริงของเครื่องนี้ ตั้งไว้ฝั่งอนุรักษ์นิยมโดยตั้งใจ
+# เพราะการไม่ใส่ชื่อเสียหายน้อยกว่าการใส่ชื่อผิดคนลงสรุปที่ระบุผู้รับผิดชอบ
+DEFAULT_SPEAKER_MATCH_HIGH = 0.70
+DEFAULT_SPEAKER_MATCH_LOW = 0.50
+
 
 @dataclass
 class Config:
@@ -33,6 +41,16 @@ class Config:
     whisper_model: str = "small"
     ui_port: int = DEFAULT_UI_PORT
     ui_lang: str = DEFAULT_UI_LANG
+    speaker_match_high: float = DEFAULT_SPEAKER_MATCH_HIGH
+    speaker_match_low: float = DEFAULT_SPEAKER_MATCH_LOW
+
+
+def _read_float(name: str, default: float) -> float:
+    """ค่าที่พิมพ์ผิดใน .env ต้องไม่ทำให้เปิดโปรแกรมไม่ได้ -- แบบเดียวกับ UI_PORT"""
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def load_config(base_dir: Path | None = None) -> Config:
@@ -53,6 +71,8 @@ def load_config(base_dir: Path | None = None) -> Config:
     except ValueError:
         ui_port = DEFAULT_UI_PORT
     ui_lang = os.environ.get("UI_LANG", DEFAULT_UI_LANG)
+    speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
+    speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
 
     return Config(
         base_dir=base_dir,
@@ -64,4 +84,6 @@ def load_config(base_dir: Path | None = None) -> Config:
         whisper_model=whisper_model,
         ui_port=ui_port,
         ui_lang=ui_lang,
+        speaker_match_high=speaker_match_high,
+        speaker_match_low=speaker_match_low,
     )
