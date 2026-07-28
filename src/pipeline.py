@@ -236,7 +236,8 @@ def process_file(
     # written down next to the audio and travels with it into failed/.
     record_transcript(audio_path, transcript_path)
 
-    # ชื่อไฟล์ต้องอ่านก่อน _finish_meeting เพราะมันย้ายไฟล์เข้าโฟลเดอร์การประชุม
+    # อ่านชื่อไฟล์ไว้ตรงนี้เพื่อความชัดเจน -- _finish_meeting ย้ายไฟล์บนดิสก์ แต่ไม่ได้
+    # แก้ออบเจกต์ Path ตัวนี้ ค่าจึงเท่ากันไม่ว่าจะอ่านก่อนหรือหลัง สลับบรรทัดได้ ไม่พัง
     audio_file = audio_path.name
     meeting_dir = _finish_meeting(
         audio_path,

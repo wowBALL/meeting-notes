@@ -1,4 +1,5 @@
 import subprocess
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1077,12 +1078,14 @@ def test_process_file_finishes_the_meeting_when_the_registry_cannot_be_read(tmp_
     assert failed[0]["level"] == "warn"
 
 
-def _run_with_two_speakers(config, guess=None, guess_error=None):
-    audio_path = config.inbox_dir / "weekly-standup.mp3"
-    audio_path.write_bytes(b"fake audio")
-    guess_mock = MagicMock(
-        return_value=guess or {}, side_effect=guess_error
-    )
+@contextmanager
+def _two_speaker_diarization_patched():
+    """สอง speaker ที่พูดยาวกว่า MIN_SPEAKING_SECONDS มาก พร้อมเวกเตอร์ที่ใช้ได้
+
+    แยกออกมาจาก _run_with_two_speakers เพื่อให้เทสต์ที่ *ไม่* อยาก mock
+    guess_speaker_names (เช่นเทสต์โหมด transcript-only ที่ต้องให้ตัวจริงทำงาน)
+    ยืมชุดพากย์เสียง/ถอดเสียงนี้ได้โดยไม่ต้องคัดลอกทั้งก้อน
+    """
     with (
         _mock_convert_to_wav(),
         patch(
@@ -1102,6 +1105,18 @@ def _run_with_two_speakers(config, guess=None, guess_error=None):
                 {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]},
             ),
         ),
+    ):
+        yield
+
+
+def _run_with_two_speakers(config, guess=None, guess_error=None):
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    guess_mock = MagicMock(
+        return_value=guess or {}, side_effect=guess_error
+    )
+    with (
+        _two_speaker_diarization_patched(),
         patch("src.pipeline.guess_speaker_names", guess_mock),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
@@ -1210,6 +1225,7 @@ def test_process_file_finishes_the_meeting_when_writing_the_queue_fails(tmp_path
             ),
         ),
         patch("src.pipeline.write_pending", side_effect=OSError("ดิสก์เต็ม")),
+        patch("src.pipeline.guess_speaker_names", return_value={}),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -1229,3 +1245,34 @@ def test_process_file_records_the_queue_only_after_the_meeting_is_done(tmp_path)
     codes = [entry["code"] for entry in activity.tail(tmp_path)]
     # ผู้ใช้ต้องเห็น "เสร็จแล้ว" ก่อนงานหลังบ้าน ไม่ใช่รองานหลังบ้านก่อนถึงจะเสร็จ
     assert codes.index("meeting_done") < codes.index("speakers_pending")
+
+
+def test_process_file_queues_speakers_in_transcript_only_mode_without_a_model_call(
+    tmp_path,
+):
+    """transcript-only แปลว่าผู้ใช้เลือกเองว่าจะไม่ให้คำพูดของเขาหลุดออกจากเครื่อง
+
+    ต่างจากเทสต์อื่นใน task นี้ที่ mock src.pipeline.guess_speaker_names ตรง ๆ --
+    ที่นี่ปล่อยให้ตัวจริงทำงาน แล้ว mock แค่ src.speaker_guess.resolve เพื่อพิสูจน์ว่า
+    ด่านกันในตัวมันเอง (เช็ค model == NO_SUMMARY_MODEL ก่อนเรียก resolve) เป็นสิ่งที่
+    ทำให้ไม่มี network call เกิดขึ้นจริง ไม่ใช่แค่เชื่อว่ามันน่าจะกันไว้แล้ว
+    """
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(config.inbox_dir, "weekly-standup", NO_SUMMARY_MODEL)
+
+    with (
+        _two_speaker_diarization_patched(),
+        patch("src.speaker_guess.resolve") as resolve_mock,
+        patch("src.pipeline.summarize_transcript") as summarize_mock,
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    resolve_mock.assert_not_called()
+    summarize_mock.assert_not_called()
+    speakers = load_all_pending(tmp_path)[0]["speakers"]
+    assert [entry["label"] for entry in speakers] == ["ผู้พูด 1", "ผู้พูด 2"]
