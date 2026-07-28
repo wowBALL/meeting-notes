@@ -19,6 +19,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from src import activity, pending, speakers
 from src.messages import render
 from src.record import run_recording
+from src.storage import rename_speaker_in_transcript, safe_meeting_dir
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,56 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             return jsonify({"error": "not_found"}), 404
         speakers.save_registry(config.base_dir, remaining)
         return jsonify({"ok": True})
+
+    @app.post("/api/speakers/confirm")
+    def confirm_speaker():
+        """ตั้งชื่อผู้พูดหนึ่งคน หรือข้ามไป
+
+        ลำดับสำคัญ: อ่านข้อมูลมาตรวจให้ผ่านและบันทึกทะเบียนให้สำเร็จก่อน ค่อยตัดคนนั้น
+        ออกจากคิว -- ตัดออกก่อนแล้วบันทึกพลาดคือการทำให้ผู้ใช้เสียทั้งชื่อที่เพิ่งพิมพ์
+        และรายการที่จะกลับมาพิมพ์ใหม่
+        """
+        payload = request.get_json(silent=True) or {}
+        meeting = payload.get("meeting")
+        label = payload.get("label")
+        if not isinstance(meeting, str) or not isinstance(label, str) or not label:
+            return jsonify({"error": "bad_request"}), 400
+
+        entry = pending.find_pending(config.base_dir, meeting, label)
+        if entry is None:
+            return jsonify({"error": "not_found"}), 404
+
+        if payload.get("skip"):
+            pending.resolve_pending(config.base_dir, meeting, label)
+            return jsonify({"ok": True, "renamed": False, "name": None})
+
+        registry = speakers.load_registry(config.base_dir)
+        name = payload.get("name")
+        speaker_id = payload.get("speaker_id")
+        if isinstance(speaker_id, str) and speaker_id:
+            existing = next((s for s in registry if s["id"] == speaker_id), None)
+            if existing is None:
+                return jsonify({"error": "unknown_speaker"}), 404
+            name = existing["name"]
+        if not isinstance(name, str) or not speakers.clean_name(name):
+            return jsonify({"error": "bad_name"}), 400
+        cleaned = speakers.clean_name(name)
+
+        speakers.save_registry(
+            config.base_dir,
+            speakers.add_sample(registry, cleaned, entry["embedding"], source=meeting),
+        )
+
+        # การแก้ไฟล์เก่าเป็นของแถม ทะเบียนคือของจริงเพราะมันไปออกดอกที่การประชุม
+        # ครั้งหน้า -- โฟลเดอร์ที่ผู้ใช้ย้ายไปแล้วจึงต้องไม่ทำให้คำขอนี้ล้มเหลว
+        meeting_dir = safe_meeting_dir(config.meetings_dir, meeting)
+        renamed = (
+            rename_speaker_in_transcript(meeting_dir, label, cleaned)
+            if meeting_dir is not None
+            else False
+        )
+        pending.resolve_pending(config.base_dir, meeting, label)
+        return jsonify({"ok": True, "renamed": renamed, "name": cleaned})
 
     @app.get("/<path:filename>")
     def static_file(filename):

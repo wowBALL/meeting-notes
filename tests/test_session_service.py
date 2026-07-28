@@ -287,3 +287,125 @@ def test_deleting_a_speaker_removes_them_from_the_registry(client, config):
 
 def test_deleting_an_unknown_speaker_is_a_404(client):
     assert client.delete("/api/speakers/ไม่มีจริง").status_code == 404
+
+
+def _saved_transcript_for(config, meeting):
+    meeting_dir = config.meetings_dir / meeting
+    meeting_dir.mkdir(parents=True, exist_ok=True)
+    (meeting_dir / "transcript.md").write_text(
+        "# Transcript\n\n"
+        "**ผู้พูด 1** [00:00]: สวัสดีครับ ผมขอเริ่มเลย\n\n"
+        "**ผู้พูด 2** [00:30]: ครับผม ผมเห็นด้วย\n",
+        encoding="utf-8",
+    )
+    return meeting_dir
+
+
+def test_confirming_a_name_registers_the_voice_and_rewrites_the_transcript(client, config):
+    meeting = _queue_two_speakers(config)
+    meeting_dir = _saved_transcript_for(config, meeting)
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "พี่เอ็ม"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "renamed": True, "name": "พี่เอ็ม"}
+    registry = load_registry(config.base_dir)
+    assert registry[0]["name"] == "พี่เอ็ม"
+    assert registry[0]["samples"][0]["embedding"] == [0.0, 1.0]
+    assert registry[0]["samples"][0]["source"] == meeting
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "**พี่เอ็ม** [00:30]: ครับผม ผมเห็นด้วย" in transcript
+    assert "**ผู้พูด 1** [00:00]" in transcript
+
+
+def test_confirming_a_name_takes_that_speaker_out_of_the_queue(client, config):
+    meeting = _queue_two_speakers(config)
+    _saved_transcript_for(config, meeting)
+
+    client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "พี่เอ็ม"},
+    )
+
+    body = client.get("/api/speakers/pending").get_json()
+    assert [s["label"] for s in body["meetings"][0]["speakers"]] == ["ผู้พูด 1"]
+
+
+def test_confirming_an_existing_person_by_id_adds_a_second_sample(client, config):
+    registry = add_sample([], "พี่เอ็ม", [0.9, 0.1], source="เมื่อวาน")
+    save_registry(config.base_dir, registry)
+    meeting = _queue_two_speakers(config)
+    _saved_transcript_for(config, meeting)
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 2", "speaker_id": registry[0]["id"]},
+    )
+
+    assert response.status_code == 200
+    updated = load_registry(config.base_dir)
+    assert len(updated) == 1
+    assert len(updated[0]["samples"]) == 2
+
+
+def test_skipping_a_speaker_removes_them_without_touching_the_registry(client, config):
+    meeting = _queue_two_speakers(config)
+    _saved_transcript_for(config, meeting)
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 2", "skip": True},
+    )
+
+    assert response.status_code == 200
+    assert load_registry(config.base_dir) == []
+    body = client.get("/api/speakers/pending").get_json()
+    assert [s["label"] for s in body["meetings"][0]["speakers"]] == ["ผู้พูด 1"]
+
+
+def test_confirming_still_registers_the_voice_when_the_meeting_folder_is_gone(client, config):
+    # meetings/ เป็นของผู้ใช้ เขาย้ายโฟลเดอร์ไปแล้วได้ -- สิ่งที่มีค่าคือทะเบียน
+    # เพราะมันไปออกดอกที่การประชุมครั้งหน้า ไม่ใช่การแก้ไฟล์เก่า
+    meeting = _queue_two_speakers(config)
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "พี่เอ็ม"},
+    )
+
+    assert response.get_json() == {"ok": True, "renamed": False, "name": "พี่เอ็ม"}
+    assert load_registry(config.base_dir)[0]["name"] == "พี่เอ็ม"
+
+
+def test_confirming_an_empty_name_is_rejected_and_keeps_the_queue_intact(client, config):
+    meeting = _queue_two_speakers(config)
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "  **  "},
+    )
+
+    assert response.status_code == 400
+    assert load_registry(config.base_dir) == []
+    body = client.get("/api/speakers/pending").get_json()
+    assert len(body["meetings"][0]["speakers"]) == 2
+
+
+def test_confirming_an_unknown_meeting_or_label_is_a_404(client, config):
+    _queue_two_speakers(config)
+
+    assert client.post(
+        "/api/speakers/confirm", json={"meeting": "ไม่มีจริง", "label": "ผู้พูด 1", "name": "ก"}
+    ).status_code == 404
+    assert client.post(
+        "/api/speakers/confirm",
+        json={"meeting": "2026-07-28_10-30-standup", "label": "ผู้พูด 9", "name": "ก"},
+    ).status_code == 404
+
+
+def test_confirming_without_the_required_fields_is_a_400(client):
+    assert client.post("/api/speakers/confirm", json={}).status_code == 400
+    assert client.post("/api/speakers/confirm", json={"meeting": "m"}).status_code == 400
