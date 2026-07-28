@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from src.pending import (
     build_pending_speakers,
@@ -84,6 +85,12 @@ def test_build_pending_speakers_keeps_the_longest_lines_as_samples():
 
     samples = result[0]["samples"]
     assert len(samples) == 3
+    # ต้องแยกให้ออกระหว่าง "ยาวสุด 3 อัน" กับ "3 อันแรกตามเวลา" -- ทั้งสองแบบให้
+    # ผลลัพธ์ 3 อันที่เรียงตามเวลาและมีประโยคยาวสุดอยู่ด้วยเหมือนกัน ต่างกันแค่ตรงนี้:
+    # "สั้น" สั้นที่สุดจึงต้องถูกคัดออก และ "อีกอัน" ยาวกว่าจึงต้องอยู่
+    texts = [sample["text"] for sample in samples]
+    assert "สั้น" not in texts
+    assert "อีกอัน" in texts
     # เรียงตามเวลาเพื่อให้ผู้อ่านตามบทสนทนาได้ ไม่ใช่เรียงตามความยาว
     assert [sample["start"] for sample in samples] == sorted(sample["start"] for sample in samples)
     assert any("ยาวที่สุด" in sample["text"] for sample in samples)
@@ -159,3 +166,18 @@ def test_resolve_pending_deletes_the_file_once_everyone_is_named(tmp_path):
 
 def test_resolve_pending_returns_false_when_there_is_nothing_to_remove(tmp_path):
     assert resolve_pending(tmp_path, "ไม่มีจริง", "ผู้พูด 1") is False
+
+
+def test_resolve_pending_survives_a_delete_that_fails_on_the_last_speaker(tmp_path, monkeypatch):
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    resolve_pending(tmp_path, "m1", "ผู้พูด 1")
+
+    def failing_unlink(self, *args, **kwargs):
+        raise PermissionError("file still held open")
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    assert resolve_pending(tmp_path, "m1", "ผู้พูด 2") is True
+    # แม้ unlink ล้มเหลว ไฟล์ต้องถูกเขียนทับด้วยรายการว่าง ผู้พูดที่เพิ่งตั้งชื่อไปแล้ว
+    # ต้องไม่โผล่กลับมาในคิวอีก
+    assert load_all_pending(tmp_path) == []

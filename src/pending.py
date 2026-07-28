@@ -150,6 +150,11 @@ def _read_pending_file(path: Path) -> dict | None:
         return None
     if not isinstance(parsed, dict) or not isinstance(parsed.get("speakers"), list):
         return None
+    # รายการที่ไม่เหลือใครแล้วถือว่าไม่มีอยู่ ไฟล์แบบนี้เกิดได้เมื่อ resolve_pending
+    # ลบไฟล์ไม่สำเร็จแล้วเขียนทับด้วยรายการว่างแทน -- ถ้าไม่ข้ามตรงนี้ หน้าเว็บจะขึ้น
+    # การประชุมที่ "รอทำอะไรบางอย่าง" ทั้งที่ไม่มีอะไรให้ทำ
+    if not parsed["speakers"]:
+        return None
     return parsed
 
 
@@ -203,7 +208,22 @@ def resolve_pending(base_dir: Path, meeting_name: str, label: str) -> bool:
         try:
             path.unlink()
         except OSError as e:
+            # ลบไฟล์ไม่สำเร็จแล้วตอบ True ทั้งที่ไฟล์เดิมยังมีชื่อคนนี้อยู่ครบ = โกหกผู้เรียก
+            # และผู้ใช้จะเห็นคนที่เพิ่งตั้งชื่อไปแล้วโผล่ในคิวอีกรอบ Windows บนเครื่องนี้
+            # จับไฟล์ที่เพิ่งเขียนค้างได้จริง (วัดมาแล้ว) จึงต้องมีทางถอย: เขียนทับด้วย
+            # รายการว่าง เนื้อหาบนดิสก์จะได้ตรงกับความจริง แล้ว _read_pending_file
+            # ข้ามไฟล์ที่ไม่เหลือใครให้เอง
             logger.warning("ลบรายการรอตั้งชื่อที่ทำครบแล้วไม่ได้ (%s): %s", path.name, e)
+            parsed["speakers"] = []
+            try:
+                path.write_text(
+                    json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except OSError as write_error:
+                logger.warning(
+                    "เขียนทับรายการรอตั้งชื่อก็ไม่ได้ (%s): %s", path.name, write_error
+                )
+                return False
         return True
     parsed["speakers"] = remaining
     path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
