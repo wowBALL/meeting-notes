@@ -202,6 +202,32 @@ def test_match_known_skips_unusable_embeddings_on_both_sides():
     assert match_known({}, [_person("พี่เอ็ม", [[1.0, 0.0]])], high=0.7, low=0.5) == {}
 
 
+def test_match_known_returns_nothing_for_an_empty_registry():
+    assert match_known({"SPEAKER_00": [1.0, 0.0]}, [], high=0.7, low=0.5) == {}
+
+
+def test_match_known_ignores_a_person_with_no_samples():
+    registry = [_person("พี่เอ็ม", [])]
+
+    assert match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5) == {}
+
+
+def test_match_known_breaks_a_tie_in_favour_of_whoever_is_first_in_the_registry():
+    # ทั้งสองคนได้ cosine เท่ากันเป๊ะกับผู้พูดคนนี้ -- เงื่อนไข `score > best.score`
+    # ใน match_known เป็น strict greater-than จึงไม่แทนที่ best เมื่อคะแนนเท่ากัน
+    # กติกาคือ "ใครมาก่อนในทะเบียนชนะ" ถ้าวันหนึ่งเปลี่ยนเป็น `>=` พฤติกรรมนี้จะกลับกัน
+    # และเทสต์นี้ต้องจับได้
+    registry = [
+        _person("พี่เอ็ม", [[1.0, 0.0]], speaker_id="id-1"),
+        _person("พี่บี", [[1.0, 0.0]], speaker_id="id-2"),
+    ]
+
+    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5)
+
+    assert matches["SPEAKER_00"].speaker_id == "id-1"
+    assert matches["SPEAKER_00"].name == "พี่เอ็ม"
+
+
 def test_add_sample_creates_a_new_person_with_an_id():
     updated = add_sample([], "พี่เอ็ม", [1.0, 0.0], source="m1", today=date(2026, 7, 28))
 

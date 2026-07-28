@@ -102,8 +102,9 @@ def is_usable_embedding(vector) -> bool:
     """เวกเตอร์ที่เอาไปเทียบหรือเก็บเข้าทะเบียนได้จริง
 
     pyannote pad ศูนย์เข้ามาเมื่อจำนวน label มากกว่าจำนวน centroid (ดู
-    speaker_diarization.py บรรทัด ~765) เวกเตอร์ศูนย์ล้วนไม่มีทิศทาง cosine จึงไม่
-    นิยาม และถ้าปล่อยเข้าทะเบียนมันจะ "เหมือน" กับเวกเตอร์ศูนย์อื่นทุกตัว
+    pyannote/audio/pipelines/speaker_diarization.py ของไลบรารี บรรทัด ~765) เวกเตอร์
+    ศูนย์ล้วนไม่มีทิศทาง cosine จึงไม่นิยาม และถ้าปล่อยเข้าทะเบียนมันจะ "เหมือน" กับ
+    เวกเตอร์ศูนย์อื่นทุกตัว
     """
     if not isinstance(vector, list) or not vector:
         return False

@@ -59,10 +59,10 @@ def _speaker_embeddings(result: Any, diarization: Any) -> dict[str, list[float]]
     อ่านไม่ออกแปลว่าการประชุมนี้จำเสียงไม่ได้ ซึ่งยอมเสียได้ ต่างจากการแยกผู้พูด
     ที่ยังต้องได้ผลตามปกติ จึงกลืน exception ไว้ที่นี่แทนที่จะปล่อยขึ้นไป
     """
-    embeddings = getattr(result, "speaker_embeddings", None)
-    if embeddings is None:
-        return {}
     try:
+        embeddings = getattr(result, "speaker_embeddings", None)
+        if embeddings is None:
+            return {}
         labels = list(diarization.labels())
         return {
             label: [float(value) for value in embeddings[index]]
@@ -74,7 +74,10 @@ def _speaker_embeddings(result: Any, diarization: Any) -> dict[str, list[float]]
         # เพราะ diarize_audio สร้าง turns เสร็จแล้วก่อนเรียกมัน และ exception ที่
         # หลุดออกไปจะไปโดน except ของ pipeline ซึ่งเซ็ต speaker_turns = [] --
         # ความล้มเหลวของ "การจำเสียง" จะไปทำลาย "การแยกผู้พูด" ของประชุมที่อัดซ้ำ
-        # ไม่ได้ ซึ่งเป็นความไม่สมมาตรที่ทั้ง spec และ docstring ข้างบนห้ามไว้
+        # ไม่ได้ ซึ่งเป็นความไม่สมมาตรที่ทั้ง spec และ docstring ข้างบนห้ามไว้ --
+        # getattr(..., None) เองก็อยู่ในนี้ด้วย เพราะ default ของมันกันแค่
+        # AttributeError จากการหา attribute เท่านั้น ถ้า speaker_embeddings เคย
+        # กลายเป็น property ที่ raise อย่างอื่น มันต้องโดนกลืนที่นี่เหมือนกัน
         logger.warning("อ่าน speaker embeddings ไม่ได้ ไปต่อโดยไม่จำเสียง: %s", e)
         return {}
 
