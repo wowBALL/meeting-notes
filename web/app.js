@@ -43,6 +43,7 @@ const UI = {
     spkSec: "วินาที",
     spkGuess: "โมเดลเดาว่า",
     spkNear: "เสียงใกล้เคียงกับ",
+    spkConfirmError: "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง",
     models: [
       ["GLM-5.2", "GLM 5.2", "ข้อมูลไม่ออกนอกบริษัท · ช้ากว่า"],
       ["claude-opus-5", "Opus 5", "แม่นสุด · $5/$25 ต่อ MTok"],
@@ -88,6 +89,7 @@ const UI = {
     spkSec: "sec",
     spkGuess: "the model guessed",
     spkNear: "voice is close to",
+    spkConfirmError: "Could not save. Try again.",
     models: [
       ["GLM-5.2", "GLM 5.2", "Stays in-house · slower"],
       ["claude-opus-5", "Opus 5", "Most accurate · $5/$25 per MTok"],
@@ -131,6 +133,10 @@ let pendingSignalJob = null;
 // ช่องชื่อที่พิมพ์ค้างไว้ เก็บนอก DOM ด้วยเหตุผลเดียวกับ roomDraft: การวาดใหม่
 // ทั้งก้อนจะดีดสิ่งที่พิมพ์ไปแล้วทิ้ง
 const nameDrafts = {};
+// ผู้พูดที่กด save/skip แล้วเซิร์ฟเวอร์ตอบไม่ใช่ 2xx -- เก็บ key ไว้เพื่อขึ้นบรรทัด
+// เตือนสั้น ๆ ที่การ์ดนั้น ไม่ใช่ป้ายรวมของทั้งหน้า เพราะสาเหตุ (400/404/500) ผูกกับ
+// ผู้พูดคนนั้นคนเดียว ไม่ใช่ทั้งหน้าจอ
+const speakerErrors = {};
 let audioEl = null;
 let playingKey = null;
 
@@ -196,6 +202,9 @@ function pendingHtml() {
             ? `<div class="hint">${esc(x.spkNear)} “${esc(speaker.suggested.name)}”</div>`
             : "";
           const playing = playingKey === key;
+          const error = speakerErrors[key]
+            ? `<div class="note warn">⚠ ${esc(x.spkConfirmError)}</div>`
+            : "";
           return `<div class="spk" data-key="${esc(key)}">
             <div class="who">${esc(speaker.label)}</div>
             <div class="meta">${esc(meeting.meeting_dir)} · ${esc(x.spkSpoke)} ${esc(
@@ -212,6 +221,7 @@ function pendingHtml() {
               <button class="plain" data-save="${esc(key)}">${esc(x.spkSave)}</button>
               <button class="plain" data-skip="${esc(key)}">${esc(x.spkSkip)}</button>
             </div>
+            ${error}
           </div>`;
         })
         .join("")
@@ -314,15 +324,24 @@ async function confirmSpeaker(key, skip) {
     payload.name = name;
   }
   try {
-    await fetch("/api/speakers/confirm", {
+    const response = await fetch("/api/speakers/confirm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (!response.ok) {
+      // เซิร์ฟเวอร์แยกสาเหตุไว้แล้ว (400 ชื่อไม่ผ่าน, 404 รายการหลุดคิวไปแล้ว,
+      // 500 ตัดคิวไม่สำเร็จ) แต่การ์ดนี้ไม่ใช่ที่สำหรับอธิบายละเอียด -- ขึ้นบรรทัด
+      // เตือนสั้น ๆ พอ แล้วคงชื่อที่พิมพ์ค้างไว้ให้กดลองใหม่ได้ ไม่ล้างคิวทิ้ง
+      speakerErrors[key] = true;
+      render(lastState);
+      return;
+    }
   } catch (e) {
     offline = true;
   }
   delete nameDrafts[key];
+  delete speakerErrors[key];
   stopPlayback();
   await refreshPending();
 }
@@ -438,6 +457,7 @@ function signatureOf(state, view, progress) {
     stopping,
     progress ? `${progress.stage}:${progress.failed}` : "",
     pendingMeetings.map((m) => `${m.meeting_dir}:${m.speakers.length}`).join(","),
+    Object.keys(speakerErrors).join(","),
     playingKey,
     (state.warnings || []).map((w) => w.code).join(","),
   ].join("|");
