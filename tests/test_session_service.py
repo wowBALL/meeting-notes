@@ -409,3 +409,38 @@ def test_confirming_an_unknown_meeting_or_label_is_a_404(client, config):
 def test_confirming_without_the_required_fields_is_a_400(client):
     assert client.post("/api/speakers/confirm", json={}).status_code == 400
     assert client.post("/api/speakers/confirm", json={"meeting": "m"}).status_code == 400
+
+
+def test_confirming_a_name_still_succeeds_when_the_dequeue_fails(client, config, monkeypatch):
+    # ทะเบียนถูกเซฟไปแล้วก่อนตัดคิว -- เสียงถูกจำแล้วจริง ตัดคิวไม่สำเร็จจึงต้องไม่
+    # กลายเป็น 500 ที่บอกผู้ใช้ว่าล้มเหลวทั้งที่งานหลักทำสำเร็จไปแล้ว
+    meeting = _queue_two_speakers(config)
+    _saved_transcript_for(config, meeting)
+    monkeypatch.setattr("src.session_service.pending.resolve_pending", lambda *a, **k: False)
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "พี่เอ็ม"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "renamed": True, "name": "พี่เอ็ม"}
+    assert load_registry(config.base_dir)[0]["name"] == "พี่เอ็ม"
+
+
+def test_skipping_when_the_dequeue_fails_is_a_500_and_the_registry_stays_empty(
+    client, config, monkeypatch
+):
+    # ทางข้ามไม่ได้ทำอะไรอย่างอื่นเลย ถ้าตัดคิวไม่สำเร็จก็แปลว่าไม่มีอะไรเกิดขึ้นจริง
+    # การตอบ ok จึงเป็นการโกหก
+    meeting = _queue_two_speakers(config)
+    _saved_transcript_for(config, meeting)
+    monkeypatch.setattr("src.session_service.pending.resolve_pending", lambda *a, **k: False)
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "ผู้พูด 2", "skip": True},
+    )
+
+    assert response.status_code == 500
+    assert load_registry(config.base_dir) == []

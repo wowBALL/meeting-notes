@@ -226,5 +226,12 @@ def resolve_pending(base_dir: Path, meeting_name: str, label: str) -> bool:
                 return False
         return True
     parsed["speakers"] = remaining
-    path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        # กิ่งนี้เป็นกรณีที่พบบ่อยที่สุด (ตั้งชื่อทีละคนจากหลายคน) แต่เดิมไม่มี try เลย
+        # ทั้งที่กิ่ง unlink ข้างบนมี -- ผู้เรียกเซฟทะเบียนสำเร็จไปแล้วก่อนถึงตรงนี้
+        # exception ที่หลุดออกไปจึงกลายเป็น HTTP 500 ทั้งที่เสียงถูกจำไปเรียบร้อย
+        logger.warning("ตัดผู้พูดออกจากรายการรอตั้งชื่อไม่ได้ (%s): %s", path.name, e)
+        return False
     return True

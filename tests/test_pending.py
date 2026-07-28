@@ -181,3 +181,18 @@ def test_resolve_pending_survives_a_delete_that_fails_on_the_last_speaker(tmp_pa
     # แม้ unlink ล้มเหลว ไฟล์ต้องถูกเขียนทับด้วยรายการว่าง ผู้พูดที่เพิ่งตั้งชื่อไปแล้ว
     # ต้องไม่โผล่กลับมาในคิวอีก
     assert load_all_pending(tmp_path) == []
+
+
+def test_resolve_pending_returns_false_when_the_trimmed_rewrite_fails(tmp_path, monkeypatch):
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+
+    def failing_write_text(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+
+    # ยังเหลือ "ผู้พูด 2" อยู่ ไม่เข้ากิ่ง unlink -- เป็นกิ่งเขียนทับที่ไม่มี try
+    assert resolve_pending(tmp_path, "m1", "ผู้พูด 1") is False
+    # เขียนพลาดต้องไม่ทำให้ผู้พูดที่ยังไม่ถูกตัดหายไปจากคิว
+    remaining = load_all_pending(tmp_path)
+    assert [entry["label"] for entry in remaining[0]["speakers"]] == ["ผู้พูด 1", "ผู้พูด 2"]

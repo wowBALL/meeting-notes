@@ -243,8 +243,11 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         if entry is None:
             return jsonify({"error": "not_found"}), 404
 
-        if payload.get("skip"):
-            pending.resolve_pending(config.base_dir, meeting, label)
+        if payload.get("skip") is True:
+            # ทางนี้ไม่ได้ทำอะไรอย่างอื่นเลย ถ้าตัดคิวไม่สำเร็จก็แปลว่าไม่มีอะไรเกิดขึ้น
+            # จริง ๆ การตอบ ok จึงเป็นการโกหก
+            if not pending.resolve_pending(config.base_dir, meeting, label):
+                return jsonify({"error": "resolve_failed"}), 500
             return jsonify({"ok": True, "renamed": False, "name": None})
 
         registry = speakers.load_registry(config.base_dir)
@@ -272,7 +275,14 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             if meeting_dir is not None
             else False
         )
-        pending.resolve_pending(config.base_dir, meeting, label)
+        # ทะเบียนถูกเซฟไปแล้วตรงนี้ = เสียงถูกจำแล้วจริง การตัดคิวไม่สำเร็จจึงต้องไม่
+        # กลายเป็น 500 ที่บอกผู้ใช้ว่าล้มเหลว เพราะเขาจะพิมพ์ใหม่ และถ้าพิมพ์ชื่อไม่
+        # เหมือนเดิมจะได้คนซ้ำในทะเบียนสำหรับเสียงเดียวกัน ปล่อยให้รายการค้างไว้แล้ว
+        # โผล่ในหน้าเว็บรอบหน้าดีกว่า -- ผู้ใช้กดข้ามได้ และเสียงก็จำไปแล้ว
+        if not pending.resolve_pending(config.base_dir, meeting, label):
+            logger.warning(
+                "จำเสียง %s สำเร็จแล้วแต่ตัดออกจากคิวไม่ได้ (%s/%s)", cleaned, meeting, label
+            )
         return jsonify({"ok": True, "renamed": renamed, "name": cleaned})
 
     @app.get("/<path:filename>")
