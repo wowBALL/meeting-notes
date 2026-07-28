@@ -2,7 +2,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.diarize import diarize_audio, load_diarization_pipeline
+from src.diarize import DiarizationResult, diarize_audio, load_diarization_pipeline
 
 
 def _fake_pyannote(mock_pipeline_cls):
@@ -27,7 +27,7 @@ class FakeTurn:
         self.end = end
 
 
-def test_diarize_audio_extracts_speaker_turns(tmp_path):
+def test_diarize_audio_extracts_speaker_turns_and_embeddings(tmp_path):
     audio_path = tmp_path / "sample.mp3"
     audio_path.write_bytes(b"fake audio data")
 
@@ -36,17 +36,81 @@ def test_diarize_audio_extracts_speaker_turns(tmp_path):
         (FakeTurn(0.0, 3.0), None, "SPEAKER_00"),
         (FakeTurn(3.0, 6.0), None, "SPEAKER_01"),
     ]
-    fake_output = MagicMock(speaker_diarization=fake_diarization)
+    fake_diarization.labels.return_value = ["SPEAKER_00", "SPEAKER_01"]
+    fake_output = MagicMock(
+        speaker_diarization=fake_diarization,
+        speaker_embeddings=[[1.0, 0.0], [0.0, 1.0]],
+    )
     mock_pipeline = MagicMock(return_value=fake_output)
 
     result = diarize_audio(audio_path, hf_token="test-token", pipeline=mock_pipeline)
 
-    assert result == [
-        {"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"},
-        {"start": 3.0, "end": 6.0, "speaker": "SPEAKER_01"},
-    ]
+    assert result == DiarizationResult(
+        turns=[
+            {"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"},
+            {"start": 3.0, "end": 6.0, "speaker": "SPEAKER_01"},
+        ],
+        embeddings={"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]},
+    )
     mock_pipeline.assert_called_once_with(str(audio_path))
     fake_diarization.itertracks.assert_called_once_with(yield_label=True)
+
+
+def test_diarize_audio_keys_embeddings_by_label_not_by_position(tmp_path):
+    # pyannote บอกไว้เองว่า array เรียงตาม diarization.labels() ไม่ใช่ตามลำดับที่
+    # ผู้พูดโผล่ใน itertracks -- ผูกผิดหนึ่งตำแหน่งแปลว่าลงทะเบียนเสียงผิดคน
+    audio_path = tmp_path / "sample.mp3"
+    audio_path.write_bytes(b"fake audio data")
+
+    fake_diarization = MagicMock()
+    fake_diarization.itertracks.return_value = [
+        (FakeTurn(0.0, 3.0), None, "SPEAKER_01"),
+        (FakeTurn(3.0, 6.0), None, "SPEAKER_00"),
+    ]
+    fake_diarization.labels.return_value = ["SPEAKER_00", "SPEAKER_01"]
+    fake_output = MagicMock(
+        speaker_diarization=fake_diarization,
+        speaker_embeddings=[[1.0, 0.0], [0.0, 1.0]],
+    )
+
+    result = diarize_audio(audio_path, hf_token="t", pipeline=MagicMock(return_value=fake_output))
+
+    assert result.embeddings == {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]}
+
+
+def test_diarize_audio_returns_no_embeddings_when_pyannote_gives_none(tmp_path):
+    # เกิดขึ้นจริงกับ OracleClustering (ไลบรารี pyannote/audio/pipelines/
+    # speaker_diarization.py ~บรรทัด 745)
+    audio_path = tmp_path / "sample.mp3"
+    audio_path.write_bytes(b"fake audio data")
+
+    fake_diarization = MagicMock()
+    fake_diarization.itertracks.return_value = [(FakeTurn(0.0, 3.0), None, "SPEAKER_00")]
+    fake_diarization.labels.return_value = ["SPEAKER_00"]
+    fake_output = MagicMock(speaker_diarization=fake_diarization, speaker_embeddings=None)
+
+    result = diarize_audio(audio_path, hf_token="t", pipeline=MagicMock(return_value=fake_output))
+
+    assert result.turns == [{"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"}]
+    assert result.embeddings == {}
+
+
+def test_diarize_audio_survives_an_unreadable_embedding_array(tmp_path):
+    audio_path = tmp_path / "sample.mp3"
+    audio_path.write_bytes(b"fake audio data")
+
+    fake_diarization = MagicMock()
+    fake_diarization.itertracks.return_value = [(FakeTurn(0.0, 3.0), None, "SPEAKER_00")]
+    fake_diarization.labels.return_value = ["SPEAKER_00"]
+    fake_output = MagicMock(
+        speaker_diarization=fake_diarization, speaker_embeddings="ไม่ใช่ array"
+    )
+
+    result = diarize_audio(audio_path, hf_token="t", pipeline=MagicMock(return_value=fake_output))
+
+    # การจำเสียงหายไป แต่การแยกผู้พูดยังทำงาน -- นี่คือสิ่งที่ยอมเสียได้
+    assert result.turns == [{"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"}]
+    assert result.embeddings == {}
 
 
 def test_load_diarization_pipeline_moves_to_gpu_when_available():
@@ -111,6 +175,7 @@ def test_diarize_audio_loads_pipeline_via_helper_when_none_given(tmp_path):
 
     fake_diarization = MagicMock()
     fake_diarization.itertracks.return_value = []
+    fake_diarization.labels.return_value = []
     loaded = MagicMock(return_value=MagicMock(speaker_diarization=fake_diarization))
 
     with patch(

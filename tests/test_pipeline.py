@@ -14,6 +14,7 @@ from src.job import (
     record_transcript,
     write_job,
 )
+from src.diarize import DiarizationResult
 from src.llm import UnknownModelError
 from src.pipeline import process_file
 from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, session_dir_for, write_manifest
@@ -21,6 +22,11 @@ from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, se
 # See tests/test_segments.py: finish_session decides which parts are "real" by
 # size on disk, so a fixture part must be comfortably larger than the allowance.
 _FAKE_WAV_BYTES = b"fake wav bytes " * (WAV_HEADER_ALLOWANCE // 16 + 2)
+
+
+def _diarization(turns=None, embeddings=None) -> DiarizationResult:
+    """ผลแยกผู้พูดปลอมในรูปที่ diarize_audio ของจริงคืนมา"""
+    return DiarizationResult(turns=turns or [], embeddings=embeddings or {})
 
 
 def make_config(tmp_path: Path) -> Config:
@@ -53,7 +59,7 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch(
             "src.pipeline.summarize_transcript",
@@ -145,7 +151,7 @@ def test_process_file_moves_to_failed_when_summarization_fails(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch(
             "src.pipeline.summarize_transcript",
@@ -181,7 +187,7 @@ def test_process_file_moves_to_failed_when_the_configured_model_is_not_registere
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         pytest.raises(UnknownModelError),
     ):
         process_file(audio_path, config)
@@ -207,7 +213,7 @@ def test_process_file_keeps_the_transcript_when_summarization_fails(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch(
             "src.pipeline.summarize_transcript",
@@ -245,7 +251,7 @@ def test_process_file_does_not_retry_summarization_itself(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", mock_summarize),
         patch("time.sleep"),
@@ -272,7 +278,7 @@ def test_process_file_moves_to_failed_when_rendering_fails(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch(
             "src.pipeline.render_transcript_markdown",
@@ -302,7 +308,7 @@ def test_process_file_moves_to_failed_when_save_fails(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
         patch("src.pipeline.save_summary", side_effect=OSError("disk full")),
@@ -345,7 +351,7 @@ def test_process_file_threads_diarization_pipeline_to_diarize_audio(tmp_path):
 
     sentinel_pipeline = object()
     mock_diarize = MagicMock(
-        return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]
+        return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}])
     )
 
     with (
@@ -378,7 +384,7 @@ def test_process_file_threads_whisper_model_to_transcribe_audio(tmp_path):
         patch("src.pipeline.transcribe_audio", mock_transcribe),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
@@ -402,7 +408,7 @@ def test_process_file_uses_the_model_from_the_job_file(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         process_file(audio_path, config)
@@ -423,7 +429,7 @@ def test_process_file_falls_back_to_the_config_model_without_a_job_file(tmp_path
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         process_file(audio_path, config)
@@ -446,7 +452,7 @@ def test_summarize_is_called_without_an_api_key(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         process_file(audio_path, config)
@@ -470,7 +476,7 @@ def test_process_file_falls_back_when_the_job_file_is_corrupt(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -492,7 +498,7 @@ def test_process_file_removes_the_job_file_when_it_succeeds(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
         process_file(audio_path, config)
@@ -513,7 +519,7 @@ def test_process_file_sends_the_job_file_to_failed_when_summarizing_fails(tmp_pa
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", side_effect=RuntimeError("boom")),
         pytest.raises(RuntimeError),
     ):
@@ -564,7 +570,7 @@ def test_the_recorded_model_choice_survives_from_manifest_to_summary(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
@@ -630,7 +636,7 @@ def test_process_file_transcribes_again_when_the_saved_transcript_is_gone(tmp_pa
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "ถอดใหม่"}],
         ) as transcribe,
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", return_value="## ประเด็นสำคัญ"),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -651,7 +657,7 @@ def test_process_file_records_the_transcript_path_for_a_later_retry(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch(
             "src.pipeline.summarize_transcript",
             side_effect=RuntimeError("เครดิตไม่พอ"),
@@ -682,7 +688,7 @@ def test_process_file_skips_summarizing_in_transcript_only_mode(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -766,7 +772,7 @@ def test_transcript_only_survives_from_the_manifest_to_the_meeting_folder(tmp_pa
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -793,7 +799,7 @@ def test_transcript_only_can_come_from_the_config_default(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -825,7 +831,7 @@ def test_process_file_records_each_stage(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
@@ -857,7 +863,7 @@ def test_process_file_skips_the_summarize_event_in_transcript_only_mode(tmp_path
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
     ):
         process_file(audio_path, config)
@@ -879,7 +885,7 @@ def test_process_file_records_a_failure(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch(
             "src.pipeline.summarize_transcript",
             side_effect=RuntimeError("Claude ล่ม"),
@@ -909,7 +915,7 @@ def test_process_file_survives_an_activity_log_that_cannot_be_written(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
         meeting_dir = process_file(audio_path, config)

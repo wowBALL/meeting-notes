@@ -110,10 +110,13 @@ def process_file(
 
         activity.append(config.base_dir, job, "diarize_started")
         diarization_failed = False
+        embeddings: dict[str, list[float]] = {}
         try:
-            speaker_turns = diarize_audio(
+            diarization = diarize_audio(
                 wav_path, hf_token=config.hf_token, pipeline=diarization_pipeline
             )
+            speaker_turns = diarization.turns
+            embeddings = diarization.embeddings
         except Exception as e:
             logger.warning("Diarization failed, continuing without speaker labels: %s", e)
             activity.append(
