@@ -1,4 +1,5 @@
 import subprocess
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -21,6 +22,13 @@ from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, se
 # See tests/test_segments.py: finish_session decides which parts are "real" by
 # size on disk, so a fixture part must be comfortably larger than the allowance.
 _FAKE_WAV_BYTES = b"fake wav bytes " * (WAV_HEADER_ALLOWANCE // 16 + 2)
+
+from src.diarize import DiarizationResult
+
+
+def _diarization(turns=None, embeddings=None) -> DiarizationResult:
+    """ผลแยกผู้พูดปลอมในรูปที่ diarize_audio ของจริงคืนมา"""
+    return DiarizationResult(turns=turns or [], embeddings=embeddings or {})
 
 
 def make_config(tmp_path: Path) -> Config:
@@ -53,7 +61,7 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch(
             "src.pipeline.summarize_transcript",
@@ -145,7 +153,7 @@ def test_process_file_moves_to_failed_when_summarization_fails(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch(
             "src.pipeline.summarize_transcript",
@@ -181,7 +189,7 @@ def test_process_file_moves_to_failed_when_the_configured_model_is_not_registere
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         pytest.raises(UnknownModelError),
     ):
         process_file(audio_path, config)
@@ -207,7 +215,7 @@ def test_process_file_keeps_the_transcript_when_summarization_fails(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch(
             "src.pipeline.summarize_transcript",
@@ -245,7 +253,7 @@ def test_process_file_does_not_retry_summarization_itself(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", mock_summarize),
         patch("time.sleep"),
@@ -272,7 +280,7 @@ def test_process_file_moves_to_failed_when_rendering_fails(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch(
             "src.pipeline.render_transcript_markdown",
@@ -302,7 +310,7 @@ def test_process_file_moves_to_failed_when_save_fails(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
         patch("src.pipeline.save_summary", side_effect=OSError("disk full")),
@@ -345,7 +353,7 @@ def test_process_file_threads_diarization_pipeline_to_diarize_audio(tmp_path):
 
     sentinel_pipeline = object()
     mock_diarize = MagicMock(
-        return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]
+        return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}])
     )
 
     with (
@@ -378,7 +386,7 @@ def test_process_file_threads_whisper_model_to_transcribe_audio(tmp_path):
         patch("src.pipeline.transcribe_audio", mock_transcribe),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
@@ -402,7 +410,7 @@ def test_process_file_uses_the_model_from_the_job_file(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         process_file(audio_path, config)
@@ -423,7 +431,7 @@ def test_process_file_falls_back_to_the_config_model_without_a_job_file(tmp_path
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         process_file(audio_path, config)
@@ -446,7 +454,7 @@ def test_summarize_is_called_without_an_api_key(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         process_file(audio_path, config)
@@ -470,7 +478,7 @@ def test_process_file_falls_back_when_the_job_file_is_corrupt(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -492,7 +500,7 @@ def test_process_file_removes_the_job_file_when_it_succeeds(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
         process_file(audio_path, config)
@@ -513,7 +521,7 @@ def test_process_file_sends_the_job_file_to_failed_when_summarizing_fails(tmp_pa
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", side_effect=RuntimeError("boom")),
         pytest.raises(RuntimeError),
     ):
@@ -564,7 +572,7 @@ def test_the_recorded_model_choice_survives_from_manifest_to_summary(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
@@ -630,7 +638,7 @@ def test_process_file_transcribes_again_when_the_saved_transcript_is_gone(tmp_pa
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "ถอดใหม่"}],
         ) as transcribe,
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", return_value="## ประเด็นสำคัญ"),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -651,7 +659,7 @@ def test_process_file_records_the_transcript_path_for_a_later_retry(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch(
             "src.pipeline.summarize_transcript",
             side_effect=RuntimeError("เครดิตไม่พอ"),
@@ -682,7 +690,7 @@ def test_process_file_skips_summarizing_in_transcript_only_mode(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -766,7 +774,7 @@ def test_transcript_only_survives_from_the_manifest_to_the_meeting_folder(tmp_pa
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -793,7 +801,7 @@ def test_transcript_only_can_come_from_the_config_default(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", summarize),
     ):
         meeting_dir = process_file(audio_path, config)
@@ -811,6 +819,13 @@ def _stage_codes(config: Config) -> list[str]:
     return [e["code"] for e in tail(config.base_dir)]
 
 
+def _activity_events(config: Config, code: str) -> list[dict]:
+    """เหตุการณ์ทั้งหมดในบันทึกที่มี code ตรงกับที่ขอ พร้อม params/level ของมัน"""
+    from src.activity import tail
+
+    return [e for e in tail(config.base_dir) if e["code"] == code]
+
+
 def test_process_file_records_each_stage(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
@@ -825,7 +840,7 @@ def test_process_file_records_each_stage(tmp_path):
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
@@ -857,7 +872,7 @@ def test_process_file_skips_the_summarize_event_in_transcript_only_mode(tmp_path
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
     ):
         process_file(audio_path, config)
@@ -879,7 +894,7 @@ def test_process_file_records_a_failure(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch(
             "src.pipeline.summarize_transcript",
             side_effect=RuntimeError("Claude ล่ม"),
@@ -909,9 +924,355 @@ def test_process_file_survives_an_activity_log_that_cannot_be_written(tmp_path):
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
-        patch("src.pipeline.diarize_audio", return_value=[]),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
         meeting_dir = process_file(audio_path, config)
 
     assert (meeting_dir / "summary.md").exists()
+
+
+def _registry_with(tmp_path, name, embedding):
+    from src.speakers import add_sample, save_registry
+
+    save_registry(tmp_path, add_sample([], name, embedding, source="ก่อนหน้า"))
+
+
+def test_process_file_writes_a_known_speakers_real_name_into_the_transcript(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+                {"SPEAKER_00": [1.0, 0.0]},
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "**พี่เอ็ม** [00:00]: สวัสดีครับ" in transcript
+    assert "ผู้พูด 1" not in transcript
+
+    matched = _activity_events(config, "speakers_matched")
+    assert len(matched) == 1
+    assert matched[0]["params"] == {"count": 1}
+
+
+def test_process_file_only_counts_confident_matches_in_speakers_matched(tmp_path):
+    """recognized ใน speakers_matched ต้องนับเฉพาะคนที่ confident=True เท่านั้น
+
+    match_known คืนคนที่คะแนนอยู่แค่ระหว่าง low กับ high มาด้วย (แค่ข้อเสนอให้เลือก
+    ไม่ใช่คนที่ระบุตัวได้แน่นอน) ถ้า pipeline สลับไปนับ len(matches) แทน เทสต์นี้
+    ต้องพังเพราะจะรายงาน 2 คนทั้งที่มั่นใจแค่คนเดียว
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"},
+                {"start": 2.0, "end": 4.0, "text": "สวัสดีค่ะ"},
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [
+                    {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+                    {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_01"},
+                ],
+                {
+                    "SPEAKER_00": [1.0, 0.0],  # cos = 1.0 -- confident
+                    "SPEAKER_01": [0.6, 0.8],  # cos = 0.6 -- แค่ข้อเสนอ ไม่ confident
+                },
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    matched = _activity_events(config, "speakers_matched")
+    assert len(matched) == 1
+    assert matched[0]["params"] == {"count": 1}
+
+
+def test_process_file_keeps_the_anonymous_label_below_the_high_threshold(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            # cos = 0.6 -> ระหว่างเกณฑ์: เสนอได้ แต่ห้ามใส่ชื่อให้เอง
+            return_value=_diarization(
+                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+                {"SPEAKER_00": [0.6, 0.8]},
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "**ผู้พูด 1** [00:00]: สวัสดีครับ" in transcript
+    assert "พี่เอ็ม" not in transcript
+
+
+def test_process_file_finishes_the_meeting_when_the_registry_cannot_be_read(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
+                {"SPEAKER_00": [1.0, 0.0]},
+            ),
+        ),
+        patch("src.pipeline.load_registry", side_effect=OSError("ดิสก์พัง")),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    # การจำเสียงพังต้องไม่ทำให้ประชุมที่อัดซ้ำไม่ได้พังตาม
+    assert (meeting_dir / "transcript.md").exists()
+    assert (meeting_dir / "summary.md").exists()
+
+    failed = _activity_events(config, "speakers_failed")
+    assert len(failed) == 1
+    assert failed[0]["level"] == "warn"
+
+
+@contextmanager
+def _two_speaker_diarization_patched():
+    """สอง speaker ที่พูดยาวกว่า MIN_SPEAKING_SECONDS มาก พร้อมเวกเตอร์ที่ใช้ได้
+
+    แยกออกมาจาก _run_with_two_speakers เพื่อให้เทสต์ที่ *ไม่* อยาก mock
+    guess_speaker_names (เช่นเทสต์โหมด transcript-only ที่ต้องให้ตัวจริงทำงาน)
+    ยืมชุดพากย์เสียง/ถอดเสียงนี้ได้โดยไม่ต้องคัดลอกทั้งก้อน
+    """
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 30.0, "text": "สวัสดีครับ ผมขอเริ่มเลยนะครับ"},
+                {"start": 30.0, "end": 70.0, "text": "ครับผม ผมเห็นด้วยกับที่ว่ามา"},
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [
+                    {"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"},
+                    {"start": 30.0, "end": 70.0, "speaker": "SPEAKER_01"},
+                ],
+                {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]},
+            ),
+        ),
+    ):
+        yield
+
+
+def _run_with_two_speakers(config, guess=None, guess_error=None):
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    guess_mock = MagicMock(
+        return_value=guess or {}, side_effect=guess_error
+    )
+    with (
+        _two_speaker_diarization_patched(),
+        patch("src.pipeline.guess_speaker_names", guess_mock),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+    return meeting_dir, guess_mock
+
+
+def test_process_file_queues_unknown_speakers_for_naming(tmp_path):
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+
+    meeting_dir, _ = _run_with_two_speakers(config)
+
+    pending = load_all_pending(tmp_path)
+    assert len(pending) == 1
+    assert pending[0]["meeting_dir"] == meeting_dir.name
+    assert pending[0]["audio_file"] == "weekly-standup.mp3"
+    assert [entry["label"] for entry in pending[0]["speakers"]] == ["ผู้พูด 1", "ผู้พูด 2"]
+
+
+def test_process_file_attaches_the_model_guess_to_the_queue(tmp_path):
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+
+    _, guess_mock = _run_with_two_speakers(
+        config,
+        guess={"ผู้พูด 2": {"name": "พี่เอ็ม", "evidence": "มีคนเรียกชื่อ"}},
+    )
+
+    speakers = load_all_pending(tmp_path)[0]["speakers"]
+    assert speakers[0]["guess"] is None
+    assert speakers[1]["guess"] == {"name": "พี่เอ็ม", "evidence": "มีคนเรียกชื่อ"}
+    # ต้องส่งป้ายที่เขียนลงไฟล์จริงไปให้โมเดล ไม่ใช่ label ดิบของ pyannote
+    assert guess_mock.call_args.args[1] == ["ผู้พูด 1", "ผู้พูด 2"]
+
+
+def test_process_file_still_queues_speakers_when_the_guess_call_fails(tmp_path):
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+
+    _run_with_two_speakers(config, guess_error=RuntimeError("โมเดลล่ม"))
+
+    speakers = load_all_pending(tmp_path)[0]["speakers"]
+    assert len(speakers) == 2
+    assert all(entry["guess"] is None for entry in speakers)
+
+
+def test_process_file_guesses_with_the_model_the_meeting_chose(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    write_job(config.inbox_dir, "weekly-standup", "claude-sonnet-5")
+
+    _, guess_mock = _run_with_two_speakers(config)
+
+    assert guess_mock.call_args.kwargs["model"] == "claude-sonnet-5"
+
+
+def test_process_file_queues_nobody_when_diarization_gave_no_embeddings(tmp_path):
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 30.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    assert load_all_pending(tmp_path) == []
+
+
+def test_process_file_finishes_the_meeting_when_writing_the_queue_fails(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 30.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}],
+                {"SPEAKER_00": [1.0, 0.0]},
+            ),
+        ),
+        patch("src.pipeline.write_pending", side_effect=OSError("ดิสก์เต็ม")),
+        patch("src.pipeline.guess_speaker_names", return_value={}),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    assert (meeting_dir / "transcript.md").exists()
+    assert (meeting_dir / "summary.md").exists()
+
+
+def test_process_file_records_the_queue_only_after_the_meeting_is_done(tmp_path):
+    from src import activity
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+
+    _run_with_two_speakers(config)
+
+    codes = [entry["code"] for entry in activity.tail(tmp_path)]
+    # ผู้ใช้ต้องเห็น "เสร็จแล้ว" ก่อนงานหลังบ้าน ไม่ใช่รองานหลังบ้านก่อนถึงจะเสร็จ
+    assert codes.index("meeting_done") < codes.index("speakers_pending")
+
+
+def test_process_file_queues_speakers_in_transcript_only_mode_without_a_model_call(
+    tmp_path,
+):
+    """transcript-only แปลว่าผู้ใช้เลือกเองว่าจะไม่ให้คำพูดของเขาหลุดออกจากเครื่อง
+
+    ต่างจากเทสต์อื่นใน task นี้ที่ mock src.pipeline.guess_speaker_names ตรง ๆ --
+    ที่นี่ปล่อยให้ตัวจริงทำงาน แล้ว mock แค่ src.speaker_guess.resolve เพื่อพิสูจน์ว่า
+    ด่านกันในตัวมันเอง (เช็ค model == NO_SUMMARY_MODEL ก่อนเรียก resolve) เป็นสิ่งที่
+    ทำให้ไม่มี network call เกิดขึ้นจริง ไม่ใช่แค่เชื่อว่ามันน่าจะกันไว้แล้ว
+    """
+    from src.pending import load_all_pending
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(config.inbox_dir, "weekly-standup", NO_SUMMARY_MODEL)
+
+    with (
+        _two_speaker_diarization_patched(),
+        patch("src.speaker_guess.resolve") as resolve_mock,
+        patch("src.pipeline.summarize_transcript") as summarize_mock,
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    resolve_mock.assert_not_called()
+    summarize_mock.assert_not_called()
+    speakers = load_all_pending(tmp_path)[0]["speakers"]
+    assert [entry["label"] for entry in speakers] == ["ผู้พูด 1", "ผู้พูด 2"]

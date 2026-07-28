@@ -15,8 +15,11 @@ from src.job import (
     record_transcript,
 )
 from src.merge import merge_transcript_and_speakers
-from src.render import render_transcript_markdown
+from src.pending import build_pending_speakers, write_pending
+from src.render import build_speaker_labels, render_transcript_markdown
 from src.retry import retry_with_backoff
+from src.speaker_guess import guess_speaker_names
+from src.speakers import Match, load_registry, match_known
 from src.storage import (
     archive_audio,
     create_meeting_folder,
@@ -58,6 +61,80 @@ def _reuse_saved_transcript(audio_path: Path) -> tuple[Path, Path, str] | None:
         return None
     logger.info("Reusing the transcript from an earlier run: %s", transcript_path)
     return transcript_path.parent, transcript_path, transcript_markdown
+
+
+def _match_known_speakers(
+    embeddings: dict[str, list[float]], config: Config, job: str
+) -> dict[str, Match]:
+    """ผู้พูดในไฟล์นี้ที่ตรงกับคนในทะเบียนเสียง
+
+    ล้มเหลวแล้วคืน dict ว่าง ไม่ปล่อย exception ขึ้นไป: ผลลัพธ์ที่แย่ที่สุดของฟีเจอร์นี้
+    ต้องเท่ากับสภาพก่อนมีมัน (ป้าย "ผู้พูด N") ไม่ใช่การประชุมที่หายไปทั้งครั้ง
+    """
+    if not embeddings:
+        return {}
+    try:
+        matches = match_known(
+            embeddings,
+            load_registry(config.base_dir),
+            high=config.speaker_match_high,
+            low=config.speaker_match_low,
+        )
+    except Exception as e:
+        logger.warning("จับคู่เสียงกับทะเบียนไม่สำเร็จ ไปต่อโดยไม่ใส่ชื่อ: %s", e)
+        activity.append(config.base_dir, job, "speakers_failed", "warn", {"error": str(e)})
+        return {}
+    recognized = sum(1 for match in matches.values() if match.confident)
+    if recognized:
+        activity.append(
+            config.base_dir, job, "speakers_matched", params={"count": recognized}
+        )
+    return matches
+
+
+def _record_pending_speakers(
+    config: Config,
+    job: str,
+    meeting_dir: Path,
+    audio_file: str,
+    transcript_markdown: str,
+    claude_model: str,
+    merged: list[dict],
+    labels: dict[str, str],
+    embeddings: dict[str, list[float]],
+    matches: dict[str, Match],
+) -> None:
+    """งานหลังบ้านที่รันหลังการประชุมเสร็จสมบูรณ์แล้ว
+
+    ทุกอย่างในนี้เป็นของแถม: ไฟล์ที่ผู้ใช้รออยู่ถูกเซฟไปหมดแล้วก่อนถูกเรียก และ
+    เหตุการณ์ meeting_done ถูกบันทึกไปแล้ว จึงห้ามมีอะไรในนี้ raise ออกไป
+
+    การเรียกโมเดลเพื่อเดาชื่ออยู่ตรงนี้ ไม่ใช่ก่อนหน้า เพราะมันคือ call เดียวที่เพิ่ม
+    เข้ามาในท่อทั้งหมด -- วางไว้ก่อน save จะทำให้เวลาที่ผู้ใช้รอ transcript ยาวขึ้น
+    เพื่อสิ่งที่เขาจะมาดูทีหลังเมื่อไหร่ก็ได้
+    """
+    try:
+        candidates = build_pending_speakers(merged, labels, embeddings, matches=matches)
+        if not candidates:
+            return
+        try:
+            guesses = guess_speaker_names(
+                transcript_markdown,
+                [candidate["label"] for candidate in candidates],
+                model=claude_model,
+            )
+        except Exception as e:
+            logger.warning("เดาชื่อผู้พูดไม่สำเร็จ ไปต่อโดยไม่มีคำใบ้: %s", e)
+            guesses = {}
+        for candidate in candidates:
+            candidate["guess"] = guesses.get(candidate["label"])
+        write_pending(config.base_dir, meeting_dir.name, audio_file, candidates)
+        activity.append(
+            config.base_dir, job, "speakers_pending", params={"count": len(candidates)}
+        )
+    except Exception as e:
+        logger.warning("บันทึกรายการผู้พูดที่รอตั้งชื่อไม่สำเร็จ: %s", e)
+        activity.append(config.base_dir, job, "speakers_failed", "warn", {"error": str(e)})
 
 
 def process_file(
@@ -110,10 +187,13 @@ def process_file(
 
         activity.append(config.base_dir, job, "diarize_started")
         diarization_failed = False
+        embeddings: dict[str, list[float]] = {}
         try:
-            speaker_turns = diarize_audio(
+            diarization = diarize_audio(
                 wav_path, hf_token=config.hf_token, pipeline=diarization_pipeline
             )
+            speaker_turns = diarization.turns
+            embeddings = diarization.embeddings
         except Exception as e:
             logger.warning("Diarization failed, continuing without speaker labels: %s", e)
             activity.append(
@@ -122,10 +202,16 @@ def process_file(
             speaker_turns = []
             diarization_failed = True
 
+    matches = _match_known_speakers(embeddings, config, job)
+
     try:
         merged = merge_transcript_and_speakers(whisper_segments, speaker_turns)
+        speaker_names = {
+            label: match.name for label, match in matches.items() if match.confident
+        }
+        speaker_labels = build_speaker_labels(merged, speaker_names)
         transcript_markdown = render_transcript_markdown(
-            merged, diarization_failed=diarization_failed
+            merged, diarization_failed=diarization_failed, speaker_names=speaker_names
         )
     except Exception as e:
         activity.append(config.base_dir, job, "job_failed", "error", {"error": str(e)})
@@ -150,7 +236,10 @@ def process_file(
     # written down next to the audio and travels with it into failed/.
     record_transcript(audio_path, transcript_path)
 
-    return _finish_meeting(
+    # อ่านชื่อไฟล์ไว้ตรงนี้เพื่อความชัดเจน -- _finish_meeting ย้ายไฟล์บนดิสก์ แต่ไม่ได้
+    # แก้ออบเจกต์ Path ตัวนี้ ค่าจึงเท่ากันไม่ว่าจะอ่านก่อนหรือหลัง สลับบรรทัดได้ ไม่พัง
+    audio_file = audio_path.name
+    meeting_dir = _finish_meeting(
         audio_path,
         config,
         claude_model,
@@ -158,6 +247,19 @@ def process_file(
         transcript_path,
         transcript_markdown,
     )
+    _record_pending_speakers(
+        config,
+        job,
+        meeting_dir,
+        audio_file,
+        transcript_markdown,
+        claude_model,
+        merged,
+        speaker_labels,
+        embeddings,
+        matches,
+    )
+    return meeting_dir
 
 
 def _finish_meeting(

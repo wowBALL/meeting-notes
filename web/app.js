@@ -32,6 +32,18 @@ const UI = {
     again: "เปิดห้องใหม่",
     failed: "ประมวลผลไม่สำเร็จ ดูรายละเอียดในจอแสดงผลการทำงาน",
     lang: "EN",
+    spkTitle: "ผู้พูดที่ยังไม่รู้จัก",
+    spkNamePh: "ใครพูด?",
+    spkSave: "บันทึก",
+    spkSkip: "ข้าม",
+    spkPlay: "▶ ฟังเสียง",
+    spkStop: "■ หยุด",
+    spkSpoke: "พูดรวม",
+    spkMin: "นาที",
+    spkSec: "วินาที",
+    spkGuess: "โมเดลเดาว่า",
+    spkNear: "เสียงใกล้เคียงกับ",
+    spkConfirmError: "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง",
     models: [
       ["GLM-5.2", "GLM 5.2", "ข้อมูลไม่ออกนอกบริษัท · ช้ากว่า"],
       ["claude-opus-5", "Opus 5", "แม่นสุด · $5/$25 ต่อ MTok"],
@@ -66,6 +78,18 @@ const UI = {
     again: "Open another room",
     failed: "Processing failed — see the activity panel for details",
     lang: "TH",
+    spkTitle: "Speakers we don't recognize yet",
+    spkNamePh: "Who is this?",
+    spkSave: "Save",
+    spkSkip: "Skip",
+    spkPlay: "▶ Play",
+    spkStop: "■ Stop",
+    spkSpoke: "spoke for",
+    spkMin: "min",
+    spkSec: "sec",
+    spkGuess: "the model guessed",
+    spkNear: "voice is close to",
+    spkConfirmError: "Could not save. Try again.",
     models: [
       ["GLM-5.2", "GLM 5.2", "Stays in-house · slower"],
       ["claude-opus-5", "Opus 5", "Most accurate · $5/$25 per MTok"],
@@ -99,6 +123,22 @@ let lastState = null;
 // เก็บไว้เอง เพราะ last_result ของ service ถูกล้างเมื่อเปิดห้องถัดไป
 let followingJob = null;
 let dismissedJob = null;
+// คิวตั้งชื่อดึงแยกจาก /api/state เพราะมันเปลี่ยนแค่ตอนจบประชุมกับตอนผู้ใช้กดยืนยัน
+// ไม่ใช่ทุกวินาทีเหมือนสถานะการอัด
+let pendingMeetings = [];
+let pendingTick = 0;
+// งานที่เราดึงคิวให้แล้วหลังเห็นสัญญาณ speakers_pending -- กันไม่ให้ดึงซ้ำทุกวินาที
+// ตลอดเวลาที่เหตุการณ์นั้นยังค้างอยู่ใน activity log
+let pendingSignalJob = null;
+// ช่องชื่อที่พิมพ์ค้างไว้ เก็บนอก DOM ด้วยเหตุผลเดียวกับ roomDraft: การวาดใหม่
+// ทั้งก้อนจะดีดสิ่งที่พิมพ์ไปแล้วทิ้ง
+const nameDrafts = {};
+// ผู้พูดที่กด save/skip แล้วเซิร์ฟเวอร์ตอบไม่ใช่ 2xx -- เก็บ key ไว้เพื่อขึ้นบรรทัด
+// เตือนสั้น ๆ ที่การ์ดนั้น ไม่ใช่ป้ายรวมของทั้งหน้า เพราะสาเหตุ (400/404/500) ผูกกับ
+// ผู้พูดคนนั้นคนเดียว ไม่ใช่ทั้งหน้าจอ
+const speakerErrors = {};
+let audioEl = null;
+let playingKey = null;
 
 const el = (id) => document.getElementById(id);
 const t = () => UI[lang];
@@ -125,6 +165,187 @@ function warningsHtml(state) {
     .join("");
 }
 
+// หน่วยเวลาต้องมาจาก catalog เหมือนป้ายอื่น ไม่ใช่ฝังไว้ในฟังก์ชัน -- ไม่งั้นโหมด EN
+// จะได้ "spoke for 45 วินาที" ปนกันสองภาษา (เห็นกับตาตอนตรวจหน้าจอจริง)
+function fmtSpoken(seconds) {
+  const x = t();
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return m > 0 ? `${m} ${x.spkMin} ${s} ${x.spkSec}` : `${s} ${x.spkSec}`;
+}
+
+function speakerKey(meeting, label) {
+  return `${meeting}|${label}`;
+}
+
+function pendingHtml() {
+  if (!pendingMeetings.length) return "";
+  const x = t();
+  const cards = pendingMeetings
+    .map((meeting) =>
+      meeting.speakers
+        .map((speaker) => {
+          const key = speakerKey(meeting.meeting_dir, speaker.label);
+          const draft =
+            nameDrafts[key] !== undefined
+              ? nameDrafts[key]
+              : (speaker.guess && speaker.guess.name) || "";
+          const quote = (speaker.samples || [])
+            .map((sample) => `<div class="quote">“${esc(sample.text)}”</div>`)
+            .join("");
+          const guess = speaker.guess
+            ? `<div class="hint">${esc(x.spkGuess)} “${esc(speaker.guess.name)}”${
+                speaker.guess.evidence ? ` — ${esc(speaker.guess.evidence)}` : ""
+              }</div>`
+            : "";
+          const near = speaker.suggested
+            ? `<div class="hint">${esc(x.spkNear)} “${esc(speaker.suggested.name)}”</div>`
+            : "";
+          const playing = playingKey === key;
+          const error = speakerErrors[key]
+            ? `<div class="note warn">⚠ ${esc(x.spkConfirmError)}</div>`
+            : "";
+          return `<div class="spk" data-key="${esc(key)}">
+            <div class="who">${esc(speaker.label)}</div>
+            <div class="meta">${esc(meeting.meeting_dir)} · ${esc(x.spkSpoke)} ${esc(
+            fmtSpoken(speaker.speaking_seconds || 0)
+          )}</div>
+            ${quote}${guess}${near}
+            <button class="play" data-play="${esc(key)}">${esc(
+            playing ? x.spkStop : x.spkPlay
+          )}</button>
+            <div class="row">
+              <input type="text" data-name="${esc(key)}" placeholder="${esc(
+            x.spkNamePh
+          )}" value="${esc(draft)}" />
+              <button class="plain" data-save="${esc(key)}">${esc(x.spkSave)}</button>
+              <button class="plain" data-skip="${esc(key)}">${esc(x.spkSkip)}</button>
+            </div>
+            ${error}
+          </div>`;
+        })
+        .join("")
+    )
+    .join("");
+  return `<label class="field">${esc(x.spkTitle)}</label>${cards}
+    <div style="height:14px"></div>`;
+}
+
+function speakerAt(key) {
+  for (const meeting of pendingMeetings) {
+    for (const speaker of meeting.speakers) {
+      if (speakerKey(meeting.meeting_dir, speaker.label) === key) {
+        return { meeting: meeting.meeting_dir, speaker };
+      }
+    }
+  }
+  return null;
+}
+
+function stopPlayback() {
+  if (audioEl) {
+    audioEl.pause();
+    audioEl = null;
+  }
+  playingKey = null;
+}
+
+// เล่นเฉพาะช่วงที่คนนั้นพูด ควบคุมด้วย JS ไม่ใช่ media fragment "#t=" ซึ่งเบราว์เซอร์
+// รองรับไม่ทั่ว -- ไฟล์ประชุมยาวเป็นชั่วโมง การเล่นจากต้นไฟล์คือการไม่ได้ใช้ปุ่มนี้เลย
+function playSample(key) {
+  const found = speakerAt(key);
+  const sample = found && (found.speaker.samples || [])[0];
+  if (!sample) return;
+  stopPlayback();
+  audioEl = new Audio(`/api/speakers/audio/${encodeURIComponent(found.meeting)}`);
+  audioEl.currentTime = sample.start;
+  audioEl.ontimeupdate = () => {
+    if (audioEl && audioEl.currentTime >= sample.end) {
+      stopPlayback();
+      render(lastState);
+    }
+  };
+  audioEl.onended = () => {
+    stopPlayback();
+    render(lastState);
+  };
+  audioEl.onerror = () => {
+    stopPlayback();
+    render(lastState);
+  };
+  // currentTime ก่อนโหลด metadata ไม่มีผลกับบางเบราว์เซอร์ ตั้งซ้ำเมื่อพร้อมจริง
+  audioEl.onloadedmetadata = () => {
+    if (audioEl) audioEl.currentTime = sample.start;
+  };
+  audioEl.play().catch(() => {
+    stopPlayback();
+    render(lastState);
+  });
+  playingKey = key;
+  render(lastState);
+}
+
+async function refreshPending() {
+  try {
+    const response = await fetch("/api/speakers/pending");
+    const body = await response.json();
+    pendingMeetings = body.meetings || [];
+  } catch (e) {
+    pendingMeetings = [];
+  }
+  render(lastState);
+}
+
+// หา <input> ของผู้พูดคนนี้จาก data-name แทนการเดา selector -- ใช้ค่าที่ผู้ใช้เห็น
+// อยู่ตรงหน้าจอจริง ๆ (ไม่ว่าจะเป็นชื่อที่โมเดลเดาให้ตอนวาดครั้งแรก หรือที่พิมพ์แก้)
+// ไม่ใช่ nameDrafts ซึ่งว่างเปล่าจนกว่าจะมี oninput ยิงสักครั้ง
+function findNameInput(key) {
+  for (const input of document.querySelectorAll("[data-name]")) {
+    if (input.dataset.name === key) return input;
+  }
+  return null;
+}
+
+async function confirmSpeaker(key, skip) {
+  const found = speakerAt(key);
+  if (!found) return;
+  const payload = { meeting: found.meeting, label: found.speaker.label };
+  if (skip) {
+    payload.skip = true;
+  } else {
+    // ช่องชื่อถูก prefill ด้วยชื่อที่โมเดลเดาให้เป็นค่า value ตั้งแต่วาดครั้งแรก แต่
+    // nameDrafts[key] มีค่าเฉพาะเมื่อผู้ใช้เคยพิมพ์ (oninput ยิงแล้ว) เท่านั้น -- กด
+    // บันทึกทันทีโดยไม่แตะช่องเลยตอนเดาถูกอยู่แล้วต้องส่งชื่อที่เห็นบนจอ ไม่ใช่ส่งค่า
+    // ว่างเพราะ nameDrafts ยังไม่เคยถูกเติม (nameDrafts ยังต้องอยู่ต่อ เพราะการวาดใหม่
+    // ทั้งก้อนตอนคิวเปลี่ยนจะดีดสิ่งที่พิมพ์ค้างไว้ทิ้งถ้าไม่มีมันเก็บสำรอง)
+    const input = findNameInput(key);
+    const name = (input ? input.value : nameDrafts[key] || "").trim();
+    if (!name) return;
+    payload.name = name;
+  }
+  try {
+    const response = await fetch("/api/speakers/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      // เซิร์ฟเวอร์แยกสาเหตุไว้แล้ว (400 ชื่อไม่ผ่าน, 404 รายการหลุดคิวไปแล้ว,
+      // 500 ตัดคิวไม่สำเร็จ) แต่การ์ดนี้ไม่ใช่ที่สำหรับอธิบายละเอียด -- ขึ้นบรรทัด
+      // เตือนสั้น ๆ พอ แล้วคงชื่อที่พิมพ์ค้างไว้ให้กดลองใหม่ได้ ไม่ล้างคิวทิ้ง
+      speakerErrors[key] = true;
+      render(lastState);
+      return;
+    }
+  } catch (e) {
+    offline = true;
+  }
+  delete nameDrafts[key];
+  delete speakerErrors[key];
+  stopPlayback();
+  await refreshPending();
+}
+
 function viewIdle(state) {
   const x = t();
   const options = x.models
@@ -142,7 +363,7 @@ function viewIdle(state) {
     state && state.worker_ready === false
       ? `<div class="note warn">⚠ ${esc(x.workerOffNote)}</div>`
       : "";
-  return `${warningsHtml(state)}${workerNote}
+  return `${warningsHtml(state)}${workerNote}${pendingHtml()}
     <label class="field">${esc(x.mode)}</label>
     ${options}
     <label class="field" style="margin-top:14px">${esc(x.room)}</label>
@@ -201,7 +422,8 @@ function viewDone(state) {
         ${esc(followingJob || "")}
       </div>
       <button class="primary" id="again">${esc(x.again)}</button>
-    </div>`;
+    </div>
+    ${pendingHtml()}`;
 }
 
 function jobProgress(state) {
@@ -234,6 +456,9 @@ function signatureOf(state, view, progress) {
     lang,
     stopping,
     progress ? `${progress.stage}:${progress.failed}` : "",
+    pendingMeetings.map((m) => `${m.meeting_dir}:${m.speakers.length}`).join(","),
+    Object.keys(speakerErrors).join(","),
+    playingKey,
     (state.warnings || []).map((w) => w.code).join(","),
   ].join("|");
 }
@@ -318,6 +543,25 @@ function wire() {
       dismissedJob = followingJob;
       render(lastState);
     };
+  document.querySelectorAll("[data-name]").forEach((input) => {
+    input.oninput = () => (nameDrafts[input.dataset.name] = input.value);
+  });
+  document.querySelectorAll("[data-save]").forEach((button) => {
+    button.onclick = () => confirmSpeaker(button.dataset.save, false);
+  });
+  document.querySelectorAll("[data-skip]").forEach((button) => {
+    button.onclick = () => confirmSpeaker(button.dataset.skip, true);
+  });
+  document.querySelectorAll("[data-play]").forEach((button) => {
+    button.onclick = () => {
+      if (playingKey === button.dataset.play) {
+        stopPlayback();
+        render(lastState);
+      } else {
+        playSample(button.dataset.play);
+      }
+    };
+  });
 }
 
 async function openRoom() {
@@ -333,6 +577,7 @@ async function openRoom() {
     if (response.status === 201) {
       followingJob = null;
       dismissedJob = null;
+      pendingSignalJob = null;
       roomDraft = "";
     }
   } catch (e) {
@@ -368,6 +613,20 @@ async function poll() {
     const stem = jobStemOf(state.last_result);
     if (stem && stem !== followingJob && stem !== dismissedJob) followingJob = stem;
   }
+  // ดึงคิวตั้งชื่อทุก 15 วินาทีตอนไม่ได้อัด -- มันเปลี่ยนแค่ตอนจบประชุม การถามทุก
+  // วินาทีคือการอ่านไฟล์ซ้ำ 60 ครั้งเพื่อคำตอบเดิม
+  pendingTick += 1;
+  if (state.recorder === "idle" && pendingTick % 15 === 1) refreshPending();
+  // ...แต่ตอนเพิ่งปิดห้องรอ 15 วินาทีไม่ได้ ผู้ใช้กำลังมองหน้าจอ "บันทึกเรียบร้อย" อยู่
+  // ตรงนั้น และคิวถูกเขียนหลัง meeting_done เล็กน้อย (ต้องรอโมเดลเดาชื่อก่อน) จึงยัง
+  // ไม่มีตอนหน้าจบโผล่ครั้งแรก ดึงทันทีที่เห็นเหตุการณ์ speakers_pending ของงานนี้
+  const signalled = (state.activity || []).some(
+    (e) => e.code === "speakers_pending" && e.job === followingJob
+  );
+  if (signalled && pendingSignalJob !== followingJob) {
+    pendingSignalJob = followingJob;
+    refreshPending();
+  }
   lastState = state;
   render(state);
 }
@@ -385,4 +644,5 @@ el("cfYes").onclick = () => {
 
 render(null);
 poll();
+refreshPending();
 setInterval(poll, 1000);

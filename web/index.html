@@ -112,6 +112,17 @@ button:disabled { opacity: .5; cursor: default; }
 .sub { font-size: 12.5px; color: var(--text-2); margin-bottom: 14px; }
 .devs { text-align: left; font-size: 12px; color: var(--text-2); border-top: 1px solid var(--line); padding-top: 10px; margin-bottom: 4px; }
 .devs div { padding: 2px 0; }
+/* ผู้พูดที่รอตั้งชื่อ -- อยู่ในหน้าจอ idle เท่านั้น ระหว่างอัด/ประมวลผลห้ามมารบกวน */
+.spk { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 11px; margin-bottom: 8px; }
+.spk .who { font-size: 13px; font-weight: 500; }
+.spk .meta { font-size: 11.5px; color: var(--text-3); margin-bottom: 6px; }
+.spk .quote { font-size: 12px; color: var(--text-2); background: var(--sunk); border-radius: 6px; padding: 6px 8px; margin-bottom: 7px; }
+.spk .hint { font-size: 11.5px; color: var(--accent); margin-bottom: 6px; }
+.spk .row { display: flex; gap: 6px; }
+.spk .row input[type=text] { flex: 1; }
+.spk .row button { width: auto; margin: 0; padding: 6px 11px; font-size: 12.5px; white-space: nowrap; }
+.spk .play { font: inherit; font-size: 12px; padding: 3px 9px; margin-bottom: 7px; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: 6px; background: transparent; color: var(--text-2); }
 .step { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 13px; }
 .step .ic { width: 16px; text-align: center; font-size: 13px; }
 .step.done .ic { color: var(--ok); }

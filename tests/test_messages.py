@@ -29,3 +29,11 @@ def test_render_returns_the_raw_template_when_a_parameter_is_missing():
 
 def test_render_accepts_no_params_at_all():
     assert render("room_closed") == MESSAGES["th"]["room_closed"]
+
+
+def test_new_speaker_codes_exist_in_every_language():
+    from src.messages import LANGUAGES, MESSAGES
+
+    for code in ("speakers_matched", "speakers_pending", "speakers_failed"):
+        for language in LANGUAGES:
+            assert code in MESSAGES[language], f"{code} หายไปจากภาษา {language}"

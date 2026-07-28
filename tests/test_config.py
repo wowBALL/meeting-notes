@@ -119,3 +119,80 @@ def test_the_misnamed_claude_default_constant_is_gone():
     import src.config as config
 
     assert not hasattr(config, "DEFAULT_CLAUDE_MODEL")
+
+
+def test_load_config_reads_speaker_match_thresholds(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("SPEAKER_MATCH_HIGH", "0.82")
+    monkeypatch.setenv("SPEAKER_MATCH_LOW", "0.61")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.82
+    assert config.speaker_match_low == 0.61
+
+
+def test_load_config_uses_default_speaker_thresholds(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("SPEAKER_MATCH_HIGH", raising=False)
+    monkeypatch.delenv("SPEAKER_MATCH_LOW", raising=False)
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.70
+    assert config.speaker_match_low == 0.50
+
+
+def test_load_config_falls_back_when_a_threshold_is_not_a_number(tmp_path, monkeypatch):
+    # ค่าที่พิมพ์ผิดใน .env ต้องไม่ทำให้เปิดโปรแกรมไม่ได้ -- แบบเดียวกับ UI_PORT
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("SPEAKER_MATCH_HIGH", "สูงมาก")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.70
+
+
+def test_load_config_falls_back_to_both_defaults_when_the_thresholds_are_inverted(
+    tmp_path, monkeypatch, caplog
+):
+    # HIGH < LOW แปลว่าทุกคนที่ผ่าน LOW จะผ่าน HIGH ไปด้วย -- Match.confident จะเป็น
+    # True ของทุกคน และระบบจะเริ่มใส่ชื่อจริงอัตโนมัติที่ความมั่นใจต่ำแบบเงียบ ๆ
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("SPEAKER_MATCH_HIGH", "0.4")
+    monkeypatch.setenv("SPEAKER_MATCH_LOW", "0.6")
+
+    with caplog.at_level("WARNING"):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.70
+    assert config.speaker_match_low == 0.50
+    assert "0.4" in caplog.text
+    assert "0.6" in caplog.text
+
+
+def test_load_config_keeps_a_valid_threshold_pair_untouched(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("SPEAKER_MATCH_HIGH", "0.8")
+    monkeypatch.setenv("SPEAKER_MATCH_LOW", "0.3")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.8
+    assert config.speaker_match_low == 0.3
+
+
+def test_load_config_accepts_equal_thresholds_as_the_degenerate_but_coherent_case(
+    tmp_path, monkeypatch
+):
+    # high == low ไม่ใช่ "กลับด้าน" -- ทุกคนจะเป็น "มั่นใจ" หรือ "ไม่รู้จัก" อย่างใดอย่าง
+    # หนึ่งเสมอ ไม่มีช่วงเสนอให้ยืนยัน ซึ่งเป็นค่าที่แปลกแต่สอดคล้องในตัวเอง ไม่ใช่ค่าที่
+    # ต้องกันเหมือนกรณีกลับด้าน
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("SPEAKER_MATCH_HIGH", "0.6")
+    monkeypatch.setenv("SPEAKER_MATCH_LOW", "0.6")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.speaker_match_high == 0.6
+    assert config.speaker_match_low == 0.6

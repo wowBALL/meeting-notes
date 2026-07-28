@@ -1,10 +1,29 @@
 import re
 import shutil
+import time
 from datetime import date
 from itertools import count
 from pathlib import Path
 
 from src.job import move_job
+
+# Windows จับไฟล์ที่เพิ่งเขียนเสร็จค้างได้ราวหนึ่งวินาที (ตัวสแกนไวรัส/indexer)
+# วัดมาแล้วในโปรเจกต์นี้กับการลบไฟล์ .wav -- การเขียนครั้งเดียวแล้วยอมแพ้แปลว่า
+# ผู้ใช้เสียชื่อที่เพิ่งตั้งไปเฉย ๆ
+_REPLACE_ATTEMPTS = 5
+_REPLACE_DELAY_SECONDS = 0.2
+
+
+def replace_with_retry(temp: Path, target: Path) -> None:
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            temp.replace(target)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_DELAY_SECONDS)
+
 
 # Stems produced by record.build_output_filename:
 #   named:   "<topic>-HH-MM-SS"
@@ -90,3 +109,63 @@ def move_to_failed(audio_path: Path, failed_dir: Path, error_message: str) -> Pa
     # forget it.
     move_job(audio_path, failed_dir)
     return destination
+
+
+def safe_meeting_dir(meetings_dir: Path, name: str) -> Path | None:
+    """โฟลเดอร์การประชุมที่ชื่อมาจากฝั่ง client -- None เมื่อชื่อพาออกนอก meetings/
+
+    การต่อสตริงตรง ๆ ไม่พอ: ".." หรือ path สัมบูรณ์พาไปอ่านไฟล์ที่ไหนก็ได้ในเครื่อง
+    service bind 127.0.0.1 อยู่แล้ว แต่หน้าเว็บใด ๆ ที่ผู้ใช้เปิดอยู่ยิงมาที่นี่ได้
+    """
+    if not name:
+        return None
+    root = Path(meetings_dir).resolve()
+    candidate = (root / name).resolve()
+    if candidate == root or root not in candidate.parents:
+        return None
+    return candidate
+
+
+def rename_speaker_in_transcript(
+    meeting_dir: Path, old_label: str, new_name: str
+) -> bool:
+    """แทนที่ป้ายผู้พูดใน transcript.md เฉพาะที่หัวบรรทัด คืน True เมื่อแก้จริง
+
+    ยึดหัวบรรทัดแทนการ replace ทั้งไฟล์ เพราะสิ่งที่คนพูดอาจมีสตริง "ผู้พูด 2" อยู่
+    กลางประโยคได้ตามปกติ
+
+    ห้ามใช้ `$` เป็น anchor กับไฟล์ของโปรเจกต์นี้: ไฟล์ .md บนดิสก์เป็น CRLF และ
+    `$` จะไปชนกับ \\r ที่มองไม่เห็นแล้วไม่ match อะไรเลยแบบเงียบ ๆ -- `^` ปลอดภัย
+    เพราะ read_text แปลง newline กลับเป็น \\n ให้ก่อนแล้ว
+
+    summary.md ไม่ถูกแตะโดยเจตนา: ข้อความในนั้นถูกโมเดลเรียบเรียงใหม่แล้ว การแทนที่
+    สตริงจะได้ประโยคที่อ่านไม่รู้เรื่อง และการประชุมครั้งถัดไปก็สรุปด้วยชื่อจริงเองอยู่แล้ว
+    """
+    path = Path(meeting_dir) / "transcript.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    pattern = re.compile(rf"^\*\*{re.escape(old_label)}\*\* \[", re.MULTILINE)
+    # ต้องแทนที่ด้วย "ฟังก์ชัน" ไม่ใช่สตริง: อาร์กิวเมนต์ตัวที่สองของ subn ถูกตีความเป็น
+    # template ที่มี \1, \g<0>, \0 เป็นความหมายพิเศษ ชื่อที่ผู้ใช้พิมพ์เดินทางมาจาก
+    # HTTP request และ clean_name ไม่ได้กรอง backslash ออก -- ชื่ออย่าง "\1" จะทำให้
+    # ฟังก์ชันนี้ raise ทั้งที่สัญญาว่าคืน bool ส่วน "\g<0>" จะยัดข้อความที่ match ได้
+    # กลับเข้าไฟล์แทนชื่อ ทำให้ transcript เสียรูปแบบเงียบ ๆ ฟังก์ชันไม่ตีความอะไรเลย
+    updated, replaced = pattern.subn(lambda _match: f"**{new_name}** [", text)
+    if not replaced:
+        return False
+    # เขียนผ่านไฟล์ชั่วคราวแล้วค่อยสลับ: write_text เปิดโหมด "w" ซึ่งตัดไฟล์ทิ้งก่อน
+    # เขียน ถ้าล้มกลางทาง transcript ที่จ่ายไปด้วย GPU หนึ่งรอบเต็มจะหายไปเลย ทั้งที่
+    # ผู้เรียกได้ False กลับไปแล้วแปลว่า "ไม่มีอะไรเปลี่ยน"
+    temp = path.with_name(path.name + ".tmp")
+    try:
+        temp.write_text(updated, encoding="utf-8")
+        replace_with_retry(temp, path)
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        return False
+    return True

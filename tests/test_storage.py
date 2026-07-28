@@ -1,4 +1,5 @@
 from datetime import date
+from unittest.mock import patch
 
 from src.job import JOB_SUFFIX, read_model, write_job
 from src.storage import (
@@ -185,3 +186,122 @@ def test_move_to_failed_works_when_there_is_no_job_file(tmp_path):
     destination = move_to_failed(audio_path, failed_dir, "Transcription failed: boom")
 
     assert destination.exists()
+
+
+from src.storage import rename_speaker_in_transcript, safe_meeting_dir
+
+
+def test_safe_meeting_dir_accepts_a_direct_child(tmp_path):
+    meetings = tmp_path / "meetings"
+    (meetings / "2026-07-28_10-30-standup").mkdir(parents=True)
+
+    result = safe_meeting_dir(meetings, "2026-07-28_10-30-standup")
+
+    assert result == (meetings / "2026-07-28_10-30-standup").resolve()
+
+
+def test_safe_meeting_dir_rejects_anything_that_escapes(tmp_path):
+    meetings = tmp_path / "meetings"
+    meetings.mkdir()
+
+    assert safe_meeting_dir(meetings, "..") is None
+    assert safe_meeting_dir(meetings, "../../Windows") is None
+    assert safe_meeting_dir(meetings, "") is None
+
+
+def test_rename_speaker_in_transcript_replaces_only_the_line_headings(tmp_path):
+    meeting_dir = tmp_path / "m1"
+    meeting_dir.mkdir()
+    (meeting_dir / "transcript.md").write_text(
+        "# Transcript\n\n"
+        "**ผู้พูด 2** [00:00]: เมื่อกี้ **ผู้พูด 2** พูดว่าอะไรนะ\n\n"
+        "**ผู้พูด 1** [00:05]: ไม่รู้ครับ\n",
+        encoding="utf-8",
+    )
+
+    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 2", "พี่เอ็ม") is True
+
+    text = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert text.startswith("# Transcript\n\n**พี่เอ็ม** [00:00]:")
+    # ข้อความที่คนพูดต้องไม่ถูกแตะ แม้จะมีสตริงเดียวกันอยู่กลางบรรทัด
+    assert "เมื่อกี้ **ผู้พูด 2** พูดว่าอะไรนะ" in text
+    assert "**ผู้พูด 1** [00:05]" in text
+
+
+def test_rename_speaker_in_transcript_reports_false_when_the_label_is_absent(tmp_path):
+    meeting_dir = tmp_path / "m1"
+    meeting_dir.mkdir()
+    (meeting_dir / "transcript.md").write_text(
+        "# Transcript\n\n**ผู้พูด 1** [00:00]: ครับ\n", encoding="utf-8"
+    )
+
+    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 9", "พี่เอ็ม") is False
+
+
+def test_rename_speaker_in_transcript_reports_false_when_the_file_is_gone(tmp_path):
+    # meetings/ เป็นโฟลเดอร์ของผู้ใช้ เขาย้าย/ลบได้ตลอด -- การตั้งชื่อต้องไม่ล้มตาม
+    assert rename_speaker_in_transcript(tmp_path / "ไม่มีจริง", "ผู้พูด 1", "พี่เอ็ม") is False
+
+
+def test_rename_speaker_in_transcript_survives_the_crlf_files_this_project_writes(tmp_path):
+    # write_text แปลง \n เป็น \r\n บน Windows ไฟล์จริงจึงเป็น CRLF ทุกไฟล์
+    meeting_dir = tmp_path / "m1"
+    meeting_dir.mkdir()
+    (meeting_dir / "transcript.md").write_bytes(
+        "# Transcript\r\n\r\n**ผู้พูด 2** [00:00]: ครับ\r\n".encode("utf-8")
+    )
+
+    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 2", "พี่เอ็ม") is True
+
+    # ต้องอ่านเป็น bytes: read_text แปลง \r\n ให้เป็น \n ตั้งแต่ขาเข้า เทสที่อ่านด้วย
+    # read_text จึงผ่านเหมือนกันหมดไม่ว่าไฟล์บนดิสก์จะเป็น CRLF หรือ LF -- พิสูจน์
+    # อะไรเกี่ยวกับ CRLF ไม่ได้เลย ทั้งที่ชื่อเทสบอกว่าพิสูจน์
+    raw = (meeting_dir / "transcript.md").read_bytes()
+    assert "**พี่เอ็ม** [00:00]: ครับ".encode("utf-8") in raw
+    assert raw.count(b"\r\n") > 0
+    assert raw.count(b"\n") == raw.count(b"\r\n")
+
+
+def test_rename_speaker_in_transcript_treats_a_name_with_backslashes_literally(tmp_path):
+    # ชื่อเดินทางมาจาก HTTP request และ clean_name ไม่ได้กรอง backslash ออก ถ้าเอาไป
+    # ต่อเป็น replacement template ตรง ๆ ชื่ออย่าง "\1" จะทำให้ raise และ "\g<0>" จะยัด
+    # ข้อความที่ match ได้กลับเข้าไฟล์แทนชื่อ
+    meeting_dir = tmp_path / "m1"
+    meeting_dir.mkdir()
+    transcript = meeting_dir / "transcript.md"
+    original = "# Transcript\n\n**ผู้พูด 1** [00:00]: ครับ\n"
+
+    for hostile in ("\\1", "\\g<0>", "\\g<name>", "back\\slash", "\\0", "\\\\"):
+        transcript.write_text(original, encoding="utf-8")
+
+        assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 1", hostile) is True
+
+        text = transcript.read_text(encoding="utf-8")
+        assert f"**{hostile}** [00:00]: ครับ" in text
+        assert "\x00" not in text
+
+
+def test_rename_speaker_in_transcript_retries_when_windows_holds_the_old_file(tmp_path):
+    # WinError 32: ตัวสแกนไวรัส/indexer จับไฟล์ที่เพิ่งปิดไปค้างได้ราวหนึ่งวินาที
+    # การเขียนครั้งเดียวแล้วยอมแพ้คือวิธีทำให้ผู้ใช้เสียชื่อที่เพิ่งตั้งไปเฉย ๆ
+    meeting_dir = tmp_path / "m1"
+    meeting_dir.mkdir()
+    transcript = meeting_dir / "transcript.md"
+    transcript.write_text(
+        "# Transcript\n\n**ผู้พูด 1** [00:00]: ครับ\n", encoding="utf-8"
+    )
+    attempts = {"count": 0}
+    real_replace = type(transcript).replace
+
+    def flaky_replace(self, target):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise PermissionError("WinError 32")
+        return real_replace(self, target)
+
+    with patch("pathlib.Path.replace", flaky_replace), patch("time.sleep"):
+        assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 1", "พี่เอ็ม") is True
+
+    assert attempts["count"] == 3
+    text = transcript.read_text(encoding="utf-8")
+    assert "**พี่เอ็ม** [00:00]: ครับ" in text
