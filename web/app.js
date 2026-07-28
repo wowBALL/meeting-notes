@@ -125,6 +125,9 @@ let dismissedJob = null;
 // ไม่ใช่ทุกวินาทีเหมือนสถานะการอัด
 let pendingMeetings = [];
 let pendingTick = 0;
+// งานที่เราดึงคิวให้แล้วหลังเห็นสัญญาณ speakers_pending -- กันไม่ให้ดึงซ้ำทุกวินาที
+// ตลอดเวลาที่เหตุการณ์นั้นยังค้างอยู่ใน activity log
+let pendingSignalJob = null;
 // ช่องชื่อที่พิมพ์ค้างไว้ เก็บนอก DOM ด้วยเหตุผลเดียวกับ roomDraft: การวาดใหม่
 // ทั้งก้อนจะดีดสิ่งที่พิมพ์ไปแล้วทิ้ง
 const nameDrafts = {};
@@ -384,7 +387,8 @@ function viewDone(state) {
         ${esc(followingJob || "")}
       </div>
       <button class="primary" id="again">${esc(x.again)}</button>
-    </div>`;
+    </div>
+    ${pendingHtml()}`;
 }
 
 function jobProgress(state) {
@@ -537,6 +541,7 @@ async function openRoom() {
     if (response.status === 201) {
       followingJob = null;
       dismissedJob = null;
+      pendingSignalJob = null;
       roomDraft = "";
     }
   } catch (e) {
@@ -576,6 +581,16 @@ async function poll() {
   // วินาทีคือการอ่านไฟล์ซ้ำ 60 ครั้งเพื่อคำตอบเดิม
   pendingTick += 1;
   if (state.recorder === "idle" && pendingTick % 15 === 1) refreshPending();
+  // ...แต่ตอนเพิ่งปิดห้องรอ 15 วินาทีไม่ได้ ผู้ใช้กำลังมองหน้าจอ "บันทึกเรียบร้อย" อยู่
+  // ตรงนั้น และคิวถูกเขียนหลัง meeting_done เล็กน้อย (ต้องรอโมเดลเดาชื่อก่อน) จึงยัง
+  // ไม่มีตอนหน้าจบโผล่ครั้งแรก ดึงทันทีที่เห็นเหตุการณ์ speakers_pending ของงานนี้
+  const signalled = (state.activity || []).some(
+    (e) => e.code === "speakers_pending" && e.job === followingJob
+  );
+  if (signalled && pendingSignalJob !== followingJob) {
+    pendingSignalJob = followingJob;
+    refreshPending();
+  }
   lastState = state;
   render(state);
 }
