@@ -32,6 +32,15 @@ const UI = {
     again: "เปิดห้องใหม่",
     failed: "ประมวลผลไม่สำเร็จ ดูรายละเอียดในจอแสดงผลการทำงาน",
     lang: "EN",
+    spkTitle: "ผู้พูดที่ยังไม่รู้จัก",
+    spkNamePh: "ใครพูด?",
+    spkSave: "บันทึก",
+    spkSkip: "ข้าม",
+    spkPlay: "▶ ฟังเสียง",
+    spkStop: "■ หยุด",
+    spkSpoke: "พูดรวม",
+    spkGuess: "โมเดลเดาว่า",
+    spkNear: "เสียงใกล้เคียงกับ",
     models: [
       ["GLM-5.2", "GLM 5.2", "ข้อมูลไม่ออกนอกบริษัท · ช้ากว่า"],
       ["claude-opus-5", "Opus 5", "แม่นสุด · $5/$25 ต่อ MTok"],
@@ -66,6 +75,15 @@ const UI = {
     again: "Open another room",
     failed: "Processing failed — see the activity panel for details",
     lang: "TH",
+    spkTitle: "Speakers we don't recognize yet",
+    spkNamePh: "Who is this?",
+    spkSave: "Save",
+    spkSkip: "Skip",
+    spkPlay: "▶ Play",
+    spkStop: "■ Stop",
+    spkSpoke: "spoke for",
+    spkGuess: "the model guessed",
+    spkNear: "voice is close to",
     models: [
       ["GLM-5.2", "GLM 5.2", "Stays in-house · slower"],
       ["claude-opus-5", "Opus 5", "Most accurate · $5/$25 per MTok"],
@@ -99,6 +117,15 @@ let lastState = null;
 // เก็บไว้เอง เพราะ last_result ของ service ถูกล้างเมื่อเปิดห้องถัดไป
 let followingJob = null;
 let dismissedJob = null;
+// คิวตั้งชื่อดึงแยกจาก /api/state เพราะมันเปลี่ยนแค่ตอนจบประชุมกับตอนผู้ใช้กดยืนยัน
+// ไม่ใช่ทุกวินาทีเหมือนสถานะการอัด
+let pendingMeetings = [];
+let pendingTick = 0;
+// ช่องชื่อที่พิมพ์ค้างไว้ เก็บนอก DOM ด้วยเหตุผลเดียวกับ roomDraft: การวาดใหม่
+// ทั้งก้อนจะดีดสิ่งที่พิมพ์ไปแล้วทิ้ง
+const nameDrafts = {};
+let audioEl = null;
+let playingKey = null;
 
 const el = (id) => document.getElementById(id);
 const t = () => UI[lang];
@@ -125,6 +152,155 @@ function warningsHtml(state) {
     .join("");
 }
 
+function fmtSpoken(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return m > 0 ? `${m} นาที ${s} วินาที` : `${s} วินาที`;
+}
+
+function speakerKey(meeting, label) {
+  return `${meeting}|${label}`;
+}
+
+function pendingHtml() {
+  if (!pendingMeetings.length) return "";
+  const x = t();
+  const cards = pendingMeetings
+    .map((meeting) =>
+      meeting.speakers
+        .map((speaker) => {
+          const key = speakerKey(meeting.meeting_dir, speaker.label);
+          const draft =
+            nameDrafts[key] !== undefined
+              ? nameDrafts[key]
+              : (speaker.guess && speaker.guess.name) || "";
+          const quote = (speaker.samples || [])
+            .map((sample) => `<div class="quote">“${esc(sample.text)}”</div>`)
+            .join("");
+          const guess = speaker.guess
+            ? `<div class="hint">${esc(x.spkGuess)} “${esc(speaker.guess.name)}”${
+                speaker.guess.evidence ? ` — ${esc(speaker.guess.evidence)}` : ""
+              }</div>`
+            : "";
+          const near = speaker.suggested
+            ? `<div class="hint">${esc(x.spkNear)} “${esc(speaker.suggested.name)}”</div>`
+            : "";
+          const playing = playingKey === key;
+          return `<div class="spk" data-key="${esc(key)}">
+            <div class="who">${esc(speaker.label)}</div>
+            <div class="meta">${esc(meeting.meeting_dir)} · ${esc(x.spkSpoke)} ${esc(
+            fmtSpoken(speaker.speaking_seconds || 0)
+          )}</div>
+            ${quote}${guess}${near}
+            <button class="play" data-play="${esc(key)}">${esc(
+            playing ? x.spkStop : x.spkPlay
+          )}</button>
+            <div class="row">
+              <input type="text" data-name="${esc(key)}" placeholder="${esc(
+            x.spkNamePh
+          )}" value="${esc(draft)}" />
+              <button class="plain" data-save="${esc(key)}">${esc(x.spkSave)}</button>
+              <button class="plain" data-skip="${esc(key)}">${esc(x.spkSkip)}</button>
+            </div>
+          </div>`;
+        })
+        .join("")
+    )
+    .join("");
+  return `<label class="field">${esc(x.spkTitle)}</label>${cards}
+    <div style="height:14px"></div>`;
+}
+
+function speakerAt(key) {
+  for (const meeting of pendingMeetings) {
+    for (const speaker of meeting.speakers) {
+      if (speakerKey(meeting.meeting_dir, speaker.label) === key) {
+        return { meeting: meeting.meeting_dir, speaker };
+      }
+    }
+  }
+  return null;
+}
+
+function stopPlayback() {
+  if (audioEl) {
+    audioEl.pause();
+    audioEl = null;
+  }
+  playingKey = null;
+}
+
+// เล่นเฉพาะช่วงที่คนนั้นพูด ควบคุมด้วย JS ไม่ใช่ media fragment "#t=" ซึ่งเบราว์เซอร์
+// รองรับไม่ทั่ว -- ไฟล์ประชุมยาวเป็นชั่วโมง การเล่นจากต้นไฟล์คือการไม่ได้ใช้ปุ่มนี้เลย
+function playSample(key) {
+  const found = speakerAt(key);
+  const sample = found && (found.speaker.samples || [])[0];
+  if (!sample) return;
+  stopPlayback();
+  audioEl = new Audio(`/api/speakers/audio/${encodeURIComponent(found.meeting)}`);
+  audioEl.currentTime = sample.start;
+  audioEl.ontimeupdate = () => {
+    if (audioEl && audioEl.currentTime >= sample.end) {
+      stopPlayback();
+      render(lastState);
+    }
+  };
+  audioEl.onended = () => {
+    stopPlayback();
+    render(lastState);
+  };
+  audioEl.onerror = () => {
+    stopPlayback();
+    render(lastState);
+  };
+  // currentTime ก่อนโหลด metadata ไม่มีผลกับบางเบราว์เซอร์ ตั้งซ้ำเมื่อพร้อมจริง
+  audioEl.onloadedmetadata = () => {
+    if (audioEl) audioEl.currentTime = sample.start;
+  };
+  audioEl.play().catch(() => {
+    stopPlayback();
+    render(lastState);
+  });
+  playingKey = key;
+  render(lastState);
+}
+
+async function refreshPending() {
+  try {
+    const response = await fetch("/api/speakers/pending");
+    const body = await response.json();
+    pendingMeetings = body.meetings || [];
+  } catch (e) {
+    pendingMeetings = [];
+  }
+  render(lastState);
+}
+
+async function confirmSpeaker(key, skip) {
+  const found = speakerAt(key);
+  if (!found) return;
+  const payload = { meeting: found.meeting, label: found.speaker.label };
+  if (skip) {
+    payload.skip = true;
+  } else {
+    const name = (nameDrafts[key] || "").trim();
+    if (!name) return;
+    payload.name = name;
+  }
+  try {
+    await fetch("/api/speakers/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    offline = true;
+  }
+  delete nameDrafts[key];
+  stopPlayback();
+  await refreshPending();
+}
+
 function viewIdle(state) {
   const x = t();
   const options = x.models
@@ -142,7 +318,7 @@ function viewIdle(state) {
     state && state.worker_ready === false
       ? `<div class="note warn">⚠ ${esc(x.workerOffNote)}</div>`
       : "";
-  return `${warningsHtml(state)}${workerNote}
+  return `${warningsHtml(state)}${workerNote}${pendingHtml()}
     <label class="field">${esc(x.mode)}</label>
     ${options}
     <label class="field" style="margin-top:14px">${esc(x.room)}</label>
@@ -234,6 +410,8 @@ function signatureOf(state, view, progress) {
     lang,
     stopping,
     progress ? `${progress.stage}:${progress.failed}` : "",
+    pendingMeetings.map((m) => `${m.meeting_dir}:${m.speakers.length}`).join(","),
+    playingKey,
     (state.warnings || []).map((w) => w.code).join(","),
   ].join("|");
 }
@@ -318,6 +496,25 @@ function wire() {
       dismissedJob = followingJob;
       render(lastState);
     };
+  document.querySelectorAll("[data-name]").forEach((input) => {
+    input.oninput = () => (nameDrafts[input.dataset.name] = input.value);
+  });
+  document.querySelectorAll("[data-save]").forEach((button) => {
+    button.onclick = () => confirmSpeaker(button.dataset.save, false);
+  });
+  document.querySelectorAll("[data-skip]").forEach((button) => {
+    button.onclick = () => confirmSpeaker(button.dataset.skip, true);
+  });
+  document.querySelectorAll("[data-play]").forEach((button) => {
+    button.onclick = () => {
+      if (playingKey === button.dataset.play) {
+        stopPlayback();
+        render(lastState);
+      } else {
+        playSample(button.dataset.play);
+      }
+    };
+  });
 }
 
 async function openRoom() {
@@ -368,6 +565,10 @@ async function poll() {
     const stem = jobStemOf(state.last_result);
     if (stem && stem !== followingJob && stem !== dismissedJob) followingJob = stem;
   }
+  // ดึงคิวตั้งชื่อทุก 15 วินาทีตอนไม่ได้อัด -- มันเปลี่ยนแค่ตอนจบประชุม การถามทุก
+  // วินาทีคือการอ่านไฟล์ซ้ำ 60 ครั้งเพื่อคำตอบเดิม
+  pendingTick += 1;
+  if (state.recorder === "idle" && pendingTick % 15 === 1) refreshPending();
   lastState = state;
   render(state);
 }
@@ -385,4 +586,5 @@ el("cfYes").onclick = () => {
 
 render(null);
 poll();
+refreshPending();
 setInterval(poll, 1000);
