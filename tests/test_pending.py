@@ -139,7 +139,19 @@ def test_load_pending_returns_none_for_an_unknown_meeting(tmp_path):
 
 
 def test_load_pending_refuses_a_hostile_meeting_name(tmp_path):
+    # ต้องวางไฟล์จริงไว้ตรงจุดที่ชื่อนี้จะ resolve ไปถึงถ้าไม่มีตัวกัน ไม่งั้นเทสผ่าน
+    # เพราะ "ไฟล์ไม่มีอยู่" ไม่ใช่เพราะตัวกันทำงาน -- ลบ _is_safe_name ทิ้งก็ยังผ่าน
+    # pending_dir คือ <base>/speakers/pending ดังนั้น "../../x" ชี้กลับมาที่ <base>/x.json
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    reachable = tmp_path / "x.json"
+    reachable.write_text(
+        (pending_dir(tmp_path) / "m1.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    assert reachable.is_file()
+
     assert load_pending(tmp_path, "../../x") is None
+    assert load_pending(tmp_path, "sub/dir") is None
+    assert load_pending(tmp_path, "..") is None
 
 
 def test_find_pending_returns_the_entry_without_changing_the_file(tmp_path):
