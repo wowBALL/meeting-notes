@@ -12,6 +12,9 @@ import json
 import logging
 import math
 import time
+import uuid
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -139,3 +142,88 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
         return 0.0
     dot = sum(float(x) * float(y) for x, y in zip(a, b))
     return dot / (norm_a * norm_b)
+
+
+@dataclass(frozen=True)
+class Match:
+    """ผู้พูดในไฟล์หนึ่งตรงกับใครในทะเบียน และมั่นใจพอจะใส่ชื่อให้เลยหรือไม่
+
+    `confident` แยกออกมาเป็น field แทนที่จะให้ผู้เรียกไปเทียบ score กับเกณฑ์เอง
+    เพราะกฎ "เท่าไหร่ถึงจะใส่ชื่ออัตโนมัติ" ต้องอยู่ที่เดียว -- ผู้เรียกที่เทียบเองผิด
+    เกณฑ์แปลว่าใส่ชื่อผิดคนลง transcript
+    """
+
+    speaker_id: str
+    name: str
+    score: float
+    confident: bool
+
+
+def match_known(
+    embeddings: dict[str, list[float]],
+    speakers: list[dict],
+    high: float,
+    low: float,
+) -> dict[str, Match]:
+    """จับคู่ผู้พูดในไฟล์นี้กับคนในทะเบียน คีย์เป็น label ของ pyannote
+
+    label ที่ไม่ถึงเกณฑ์ล่างจะไม่มีใน dict เลย (ไม่ใช่ค่า None) -- ผู้เรียกจึงเขียน
+    `label in matches` ได้ตรงไปตรงมา
+    """
+    matches: dict[str, Match] = {}
+    for label, embedding in embeddings.items():
+        if not is_usable_embedding(embedding):
+            continue
+        best: Match | None = None
+        for speaker in speakers:
+            for sample in speaker.get("samples", []):
+                vector = sample.get("embedding")
+                if not is_usable_embedding(vector):
+                    continue
+                score = cosine_similarity(embedding, vector)
+                if best is None or score > best.score:
+                    best = Match(
+                        speaker_id=speaker["id"],
+                        name=speaker["name"],
+                        score=score,
+                        confident=score >= high,
+                    )
+        if best is not None and best.score >= low:
+            matches[label] = best
+    return matches
+
+
+def add_sample(
+    speakers: list[dict],
+    name: str,
+    embedding: list[float],
+    source: str,
+    today: date | None = None,
+) -> list[dict]:
+    """ทะเบียนชุดใหม่ที่มีตัวอย่างเสียงนี้เพิ่มเข้าไป
+
+    ชื่อซ้ำ = คนเดิม ไม่ใช่คนใหม่ -- ผู้ใช้ที่พิมพ์ชื่อเดิมในการประชุมที่สองกำลังบอกว่า
+    "คนนี้แหละ" การสร้าง entry ที่สองจะทำให้โปรไฟล์แตกเป็นสองก้อนที่ต่างก็อ่อนแอ
+
+    คืนรายการชุดใหม่แทนการแก้ของเดิมในที่ ผู้เรียกจึงยังถือของเดิมไว้ได้ถ้าการเขียน
+    ไฟล์ล้มเหลว
+    """
+    cleaned = clean_name(name)
+    if not cleaned:
+        raise ValueError("ชื่อผู้พูดว่างเปล่าหลังตัดอักขระที่ใช้ไม่ได้ออก")
+    sample = {
+        "embedding": [float(value) for value in embedding],
+        "source": source,
+        "added": (today or date.today()).isoformat(),
+    }
+    updated = [dict(speaker, samples=list(speaker.get("samples", []))) for speaker in speakers]
+    for speaker in updated:
+        if speaker.get("name") == cleaned:
+            speaker["samples"] = (speaker["samples"] + [sample])[-MAX_SAMPLES_PER_SPEAKER:]
+            return updated
+    updated.append({"id": uuid.uuid4().hex, "name": cleaned, "samples": [sample]})
+    return updated
+
+
+def remove_speaker(speakers: list[dict], speaker_id: str) -> list[dict]:
+    return [speaker for speaker in speakers if speaker.get("id") != speaker_id]
