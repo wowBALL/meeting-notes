@@ -39,6 +39,8 @@ const UI = {
     spkPlay: "▶ ฟังเสียง",
     spkStop: "■ หยุด",
     spkSpoke: "พูดรวม",
+    spkMin: "นาที",
+    spkSec: "วินาที",
     spkGuess: "โมเดลเดาว่า",
     spkNear: "เสียงใกล้เคียงกับ",
     models: [
@@ -82,6 +84,8 @@ const UI = {
     spkPlay: "▶ Play",
     spkStop: "■ Stop",
     spkSpoke: "spoke for",
+    spkMin: "min",
+    spkSec: "sec",
     spkGuess: "the model guessed",
     spkNear: "voice is close to",
     models: [
@@ -152,10 +156,13 @@ function warningsHtml(state) {
     .join("");
 }
 
+// หน่วยเวลาต้องมาจาก catalog เหมือนป้ายอื่น ไม่ใช่ฝังไว้ในฟังก์ชัน -- ไม่งั้นโหมด EN
+// จะได้ "spoke for 45 วินาที" ปนกันสองภาษา (เห็นกับตาตอนตรวจหน้าจอจริง)
 function fmtSpoken(seconds) {
+  const x = t();
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
-  return m > 0 ? `${m} นาที ${s} วินาที` : `${s} วินาที`;
+  return m > 0 ? `${m} ${x.spkMin} ${s} ${x.spkSec}` : `${s} ${x.spkSec}`;
 }
 
 function speakerKey(meeting, label) {
