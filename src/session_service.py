@@ -16,7 +16,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from src import activity
+from src import activity, pending, speakers
 from src.messages import render
 from src.record import run_recording
 
@@ -87,6 +87,15 @@ class RecorderState:
                 "last_result": self.last_result,
                 "devices": dict(self.devices),
             }
+
+
+def _public_speaker(speaker: dict) -> dict:
+    """ผู้พูดหนึ่งคนในรูปที่ส่งออกหน้าเว็บได้
+
+    ตัด embedding ออกเสมอ: หน้าเว็บไม่ได้ใช้ และเวกเตอร์เสียงเป็นข้อมูล biometric
+    ที่ไม่ควรมีสำเนาเพิ่มในที่ที่ไม่จำเป็น
+    """
+    return {key: value for key, value in speaker.items() if key != "embedding"}
 
 
 def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Flask:
@@ -182,6 +191,38 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             state.status = "stopping"
             state.stop_event.set()
         return jsonify({"ok": True}), 202
+
+    @app.get("/api/speakers/pending")
+    def list_pending_speakers():
+        meetings = [
+            {**meeting, "speakers": [_public_speaker(s) for s in meeting["speakers"]]}
+            for meeting in pending.load_all_pending(config.base_dir)
+        ]
+        return jsonify({"meetings": meetings})
+
+    @app.get("/api/speakers")
+    def list_speakers():
+        return jsonify(
+            {
+                "speakers": [
+                    {
+                        "id": speaker["id"],
+                        "name": speaker["name"],
+                        "sample_count": len(speaker.get("samples", [])),
+                    }
+                    for speaker in speakers.load_registry(config.base_dir)
+                ]
+            }
+        )
+
+    @app.delete("/api/speakers/<speaker_id>")
+    def delete_speaker(speaker_id):
+        registry = speakers.load_registry(config.base_dir)
+        remaining = speakers.remove_speaker(registry, speaker_id)
+        if len(remaining) == len(registry):
+            return jsonify({"error": "not_found"}), 404
+        speakers.save_registry(config.base_dir, remaining)
+        return jsonify({"ok": True})
 
     @app.get("/<path:filename>")
     def static_file(filename):

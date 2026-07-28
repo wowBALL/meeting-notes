@@ -1,9 +1,12 @@
+import json
 import time
 
 import pytest
 
 from src.config import Config
+from src.pending import build_pending_speakers, write_pending
 from src.session_service import create_app
+from src.speakers import add_sample, load_registry, save_registry
 
 
 def make_config(tmp_path):
@@ -209,3 +212,78 @@ def test_warning_text_is_rendered_too(config):
     assert "B" in body["warnings"][0]["text"]
 
     client.post("/api/session/stop")
+
+
+_PENDING_MERGED = [
+    {"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00", "text": "สวัสดีครับ ผมขอเริ่มเลย"},
+    {"start": 30.0, "end": 70.0, "speaker": "SPEAKER_01", "text": "ครับผม ผมเห็นด้วย"},
+]
+_PENDING_LABELS = {"SPEAKER_00": "ผู้พูด 1", "SPEAKER_01": "ผู้พูด 2"}
+_PENDING_EMBEDDINGS = {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]}
+
+
+def _queue_two_speakers(config, meeting="2026-07-28_10-30-standup"):
+    write_pending(
+        config.base_dir,
+        meeting,
+        "standup.ogg",
+        build_pending_speakers(_PENDING_MERGED, _PENDING_LABELS, _PENDING_EMBEDDINGS),
+    )
+    return meeting
+
+
+def test_pending_speakers_endpoint_is_empty_by_default(client):
+    body = client.get("/api/speakers/pending").get_json()
+
+    assert body == {"meetings": []}
+
+
+def test_pending_speakers_endpoint_lists_the_queue(client, config):
+    meeting = _queue_two_speakers(config)
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    assert len(body["meetings"]) == 1
+    assert body["meetings"][0]["meeting_dir"] == meeting
+    assert body["meetings"][0]["audio_file"] == "standup.ogg"
+    labels = [entry["label"] for entry in body["meetings"][0]["speakers"]]
+    assert labels == ["ผู้พูด 1", "ผู้พูด 2"]
+
+
+def test_pending_speakers_endpoint_never_ships_the_voice_vectors(client, config):
+    # เบราว์เซอร์ไม่ต้องใช้เวกเตอร์เลย และมันคือข้อมูล biometric -- ส่งออกไปเปล่า ๆ
+    # คือเพิ่มที่ที่มันอาจรั่วโดยไม่ได้อะไรกลับมา
+    _queue_two_speakers(config)
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    for speaker in body["meetings"][0]["speakers"]:
+        assert "embedding" not in speaker
+    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้
+    assert "embedding" not in json.dumps(body)
+
+
+def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
+    registry = add_sample([], "พี่เอ็ม", [1.0, 0.0], source="m1")
+    registry = add_sample(registry, "พี่เอ็ม", [0.9, 0.1], source="m2")
+    save_registry(config.base_dir, registry)
+
+    body = client.get("/api/speakers").get_json()
+
+    assert body["speakers"] == [
+        {"id": registry[0]["id"], "name": "พี่เอ็ม", "sample_count": 2}
+    ]
+
+
+def test_deleting_a_speaker_removes_them_from_the_registry(client, config):
+    registry = add_sample([], "พี่เอ็ม", [1.0, 0.0], source="m1")
+    save_registry(config.base_dir, registry)
+
+    response = client.delete(f"/api/speakers/{registry[0]['id']}")
+
+    assert response.status_code == 200
+    assert load_registry(config.base_dir) == []
+
+
+def test_deleting_an_unknown_speaker_is_a_404(client):
+    assert client.delete("/api/speakers/ไม่มีจริง").status_code == 404
