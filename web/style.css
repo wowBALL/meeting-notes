@@ -1,0 +1,146 @@
+/* ทุกสีมาจากบล็อกเดียวนี้ ห้าม hardcode สีที่อื่นในไฟล์ */
+:root {
+  --bg: #f4f3ee;
+  --card: #ffffff;
+  --sunk: #faf9f5;
+  --line: #e3e1d8;
+  --line-strong: #cecbc0;
+  --text: #23231f;
+  --text-2: #5f5e59;
+  --text-3: #8d8b83;
+  --accent: #2f6f4f;
+  --accent-soft: #e6f0ea;
+  --danger: #a8352e;
+  --warn: #8a5a08;
+  --warn-soft: #fdf1dc;
+  --ok: #2f6f4f;
+  --radius: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a18;
+    --card: #242422;
+    --sunk: #1f1f1d;
+    --line: #35352f;
+    --line-strong: #4a4a42;
+    --text: #edece6;
+    --text-2: #a8a69d;
+    --text-3: #7c7a72;
+    --accent: #7fc39c;
+    --accent-soft: #1e3229;
+    --danger: #e58c86;
+    --warn: #e0b062;
+    --warn-soft: #33281a;
+    --ok: #7fc39c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 32px 16px 48px;
+  background: var(--bg); color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px; line-height: 1.6;
+  display: flex; flex-direction: column; align-items: center;
+}
+.app {
+  width: 420px; max-width: 100%;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; overflow: hidden;
+}
+.head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.head .name { font-weight: 500; }
+.head .spacer { flex: 1; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.dot.off { background: var(--text-3); }
+.worker { color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+.lang {
+  font: inherit; font-size: 12px; padding: 2px 8px; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  background: transparent; color: var(--text-2);
+}
+.body { padding: 16px; }
+label.field { display: block; font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
+.opt {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 9px 11px; margin-bottom: 6px; cursor: pointer;
+}
+.opt:hover { border-color: var(--line-strong); }
+.opt.on { border-color: var(--accent); background: var(--accent-soft); }
+.opt .tick { width: 14px; color: var(--accent); visibility: hidden; }
+.opt.on .tick { visibility: visible; }
+.opt .t { font-size: 13px; }
+.opt .d { font-size: 11.5px; color: var(--text-3); }
+input[type=text] {
+  width: 100%; font: inherit; font-size: 13px; padding: 8px 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--sunk); color: var(--text);
+}
+input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+button.primary, button.danger, button.plain {
+  width: 100%; font: inherit; font-size: 14px; padding: 10px;
+  border-radius: var(--radius); cursor: pointer; margin-top: 4px;
+}
+button.primary { border: none; background: var(--accent); color: var(--card); }
+button.danger { border: 1px solid var(--danger); background: transparent; color: var(--danger); }
+button.plain { border: 1px solid var(--line-strong); background: transparent; color: var(--text); }
+button:disabled { opacity: .5; cursor: default; }
+.note { display: flex; gap: 7px; align-items: flex-start; font-size: 12px; margin: 12px 0; }
+.note.ok { color: var(--ok); }
+/* คำเตือนอยู่เหนือทุกอย่างเสมอ ไม่ถูกพับเก็บ -- อุปกรณ์เสียงเปลี่ยนคือสาเหตุ
+   อันดับหนึ่งของเคส "อัดแล้วไม่มีเสียงคู่สนทนา" */
+.note.warn {
+  color: var(--warn); background: var(--warn-soft);
+  border-left: 3px solid var(--warn); border-radius: 0;
+  padding: 8px 10px; margin: 0 0 12px;
+}
+.rec-wrap { text-align: center; }
+.rec-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--danger); }
+.rec-badge .dot { background: var(--danger); animation: pulse 1.6s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+.timer { font-size: 34px; font-weight: 500; letter-spacing: 1px; margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+.sub { font-size: 12.5px; color: var(--text-2); margin-bottom: 14px; }
+.devs { text-align: left; font-size: 12px; color: var(--text-2); border-top: 1px solid var(--line); padding-top: 10px; margin-bottom: 4px; }
+.devs div { padding: 2px 0; }
+/* ผู้พูดที่รอตั้งชื่อ -- อยู่ในหน้าจอ idle เท่านั้น ระหว่างอัด/ประมวลผลห้ามมารบกวน */
+.spk { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 11px; margin-bottom: 8px; }
+.spk .who { font-size: 13px; font-weight: 500; }
+.spk .meta { font-size: 11.5px; color: var(--text-3); margin-bottom: 6px; }
+.spk .quote { font-size: 12px; color: var(--text-2); background: var(--sunk); border-radius: 6px; padding: 6px 8px; margin-bottom: 7px; }
+.spk .hint { font-size: 11.5px; color: var(--accent); margin-bottom: 6px; }
+.spk .row { display: flex; gap: 6px; }
+.spk .row input[type=text] { flex: 1; }
+.spk .row button { width: auto; margin: 0; padding: 6px 11px; font-size: 12.5px; white-space: nowrap; }
+.spk .play { font: inherit; font-size: 12px; padding: 3px 9px; margin-bottom: 7px; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: 6px; background: transparent; color: var(--text-2); }
+.step { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 13px; }
+.step .ic { width: 16px; text-align: center; font-size: 13px; }
+.step.done .ic { color: var(--ok); }
+.step.now .ic { color: var(--accent); }
+.step.wait { color: var(--text-3); }
+.spin { display: inline-block; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg) } }
+.foot { border-top: 1px solid var(--line); }
+.foot summary { list-style: none; cursor: pointer; padding: 9px 14px; font-size: 12px; color: var(--text-3); user-select: none; }
+.foot summary::-webkit-details-marker { display: none; }
+.log {
+  padding: 0 14px 12px; margin: 0;
+  font-family: Consolas, "SF Mono", monospace; font-size: 11.5px;
+  line-height: 1.8; color: var(--text-2);
+  max-height: 170px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+}
+.log .warn { color: var(--warn); }
+.log .error { color: var(--danger); }
+.scrim {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.modal { background: var(--card); border-radius: 12px; padding: 18px 20px; max-width: 330px; border: 1px solid var(--line); }
+.modal h3 { margin: 0 0 6px; font-size: 15px; font-weight: 500; }
+.modal p { margin: 0 0 16px; font-size: 13px; color: var(--text-2); }
+.modal .row { display: flex; gap: 8px; justify-content: flex-end; }
+.modal .row button { width: auto; margin: 0; padding: 7px 14px; font-size: 13px; }
+.hide { display: none !important; }

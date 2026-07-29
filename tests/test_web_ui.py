@@ -56,3 +56,22 @@ def test_ui_catalogs_have_the_same_keys_in_both_languages():
         f"คีย์ไม่ตรงกันระหว่าง th กับ en: "
         f"th only={th_keys - en_keys} en only={en_keys - th_keys}"
     )
+
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+def test_index_html_has_no_inline_style_block():
+    text = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    assert "<style>" not in text
+    assert 'href="style.css"' in text
+
+
+def test_the_colour_tokens_live_in_exactly_one_file():
+    """ทุกสีมาจากบล็อก token เดียว -- ก๊อปไปไว้สองที่เมื่อไหร่ มันจะ drift แน่นอน"""
+    css = (WEB_DIR / "style.css").read_text(encoding="utf-8")
+    assert "--accent:" in css
+
+    text = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    assert "--accent:" not in text, "index.html มีบล็อก token ซ้ำ"
