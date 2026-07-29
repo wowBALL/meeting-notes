@@ -46,6 +46,19 @@ def process_enroll_requests(config: Config, diarization_pipeline: Any = None) ->
         return
     for audio_file in pending:
         audio_path = enroll.enroll_dir(config.base_dir) / audio_file
+        # CRITICAL A: ต้อง stat ไฟล์ *ก่อน* ส่งเข้า analyze() เสมอ ไม่ใช่ตอนเขียนผลทีหลัง
+        # -- diarization ใช้เวลานาน (วินาทีถึงนาที) ถ้าผู้ใช้แทนที่ไฟล์ระหว่างนั้น write_result
+        # ที่ stat() ตอนเขียนผลอย่างเดียวจะเห็นไฟล์ใหม่ "ตรง" กับตัวเองเสมอ แล้วผูก embedding
+        # ของไบต์ชุดเก่าเข้ากับไฟล์ใหม่โดยไม่มีทางจับได้เลย ต้องส่ง stat ที่ถ่ายไว้ก่อนนี้
+        # (pre_analysis_stat) ให้ write_result เทียบกับ stat ตอนเขียนผลด้วยตัวเอง
+        try:
+            pre_stat = audio_path.stat()
+            pre_analysis_stat: tuple[int, float] | None = (
+                pre_stat.st_size,
+                pre_stat.st_mtime,
+            )
+        except OSError:
+            pre_analysis_stat = None
         try:
             analyzed = enroll.analyze(audio_path, pipeline=diarization_pipeline)
         except Exception:
@@ -54,7 +67,12 @@ def process_enroll_requests(config: Config, diarization_pipeline: Any = None) ->
             logger.exception("Failed to analyze enrollment clip %s", audio_file)
             continue
         try:
-            enroll.write_result(config.base_dir, audio_file, analyzed)
+            enroll.write_result(
+                config.base_dir,
+                audio_file,
+                analyzed,
+                pre_analysis_stat=pre_analysis_stat,
+            )
             logger.info(
                 "Analyzed enrollment clip %s -> %s", audio_file, analyzed.get("status")
             )

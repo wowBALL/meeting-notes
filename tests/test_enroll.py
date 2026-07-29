@@ -489,6 +489,105 @@ def test_list_entries_skips_a_row_whose_file_was_archived_mid_request(tmp_path):
     assert names == ["ok.ogg"]
 
 
+def test_write_result_downgrades_to_rejected_when_the_file_was_replaced_mid_analysis(
+    tmp_path,
+):
+    """CRITICAL A: analyze() อ่านไบต์ ณ เวลา T1 แต่ write_result เดิม stat() ไฟล์ตอน T3
+    (นาทีให้หลัง) เท่านั้น -- ระหว่างนั้นผู้ใช้แทนที่ enroll/สมชาย.ogg ด้วยการอัดคนละคน
+    ผลที่ได้ต้องไม่ถูกผูกเข้ากับไฟล์ใหม่แล้วรับรองว่า "ok" เพราะ embedding เป็นของไบต์
+    ชุดเดิมที่ไม่มีอยู่บนดิสก์แล้ว ผู้เรียก (watcher) ต้อง stat ไฟล์ก่อนส่งเข้า analyze()
+    แล้วส่ง (size, mtime) นั้นมาที่นี่เป็น pre_analysis_stat
+    """
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    stat_before_analysis = audio_path.stat()
+    pre_analysis_stat = (stat_before_analysis.st_size, stat_before_analysis.st_mtime)
+
+    # จำลองผู้ใช้แทนที่ไฟล์ระหว่าง diarization กำลังทำงานอยู่ (เนื้อหา/ขนาดต่างไปจากเดิม)
+    audio_path.unlink()
+    audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
+
+    path = enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding": [0.1, 0.2], "suggested_name": "สมชาย"},
+        pre_analysis_stat=pre_analysis_stat,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "rejected"
+    assert payload["reason"] == "analysis_failed"
+    assert "embedding" not in payload
+
+
+def test_write_result_keeps_ok_when_the_file_matches_the_pre_analysis_stat(tmp_path):
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    stat_before_analysis = audio_path.stat()
+    pre_analysis_stat = (stat_before_analysis.st_size, stat_before_analysis.st_mtime)
+
+    path = enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding": [0.1, 0.2], "suggested_name": "สมชาย"},
+        pre_analysis_stat=pre_analysis_stat,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "ok"
+    assert payload["embedding"] == [0.1, 0.2]
+
+
+def test_write_result_downgrades_to_rejected_when_it_cannot_stat_the_file_at_write_time(
+    tmp_path,
+):
+    """CRITICAL B: เดิม write_result เขียน audio_size/audio_mtime เป็น None เมื่อ stat
+    ไม่สำเร็จ แล้วปล่อย "ok" หลุดออกไปพร้อม embedding -- ต้องลดสถานะเป็น rejected แทน
+    เพราะไม่มีทางผูกผลนี้กับไฟล์อะไรได้เลย (เช่น ผู้ใช้กด "เอาออกจากรายการ" ระหว่างที่
+    watcher กำลังวิเคราะห์อยู่พอดี ไฟล์ถูกย้ายเข้า done/ ไปแล้วตอนเขียนผล)
+    """
+    (tmp_path / "enroll").mkdir()  # ไม่มีไฟล์เสียงอยู่จริงตอนเขียนผล
+
+    path = enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding": [0.1, 0.2], "suggested_name": "สมชาย"},
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["status"] == "rejected"
+    assert payload["reason"] == "analysis_failed"
+    assert "embedding" not in payload
+    assert payload["audio_size"] is None
+    assert payload["audio_mtime"] is None
+
+
+def test_read_result_treats_a_null_binding_as_unverifiable_not_as_a_match(tmp_path):
+    """CRITICAL B: การไม่มี binding (audio_size/audio_mtime เป็น null) ต้องแปลว่า
+    "ยืนยันไม่ได้" ไม่ใช่ "ผ่านการเช็ค" -- ไม่งั้น sidecar ที่หลงเหลือจากบั๊กเดิม (หรือไฟล์
+    ที่ถูกแก้มือ) จะเสนอ embedding ของคนหนึ่งให้ยืนยันภายใต้ไฟล์เสียงของอีกคนโดยไม่มีการ
+    เช็คใด ๆ เลย
+    """
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    result_file = audio_path.with_name(audio_path.name + ".result.json")
+    result_file.write_text(
+        json.dumps(
+            {
+                "audio_file": "สมชาย.ogg",
+                "analyzed": "2026-07-29T10:00:00",
+                "audio_size": None,
+                "audio_mtime": None,
+                "status": "ok",
+                "embedding": [0.9, 0.9],
+                "suggested_name": "สมชาย",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
+    # ต้องเก็บกวาด sidecar ที่ยืนยันไม่ได้ทิ้งไปเลย ไม่ปล่อยค้างให้ผูกผิดซ้ำได้อีก
+    assert not result_file.exists()
+
+
 def test_read_result_returns_none_for_a_corrupt_file(tmp_path):
     directory = tmp_path / "enroll"
     directory.mkdir()
@@ -501,6 +600,63 @@ def test_read_result_returns_none_when_there_is_no_result(tmp_path):
     (tmp_path / "enroll").mkdir()
 
     assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
+
+
+def test_read_result_keeps_the_sidecar_on_a_transient_permission_error(tmp_path, monkeypatch):
+    """Minor C: PermissionError ชั่วคราวจากโปรแกรมสแกนไวรัส/ตัวซิงก์ไฟล์ (ปัญหาที่โปรเจกต์
+    นี้ยอมรับอยู่แล้ว ดู storage.replace_with_retry) ต้องไม่ถูกตีความว่าไฟล์เสียงหายไปแล้ว
+    -- ไม่งั้นผลวิเคราะห์ GPU ที่เสร็จสมบูรณ์แล้วจะถูกลบทิ้งฟรี ๆ โดยไม่มีอะไรบอกผู้ใช้เลย
+    """
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    result_file = audio_path.with_name(audio_path.name + ".result.json")
+    real_stat = Path.stat
+
+    def flaky_stat(self, *args, **kwargs):
+        if self == audio_path:
+            raise PermissionError("locked by antivirus")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
+    # ไม่รู้แน่ชัดว่าไฟล์หายจริงหรือแค่ล็อกชั่วคราว -- ต้องเก็บ sidecar ไว้ก่อน ไม่ล้างทิ้ง
+    assert result_file.exists()
+
+
+def test_read_result_clears_the_sidecar_when_the_file_is_genuinely_gone(tmp_path):
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    result_file = audio_path.with_name(audio_path.name + ".result.json")
+
+    audio_path.unlink()
+
+    assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
+    assert not result_file.exists()
+
+
+def test_sweep_orphan_sidecars_keeps_the_sidecar_on_a_transient_permission_error(
+    tmp_path, monkeypatch
+):
+    """Minor C: _sweep_orphan_sidecars ใช้ Path.is_file() ซึ่งกลืน OSError ใด ๆ แล้วคืน
+    False เงียบ ๆ -- PermissionError ชั่วคราวจึงถูกตีความว่า "ไฟล์เสียงไม่มีอยู่" ผิด ๆ
+    แล้วลบ sidecar ของผลวิเคราะห์ที่เสร็จสมบูรณ์แล้วทิ้งไปฟรี ๆ
+    """
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    result_file = audio_path.with_name(audio_path.name + ".result.json")
+    real_stat = Path.stat
+
+    def flaky_stat(self, *args, **kwargs):
+        if self == audio_path:
+            raise PermissionError("locked by antivirus")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    enroll.list_entries(tmp_path)  # เรียก _sweep_orphan_sidecars ภายใน
+
+    assert result_file.exists()
 
 
 def test_clear_removes_both_sidecars_and_leaves_the_audio(tmp_path):

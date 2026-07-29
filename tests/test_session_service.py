@@ -884,6 +884,35 @@ def test_post_confirm_still_returns_200_when_archiving_the_file_fails(tmp_path):
     assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
 
 
+def test_post_confirm_survives_a_non_os_error_from_archive_after_the_registry_is_saved(
+    tmp_path,
+):
+    """Minor E: confirm_enroll ดักแค่ OSError รอบ archive() -- คอมเมนต์เดิมของโค้ดบอกว่า
+    shutil.move raise shutil.Error ได้ (เช่นมีไฟล์ชื่อชนกันโผล่ใน done/ ระหว่างเช็คกับตอน
+    ย้ายจริง) ซึ่งไม่ใช่ OSError แต่ python 3.12 ที่โปรเจกต์นี้ใช้ทำให้ shutil.Error เป็น
+    subclass ของ OSError ไปแล้วจริง ๆ (ตรวจแล้ว) -- ใช้ RuntimeError แทนเพื่อพิสูจน์คุณค่า
+    ของการดักกว้างเป็น Exception: อะไรก็ตามที่ archive() โยนออกมาหลังทะเบียนถูกบันทึกแล้ว
+    (เสียงถูกจำแล้วจริง) ต้องไม่หลุดเป็น 500 -- ผู้ใช้กดซ้ำแล้วได้ตัวอย่างซ้ำเข้าทะเบียน
+    คนเดิม ซึ่งเป็นสิ่งที่ guard นี้มีไว้กันอยู่แล้ว
+    """
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    client = create_app(config).test_client()
+
+    with patch("src.enroll.archive", side_effect=RuntimeError("unexpected")):
+        response = client.post(
+            "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"}
+        )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["warning"] == "archive_failed"
+    registry = speakers.load_registry(tmp_path)
+    assert registry[0]["name"] == "สมชาย"
+
+
 def test_post_confirm_returns_404_when_there_is_no_result_yet(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
@@ -909,6 +938,26 @@ def test_delete_enroll_archives_the_file_without_touching_the_registry(tmp_path)
     assert response.status_code == 200
     assert (tmp_path / "enroll" / "done" / "สมชาย.ogg").is_file()
     assert speakers.load_registry(tmp_path) == []
+
+
+def test_delete_enroll_returns_a_notice_instead_of_500_when_the_move_is_blocked(tmp_path):
+    """Minor D: ปุ่ม "เอาออกจากรายการ" ตอนนี้โชว์ได้แม้การ์ดยังอยู่ในคิว (กำลังแปลงไฟล์
+    ด้วย ffmpeg) -- shutil.move บน Windows raise PermissionError ถ้าไฟล์ยังถูกเปิดค้างอยู่
+    dismiss_enroll เดิมไม่มี try ล้อม archive() เลย exception จึงหลุดเป็น 500 ที่ผู้ใช้ไม่
+    เห็นคำอธิบายอะไรเลย ต้องได้ response ที่หน้าเว็บ (errAction) render เป็น notice ได้
+    """
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    client = create_app(config).test_client()
+
+    with patch("src.enroll.archive", side_effect=PermissionError("file in use")):
+        response = client.delete("/api/enroll/สมชาย.ogg")
+
+    # ต้องได้ JSON error ที่หน้าเว็บ render เป็น notice ได้ ไม่ใช่ 500 ที่ไม่มี body ให้อ่าน
+    assert response.status_code == 500
+    assert response.get_json()["error"]
+    # ไฟล์ต้องยังอยู่ที่เดิมให้ผู้ใช้ลองใหม่ได้ -- ไม่มีทางรู้ว่า archive คืบหน้าไปแค่ไหน
+    assert (tmp_path / "enroll" / "สมชาย.ogg").is_file()
 
 
 def test_get_enroll_page_is_served(tmp_path):

@@ -239,11 +239,13 @@ def test_a_failing_result_write_falls_back_to_a_minimal_failure_result(tmp_path)
     real_write_result = enroll.write_result
     calls = []
 
-    def flaky_write_result(base_dir, audio_file, analyzed, now=None):
+    def flaky_write_result(base_dir, audio_file, analyzed, pre_analysis_stat=None, now=None):
         calls.append(analyzed)
         if len(calls) == 1:
             raise OSError("disk full")
-        return real_write_result(base_dir, audio_file, analyzed, now=now)
+        return real_write_result(
+            base_dir, audio_file, analyzed, pre_analysis_stat=pre_analysis_stat, now=now
+        )
 
     with (
         patch(
@@ -258,6 +260,41 @@ def test_a_failing_result_write_falls_back_to_a_minimal_failure_result(tmp_path)
     assert result is not None
     assert result["status"] == "rejected"
     assert result["reason"] == "analysis_failed"
+
+
+def test_process_enroll_requests_rejects_a_result_whose_file_was_replaced_mid_analysis(
+    tmp_path,
+):
+    """CRITICAL A: watcher ต้อง stat ไฟล์ก่อนส่งเข้า analyze() แล้วส่ง (size, mtime) นั้น
+    ต่อให้ write_result -- ถ้าไม่ทำ ไฟล์ที่ถูกแทนที่ระหว่าง diarization (ใช้เวลานาน) จะถูก
+    write_result stat() ใหม่ตอนเขียนผล แล้วผูก embedding ของไบต์ชุดเก่าเข้ากับไฟล์ใหม่
+    เงียบ ๆ เพราะ record ที่เพิ่งเขียนกับไฟล์บนดิสก์ ณ ตอนนั้น "ตรง" กันเป๊ะ อ่านผ่าน
+    read_result ธรรมดาจึงจับบั๊กนี้ไม่ได้ -- ต้องอ่าน sidecar ดิบเพื่อตรวจให้แน่ใจ
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = make_enroll_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+
+    def analyze_then_replace(path, pipeline):
+        # จำลองผู้ใช้แทนที่ไฟล์ผ่าน Explorer ระหว่างที่ diarization กำลังทำงานอยู่พอดี
+        audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
+        return {
+            "status": "ok",
+            "embedding": [0.5],
+            "speaker_count": 1,
+            "suggested_name": "สมชาย",
+        }
+
+    with patch("src.watcher.enroll.analyze", side_effect=analyze_then_replace):
+        watch_loop(config, single_pass=True)
+
+    raw = json.loads(
+        (tmp_path / "enroll" / "สมชาย.ogg.result.json").read_text(encoding="utf-8")
+    )
+    assert raw["status"] == "rejected"
+    assert raw["reason"] == "analysis_failed"
+    assert "embedding" not in raw
 
 
 def test_pending_requests_raising_does_not_stop_the_inbox_from_being_processed(tmp_path):

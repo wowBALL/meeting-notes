@@ -468,10 +468,15 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                 return jsonify({"error": "save_failed"}), 500
 
         # ทะเบียนถูกเซฟไปแล้ว = เสียงถูกจำแล้วจริง การย้ายไฟล์ไม่สำเร็จจึงต้องไม่กลายเป็น
-        # 500 ที่บอกผู้ใช้ว่าล้มเหลว เพราะเขาจะกดใหม่แล้วได้ตัวอย่างซ้ำในทะเบียน
+        # 500 ที่บอกผู้ใช้ว่าล้มเหลว เพราะเขาจะกดใหม่แล้วได้ตัวอย่างซ้ำในทะเบียน -- ดัก
+        # Exception กว้าง ๆ ไม่ใช่แค่ OSError (Minor E): shutil.move ลอง os.rename ก่อนแล้ว
+        # ถอยไป copy2+remove เมื่อ os.rename พัง เส้นทางไหนก็โยน exception ที่ไม่ใช่ OSError
+        # ได้เสมอ (เช่น shutil.Error ตอนมีไฟล์ชื่อชนกันโผล่ใน done/ ระหว่างเช็คกับตอนย้าย
+        # จริง) -- คอมเมนต์ข้างบนยืนยันเองอยู่แล้วว่าไม่มีอะไรหลังบันทึกทะเบียนสำเร็จจะทำให้
+        # request นี้ล้มเหลวได้อีก ดักแค่ OSError จึงขัดกับเจตนาที่เขียนไว้เอง
         try:
             enroll.archive(config.base_dir, audio_file)
-        except OSError as e:
+        except Exception as e:
             logger.warning("ย้าย %s เข้า done/ ไม่ได้ แต่เสียงถูกจำแล้ว: %s", audio_file, e)
             # archive() ปกติเรียก clear() เองหลังย้ายไฟล์สำเร็จ แต่พังก่อนถึงตรงนั้น --
             # ถ้าปล่อย result.json เดิมไว้ การ์ดนี้จะยังโชว์สถานะ "พร้อมบันทึก" ในรอบหน้า
@@ -486,10 +491,23 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
 
     @app.delete("/api/enroll/<path:audio_file>")
     def dismiss_enroll(audio_file):
-        """เอาไฟล์ออกจากรายการโดยไม่ลงทะเบียน -- ย้ายเข้า done/ ไม่ลบทิ้ง"""
+        """เอาไฟล์ออกจากรายการโดยไม่ลงทะเบียน -- ย้ายเข้า done/ ไม่ลบทิ้ง
+
+        Minor D: ปุ่มนี้โชว์ได้แม้การ์ดยังอยู่ในคิว (กำลังวิเคราะห์อยู่) แล้ว -- ไฟล์เสียง
+        อาจยังถูก ffmpeg เปิดค้างอยู่ระหว่างแปลงเป็น wav ตอนนั้น shutil.move ใน
+        enroll.archive raise PermissionError ได้บน Windows เดิมไม่มี try ล้อมเลย exception
+        จึงหลุดเป็น 500 ที่ไม่มีอะไรบอกผู้ใช้ -- ต้องจับไว้แล้วคืนรูปแบบความล้มเหลวที่
+        หน้าเว็บ (errAction) render เป็น notice ได้อยู่แล้ว ไฟล์ต้องอยู่ที่เดิมให้ลองใหม่ได้
+        เพราะไม่รู้ว่า archive คืบหน้าไปแค่ไหนก่อนพัง
+        """
         if not enroll.is_safe_filename(audio_file):
             return jsonify({"error": "bad_request"}), 400
-        if enroll.archive(config.base_dir, audio_file) is None:
+        try:
+            archived = enroll.archive(config.base_dir, audio_file)
+        except Exception as e:
+            logger.warning("เอา %s ออกจากรายการไม่ได้ (archive ล้มเหลว): %s", audio_file, e)
+            return jsonify({"error": "archive_failed"}), 500
+        if archived is None:
             return jsonify({"error": "not_found"}), 404
         return jsonify({"ok": True})
 
