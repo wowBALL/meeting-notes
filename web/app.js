@@ -12,6 +12,7 @@ const UI = {
     workerOffNote:
       "ยังอัดได้ตามปกติ ไฟล์จะเข้าคิวรอไว้ แล้วประมวลผลเมื่อตัวประมวลผลกลับมา",
     offline: "ติดต่อตัวรันไม่ได้ — ตรวจว่าหน้าต่าง MeetingRunnerUI ยังเปิดอยู่",
+    enrollLink: "ลงทะเบียนเสียง",
     mode: "รูปแบบการใช้ AI",
     room: "ชื่อห้อง (ไม่ใส่ก็ได้)",
     roomPh: "เช่น standup เช้าวันจันทร์",
@@ -58,6 +59,7 @@ const UI = {
     workerOffNote:
       "You can still record. The file waits in the queue and is processed when the worker comes back.",
     offline: "Cannot reach the runner — check that the MeetingRunnerUI window is still open",
+    enrollLink: "Enroll voices",
     mode: "AI mode",
     room: "Room name (optional)",
     roomPh: "e.g. monday standup",
@@ -466,6 +468,7 @@ function signatureOf(state, view, progress) {
 function render(state) {
   const x = t();
   el("hTitle").textContent = x.title;
+  el("enrollLink").textContent = x.enrollLink;
   el("langBtn").textContent = x.lang;
   el("footLabel").textContent = x.activity;
   el("cfTitle").textContent = x.cfTitle;

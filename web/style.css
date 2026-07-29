@@ -55,6 +55,11 @@ body {
 .head .spacer { flex: 1; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
 .dot.off { background: var(--text-3); }
+.enrollLink {
+  font-size: 12px; color: var(--text-2); text-decoration: none;
+  padding: 2px 4px; border-radius: 6px;
+}
+.enrollLink:hover { color: var(--accent); text-decoration: underline; }
 .worker { color: var(--text-2); display: flex; align-items: center; gap: 6px; }
 .lang {
   font: inherit; font-size: 12px; padding: 2px 8px; cursor: pointer;
