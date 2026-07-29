@@ -2,7 +2,12 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.diarize import DiarizationResult, diarize_audio, load_diarization_pipeline
+from src.diarize import (
+    DIARIZATION_CHECKPOINT,
+    DiarizationResult,
+    diarize_audio,
+    load_diarization_pipeline,
+)
 
 
 def _fake_pyannote(mock_pipeline_cls):
@@ -177,7 +182,7 @@ def test_load_diarization_pipeline_moves_to_gpu_when_available():
         result = load_diarization_pipeline("hf-test-token")
 
     mock_pipeline_cls.from_pretrained.assert_called_once_with(
-        "pyannote/speaker-diarization-3.1", token="hf-test-token"
+        DIARIZATION_CHECKPOINT, token="hf-test-token"
     )
     # pyannote defaults to CPU; without this .to() a 50-minute meeting spends
     # 15+ minutes in diarization instead of ~2

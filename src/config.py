@@ -38,6 +38,12 @@ DEFAULT_UI_LANG = "th"
 # ซึ่งเป็นฝั่งที่เสียหายน้อยกว่า: การไม่ใส่ชื่อแก้ได้ด้วยการคลิก การใส่ชื่อผิดคนลง
 # สรุปที่ระบุผู้รับผิดชอบแก้ไม่ได้ถ้าไม่มีใครสังเกต
 #
+# *** experiment/diarization-community1 ***: ตัวเลขข้างบนวัดกับ embedding ของ
+# pyannote/speaker-diarization-3.1 (wespeaker-voxceleb-resnet34-LM) เท่านั้น
+# src/diarize.py บน branch นี้เปลี่ยนไปใช้ speaker-diarization-community-1 ซึ่งมี
+# embedding คนละพื้นที่ -- 0.80/0.50 นี้ยังไม่ได้วัดใหม่กับมัน อย่าเชื่อผลจับคู่/
+# ไม่จับคู่ที่ auto-apply บน branch นี้จนกว่าจะวัดซ้ำ
+#
 # LOW ยังไม่ได้วัด -- คนละคนที่วัดได้อยู่แถว 0.31-0.33 จึงยังห่างจาก 0.50 พอสมควร
 DEFAULT_SPEAKER_MATCH_HIGH = 0.80
 DEFAULT_SPEAKER_MATCH_LOW = 0.50

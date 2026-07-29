@@ -6,12 +6,20 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+DIARIZATION_CHECKPOINT = "pyannote/speaker-diarization-community-1"
+# ทดลองบน branch นี้เท่านั้น (experiment/diarization-community1) -- เปลี่ยนจาก
+# speaker-diarization-3.1 เพราะวัดกับ Meet1900 แล้วพบว่า community-1 (VBxClustering)
+# แยกคนที่ 3.1 ยัดรวมกันออกมาได้จริง (19.5% ของคู่ประโยคที่ 3.1 บอกว่าคนเดียวกัน แต่
+# community-1 แยก เทียบกับแค่ 1.1% ที่กลับกัน)
+#
+# embedding ของ community-1 คนละพื้นที่กับ wespeaker-voxceleb-resnet34-LM ที่ 3.1 ใช้
+# เกณฑ์ SPEAKER_MATCH_HIGH/LOW ที่วัดไว้กับ 3.1 (0.80/0.50) ยังไม่ได้วัดใหม่สำหรับ
+# embedding นี้ -- ทะเบียนต้องว่างก่อนสลับกลับไป 3.1 เสมอ ไม่งั้นตัวอย่างเสียงที่
+# enroll ไว้ตอนอยู่ branch นี้จะจำไม่ได้อีกฝั่งหนึ่ง
 def load_diarization_pipeline(hf_token: str) -> Any:
     from pyannote.audio import Pipeline
 
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1", token=hf_token
-    )
+    pipeline = Pipeline.from_pretrained(DIARIZATION_CHECKPOINT, token=hf_token)
     # Pipeline.from_pretrained leaves the model on the CPU; nothing warns about
     # it, the work just runs an order of magnitude slower (measured: 15+ minutes
     # of diarization for a 50-minute meeting vs ~2 on the GPU). Same model, same
