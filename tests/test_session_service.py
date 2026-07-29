@@ -1,3 +1,4 @@
+import inspect
 import json
 import time
 from unittest.mock import patch
@@ -610,6 +611,121 @@ def test_get_enroll_also_returns_the_current_registry(tmp_path):
     assert body["speakers"][0]["name"] == "สมหญิง"
     assert body["speakers"][0]["sample_count"] == 1
     assert "embedding" not in json.dumps(body)
+
+
+def test_get_enroll_reports_the_best_registry_match_when_at_or_above_the_low_threshold(
+    tmp_path,
+):
+    """finding B ของรีวิวรอบสุดท้าย: สเปกต้องการคะแนนความคล้ายกับคนที่มีอยู่แล้วในทะเบียน
+    แต่ฟีเจอร์นี้ไม่เคยถูกสร้างจริงและไม่มีใครจดไว้ -- นี่คือด่านเดียวที่จับได้ทั้งกรณี
+    ลงทะเบียนคนเดิมซ้ำด้วยการสะกดชื่อคนละแบบ และกรณีเสียงเป็นของคนอื่น
+    """
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1")
+    )
+    put_enroll_audio(tmp_path)
+    # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.50) กับ HIGH (0.70) เกณฑ์
+    # เริ่มต้นของ Config พอดี ไม่ถึงขั้นเสนอให้รวมชื่อ แต่ต้องเตือนให้เห็น
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.6, 0.8]})
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    match = body["files"][0]["match"]
+    assert match["name"] == "สมชาย"
+    assert match["score"] == pytest.approx(0.6, abs=0.01)
+    assert match["confident"] is False
+
+
+def test_get_enroll_flags_a_match_at_or_above_the_high_threshold(tmp_path):
+    """คะแนนถึงเกณฑ์ HIGH ต้องบอกตรง ๆ ว่าบันทึกชื่อเดิมจะรวมตัวอย่างเข้าคนเดิมทันที
+    (พฤติกรรมจริงของ add_sample เมื่อชื่อซ้ำ) หน้าเว็บใช้ flag นี้ตัดสินว่าจะโชว์
+    ประโยคเตือนเพิ่มหรือไม่
+    """
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1")
+    )
+    put_enroll_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [1.0, 0.0]})
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    match = body["files"][0]["match"]
+    assert match["score"] == 1.0
+    assert match["confident"] is True
+
+
+def test_get_enroll_omits_match_below_the_low_threshold(tmp_path):
+    """คะแนนต่ำกว่า LOW ถือว่าไม่รู้จัก -- ต้องไม่มีคีย์ match เลย ไม่ใช่ match ที่มี
+    คะแนนต่ำเกลื่อนจนผู้ใช้เพิกเฉยข้อความเตือนที่มีความหมายจริงไปด้วย
+    """
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1")
+    )
+    put_enroll_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.0, 1.0]})
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    assert "match" not in body["files"][0]
+
+
+def test_get_enroll_never_leaks_the_embedding_even_when_a_match_is_found(tmp_path):
+    """ตรึงไว้ว่า /api/enroll ต้องไม่ส่ง embedding ออกไปเลย แม้แต่ตอนที่คำนวณ match
+    (ซึ่งต้องอ่าน result.json ดิบเพื่อเทียบ) -- ผู้เรียกใน session_service ต้องเลือก
+    เอาแค่ name/score/confident ออกจาก Match เท่านั้น ไม่ใช่ทั้งก้อน
+    """
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1")
+    )
+    put_enroll_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [1.0, 0.0]})
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    assert "match" in body["files"][0]
+    assert "embedding" not in json.dumps(body)
+
+
+def test_list_speakers_and_list_enroll_share_the_projection_helper():
+    """finding C ของรีวิวรอบสุดท้าย: list_enroll เคยคัดลอกการฉายภาพผู้พูด
+    (id/name/sample_count) มาจาก list_speakers ตรง ๆ เป็นสำเนาที่สาม โดยไม่ใช้ helper
+    ตัวไหนเลยแม้แต่ _public_speaker ที่มีอยู่แล้ว -- เทสต์นี้เป็น white-box โดยตั้งใจ
+    เพราะเอาต์พุตของทั้งสอง endpoint เหมือนกันอยู่แล้วตั้งแต่ก่อนแก้ (นั่นคือตัวปัญหา
+    เอง) จึงจับด้วยเทสต์ระดับ HTTP ไม่ได้ ต้องตรวจซอร์สโค้ดว่าฉายภาพซ้ำกี่ที่แทน
+    """
+    source = inspect.getsource(create_app)
+
+    # ก่อนแก้: list_speakers กับ list_enroll ต่างประกอบ {"id":..,"name":..,
+    # "sample_count":..} เองคนละที่ ทำให้ literal "sample_count" โผล่ในซอร์สของ
+    # create_app สองครั้ง หลังแก้ต้องเหลือศูนย์ครั้งเพราะย้ายไปอยู่ใน helper ระดับ
+    # โมดูลแทน (_speaker_summary) ซึ่งอยู่นอก create_app
+    assert source.count('"sample_count"') == 0, (
+        "พบการประกอบ sample_count อยู่ใน create_app โดยตรง -- "
+        "ต้องย้ายไปที่ helper ระดับโมดูลแทน ไม่ใช่คัดลอกซ้ำในสอง endpoint"
+    )
+
+
+def test_speakers_and_enroll_endpoints_report_the_same_projection_for_a_speaker(
+    client, config
+):
+    """พฤติกรรมที่สังเกตได้จากภายนอกต้องไม่เปลี่ยนหลังรวม helper -- shape ของทั้งสอง
+    endpoint ต้องยังตรงกันทุกฟิลด์เป๊ะเหมือนก่อนแก้
+    """
+    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1")
+    save_registry(config.base_dir, registry)
+
+    speakers_body = client.get("/api/speakers").get_json()
+    enroll_body = client.get("/api/enroll").get_json()
+
+    assert speakers_body["speakers"] == enroll_body["speakers"]
 
 
 def test_post_analyze_writes_a_request_for_each_named_file(tmp_path):

@@ -47,6 +47,18 @@ const UI = {
     reason_unusable_embedding:
       "ถอดเวกเตอร์เสียงจากไฟล์นี้ไม่ได้ ลองใช้ไฟล์ที่เสียงชัดกว่านี้",
     reason_analysis_failed: "วิเคราะห์ไฟล์นี้ไม่สำเร็จ",
+    // ความคล้ายกับคนที่มีอยู่แล้วในทะเบียน (finding B ของรีวิวรอบสุดท้าย) -- คำนวณที่
+    // เซิร์ฟเวอร์เท่านั้น หน้านี้แค่โชว์ชื่อกับคะแนนที่ปัดมาแล้ว
+    matchSimilar: 'คล้ายกับ "{name}" ที่มีอยู่แล้วในทะเบียน ({score})',
+    matchMerge:
+      'บันทึกด้วยชื่อ "{name}" จะรวมตัวอย่างเสียงนี้เข้ากับคนคนนั้นทันที ' +
+      "ไม่ได้สร้างคนใหม่",
+    // แถบยืนยันก่อนลบคนออกจากทะเบียน (finding A ของรีวิวรอบสุดท้าย) -- คีย์เดียวกับ
+    // รูปแบบที่ app.js ใช้ยืนยันก่อนปิดห้อง
+    delTitle: 'ลบ "{name}" ออกจากทะเบียนใช่ไหม',
+    delBody: "จะลบตัวอย่างเสียงที่เก็บไว้ทั้งหมด {n} ตัวอย่าง กู้คืนไม่ได้",
+    delCancel: "ยกเลิก",
+    delConfirm: "ลบเลย",
   },
   en: {
     title: "Enroll speaker voices",
@@ -94,6 +106,14 @@ const UI = {
     reason_unusable_embedding:
       "No usable voice vector could be extracted. Try a cleaner recording",
     reason_analysis_failed: "Analyzing this file failed",
+    matchSimilar: 'Similar to "{name}", already in the registry ({score})',
+    matchMerge:
+      'Saving under the name "{name}" will merge this sample into that person right away, ' +
+      "not create a new one",
+    delTitle: 'Delete "{name}" from the registry?',
+    delBody: "This removes all {n} saved voice samples. This cannot be undone.",
+    delCancel: "Cancel",
+    delConfirm: "Delete",
   },
 };
 
@@ -118,6 +138,10 @@ let loadError = null;
 // เก็บ handle ของ poll ที่ตั้งไว้ -- ยกเลิกของเก่าก่อนตั้งใหม่เสมอ กัน chain
 // ซ้อนกันหลายสายเวลา load() ถูกเรียกซ้ำจากปุ่มต่าง ๆ ระหว่างที่ยังมีคิวค้าง
 let pollHandle = null;
+// คนที่กด "ลบ" ค้างไว้รอยืนยัน (finding A ของรีวิวรอบสุดท้าย) -- ต้องมีขั้นยืนยันก่อน
+// ลบจริง เพราะปุ่มนี้ล้างตัวอย่างเสียงสะสมได้ถึง 10 ตัวอย่างในคลิกเดียว และอยู่ติดกับ
+// การ์ดไฟล์ที่ผู้ใช้ไล่กดอยู่แล้ว | { id, name, sampleCount } | null
+let pendingDelete = null;
 
 function setNotice(text, ok) {
   notice = { text, ok };
@@ -235,6 +259,19 @@ function renderFile(file) {
     return box;
   }
 
+  // ความคล้ายกับคนที่มีอยู่แล้วในทะเบียน (finding B ของรีวิวรอบสุดท้าย) -- คำนวณที่
+  // เซิร์ฟเวอร์แล้วเท่านั้น (/api/enroll) ที่นี่แค่โชว์ชื่อกับคะแนนที่ปัดมาให้ ไม่มี
+  // เวกเตอร์อะไรมาถึงฝั่งนี้เลย ชื่อคนมาจากทะเบียนผ่าน fill()/textContent เสมอ
+  if (file.match) {
+    const score = file.match.score.toFixed(2);
+    box.append(
+      node("div", "hint", fill(t().matchSimilar, { name: file.match.name, score }))
+    );
+    if (file.match.confident) {
+      box.append(node("div", "hint", fill(t().matchMerge, { name: file.match.name })));
+    }
+  }
+
   const row = node("div", "row");
   const input = document.createElement("input");
   input.type = "text";
@@ -282,6 +319,19 @@ function render() {
   document.title = t().title;
   el("wText").textContent = worker ? t().workerOn : t().workerOff;
   el("wDot").classList.toggle("off", !worker);
+
+  // แถบยืนยันก่อนลบ -- คนละคำถามในแต่ละครั้งตามคนที่กดลบ จึงต้องตั้งข้อความใหม่ทุก
+  // รอบ ไม่ใช่ค่าคงที่แบบ cfTitle/cfBody ของ app.js ชื่อคนมาจากทะเบียน ผ่าน textContent
+  // เสมอ ไม่ประกอบเป็น HTML
+  el("cfNo").textContent = t().delCancel;
+  el("cfYes").textContent = t().delConfirm;
+  if (pendingDelete) {
+    el("cfTitle").textContent = fill(t().delTitle, { name: pendingDelete.name });
+    el("cfBody").textContent = fill(t().delBody, { n: pendingDelete.sampleCount });
+    el("scrim").classList.remove("hide");
+  } else {
+    el("scrim").classList.add("hide");
+  }
 
   const body = el("body");
   body.replaceChildren();
@@ -349,14 +399,15 @@ function render() {
       node("span", "n", `${speaker.sample_count} ${t().samples}`)
     );
     const remove = node("button", "del", t().remove);
-    remove.onclick = async () => {
-      try {
-        const response = await fetch(`/api/speakers/${speaker.id}`, { method: "DELETE" });
-        if (!response.ok) setNotice(t().errAction, false);
-      } catch (err) {
-        setNotice(t().errAction, false);
-      }
-      load();
+    // ไม่ยิง DELETE ทันที (finding A) -- แค่เปิดแถบยืนยัน ตัวจริงอยู่ที่ el("cfYes")
+    // ข้างล่าง ซึ่งอ่าน pendingDelete ตอนกดยืนยันเท่านั้น
+    remove.onclick = () => {
+      pendingDelete = {
+        id: speaker.id,
+        name: speaker.name,
+        sampleCount: speaker.sample_count,
+      };
+      render();
     };
     row.append(remove);
     body.append(row);
@@ -368,6 +419,30 @@ el("langBtn").onclick = () => {
   // คีย์เดียวกับ app.js -- สลับภาษาที่หน้าไหนแล้วอีกหน้าจำตาม
   localStorage.setItem("runnerLang", lang);
   render();
+};
+
+// รูปแบบเดียวกับ el("cfNo")/el("cfYes") ใน app.js: ผูกครั้งเดียวตรงนี้ อ่านสถานะ
+// ปัจจุบัน (pendingDelete) ตอนถูกกด ไม่ใช่ตอนวาด
+el("cfNo").onclick = () => {
+  pendingDelete = null;
+  render();
+};
+el("cfYes").onclick = async () => {
+  const target = pendingDelete;
+  pendingDelete = null;
+  if (!target) {
+    render();
+    return;
+  }
+  try {
+    const response = await fetch(`/api/speakers/${encodeURIComponent(target.id)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) setNotice(t().errAction, false);
+  } catch (err) {
+    setNotice(t().errAction, false);
+  }
+  load();
 };
 
 load();

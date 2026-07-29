@@ -162,6 +162,8 @@ button:disabled { opacity: .5; cursor: default; }
 }
 .file .top .spacer { flex: 1; }
 .file .meta { font-size: 11.5px; color: var(--text-3); margin-top: 3px; }
+/* คะแนนความคล้ายกับคนที่มีอยู่แล้วในทะเบียน -- โทนสีเดียวกับ .spk .hint เดิม */
+.file .hint { font-size: 11.5px; color: var(--accent); margin-top: 6px; }
 .file .row { display: flex; gap: 6px; margin-top: 8px; }
 .file .row input[type=text] { flex: 1; }
 .file .row button { width: auto; margin: 0; padding: 6px 11px; font-size: 12.5px; white-space: nowrap; }

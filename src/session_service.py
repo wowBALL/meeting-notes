@@ -105,6 +105,23 @@ def _public_speaker(speaker: dict) -> dict:
     return {key: value for key, value in speaker.items() if key != "embedding"}
 
 
+def _speaker_summary(speaker: dict) -> dict:
+    """คนหนึ่งคนในทะเบียน ในรูปสรุปที่ /api/speakers และ /api/enroll ใช้ร่วมกัน (finding C
+    ของรีวิวรอบสุดท้าย -- คนละรอบกับ finding 1-6 ที่แก้ไปก่อนหน้านี้)
+
+    ไม่ใช้ _public_speaker ตรง ๆ เพราะ shape ต่างกัน: _public_speaker เก็บทุกคีย์ยกเว้น
+    embedding ซึ่งใช้ได้กับผู้พูดที่รอตั้งชื่อ (embedding อยู่ระดับบนสุด) แต่ entry ใน
+    ทะเบียนไม่มี embedding ระดับบนสุดเลย -- มันซ้อนอยู่ใน samples[].embedding ถ้าเอา
+    _public_speaker มาใช้ตรงนี้ "samples" ทั้งก้อน (พร้อมเวกเตอร์เสียงทุกตัวข้างใน) จะ
+    หลุดออกไปทั้งดุ้นแทนที่จะเหลือแค่ sample_count
+    """
+    return {
+        "id": speaker["id"],
+        "name": speaker["name"],
+        "sample_count": len(speaker.get("samples", [])),
+    }
+
+
 def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Flask:
     app = Flask(__name__, static_folder=None)
     state = RecorderState()
@@ -212,11 +229,7 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         return jsonify(
             {
                 "speakers": [
-                    {
-                        "id": speaker["id"],
-                        "name": speaker["name"],
-                        "sample_count": len(speaker.get("samples", [])),
-                    }
+                    _speaker_summary(speaker)
                     for speaker in speakers.load_registry(config.base_dir)
                 ]
             }
@@ -346,9 +359,38 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
 
     @app.get("/api/enroll")
     def list_enroll():
+        registry = speakers.load_registry(config.base_dir)
+        entries = enroll.list_entries(config.base_dir)
+        # เทียบกับคนที่มีอยู่แล้วในทะเบียนสำหรับไฟล์ที่ลงทะเบียนได้ (finding B ของรีวิว
+        # รอบสุดท้าย: สเปกต้องการคะแนนความคล้ายแต่ไม่เคยถูกสร้างจริง) ทำที่นี่บนเซิร์ฟเวอร์
+        # เท่านั้น -- entries ที่ enroll.list_entries คืนมาตัด embedding ออกไปแล้ว จึงต้อง
+        # ไปอ่าน result.json ดิบอีกรอบเพื่อเอาเวกเตอร์มาเทียบ แล้วส่งกลับไปแค่ชื่อกับคะแนน
+        # ที่ปัดแล้ว -- เวกเตอร์ตัวจริงต้องไม่ออกจากฟังก์ชันนี้เลย ใช้ match_known/
+        # cosine_similarity ของ src/speakers.py ตัวเดิม ไม่เขียนตัวเทียบความเหมือนซ้ำ
+        # และใช้เกณฑ์ config.speaker_match_high/low ตัวเดิม ไม่ตั้งเกณฑ์ใหม่
+        for entry in entries:
+            if entry.get("status") != "ok":
+                continue
+            result = enroll.read_result(config.base_dir, entry["audio_file"])
+            embedding = result.get("embedding") if result else None
+            if not speakers.is_usable_embedding(embedding):
+                continue
+            matches = speakers.match_known(
+                {entry["audio_file"]: embedding},
+                registry,
+                config.speaker_match_high,
+                config.speaker_match_low,
+            )
+            match = matches.get(entry["audio_file"])
+            if match is not None:
+                entry["match"] = {
+                    "name": match.name,
+                    "score": round(match.score, 2),
+                    "confident": match.confident,
+                }
         return jsonify(
             {
-                "files": enroll.list_entries(config.base_dir),
+                "files": entries,
                 # หน้านี้สั่งงานให้ watcher ทำ ถ้า watcher ไม่ได้รัน ไฟล์จะค้างที่
                 # "กำลังวิเคราะห์" ตลอดไปโดยไม่มีอะไรบอกผู้ใช้ว่าทำไม
                 "worker": worker_ready(),
@@ -357,14 +399,7 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                 # ภาษา (finding 5 ของรีวิวรอบสุดท้าย) -- ค่าคงที่มีแหล่งเดียวคือ
                 # src/speakers.py
                 "min_speaking_seconds": speakers.MIN_SPEAKING_SECONDS,
-                "speakers": [
-                    {
-                        "id": speaker["id"],
-                        "name": speaker["name"],
-                        "sample_count": len(speaker.get("samples", [])),
-                    }
-                    for speaker in speakers.load_registry(config.base_dir)
-                ],
+                "speakers": [_speaker_summary(speaker) for speaker in registry],
             }
         )
 
