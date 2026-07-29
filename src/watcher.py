@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from src import enroll
 from src.config import Config
 from src.pipeline import process_file
 
@@ -26,6 +27,124 @@ def is_file_stable(path: Path, check_interval: float = 1.0) -> bool:
     return size_before == size_after and size_before > 0
 
 
+def process_enroll_requests(config: Config, diarization_pipeline: Any = None) -> None:
+    """วิเคราะห์ไฟล์ลงทะเบียนเสียงที่มีใบสั่งงานค้างอยู่
+
+    ใช้ pipeline ตัวเดียวกับที่ถอดเทปประชุมโดยเจตนา: เวกเตอร์ที่จะเอาไปเทียบกันต้องมา
+    จากโมเดลเดียวกัน ไม่งั้น cosine similarity ระหว่างสองฝั่งไม่มีความหมายเลย
+
+    ไม่เคยเขียน registry.json -- เขียนแค่ผลวิเคราะห์ไว้ให้คนมากดยืนยันที่หน้าเว็บ
+    """
+    try:
+        # pending_requests เองก็ raise ได้ (อ่านโฟลเดอร์ไม่ได้ ฯลฯ) และแต่เดิมมันอยู่ใน
+        # for header ตรง ๆ นอก try ใด ๆ เลย -- ถ้าพังตรงนี้ exception จะทะลุออกไปถึง
+        # watch_loop ซึ่งไม่ได้ห่อการเรียกฟังก์ชันนี้ไว้ ฆ่า watcher ทั้งตัวพร้อมงาน
+        # ประมวลผล inbox/ ที่ยังไม่ได้ทำในรอบถัดไปไปด้วย (finding 3 ของรีวิวรอบสุดท้าย)
+        pending = enroll.pending_requests(config.base_dir)
+    except Exception:
+        logger.exception("Failed to list pending enrollment requests")
+        return
+    for audio_file in pending:
+        audio_path = enroll.enroll_dir(config.base_dir) / audio_file
+        # CRITICAL A: ต้อง stat ไฟล์ *ก่อน* ส่งเข้า analyze() เสมอ ไม่ใช่ตอนเขียนผลทีหลัง
+        # -- diarization ใช้เวลานาน (วินาทีถึงนาที) ถ้าผู้ใช้แทนที่ไฟล์ระหว่างนั้น write_result
+        # ที่ stat() ตอนเขียนผลอย่างเดียวจะเห็นไฟล์ใหม่ "ตรง" กับตัวเองเสมอ แล้วผูก embedding
+        # ของไบต์ชุดเก่าเข้ากับไฟล์ใหม่โดยไม่มีทางจับได้เลย ต้องส่ง stat ที่ถ่ายไว้ก่อนนี้
+        # (pre_analysis_stat) ให้ write_result เทียบกับ stat ตอนเขียนผลด้วยตัวเอง
+        try:
+            pre_stat = audio_path.stat()
+            pre_analysis_stat: tuple[int, float] | None = (
+                pre_stat.st_size,
+                pre_stat.st_mtime,
+            )
+        except OSError as e:
+            # finding 1 (blocks merge): เดิมตรงนี้ตั้ง pre_analysis_stat = None แล้ว "เดินหน้า
+            # วิเคราะห์ต่อ" -- write_result.เดิมเช็คแค่ elif pre_analysis_stat is not None and
+            # ... ทำให้ None ข้ามการเปรียบเทียบไปเงียบ ๆ เท่ากับปิดการป้องกันทั้งหมดที่เพิ่ง
+            # เพิ่มเข้ามา (CRITICAL A) พอดีตอนที่ต้องการมันที่สุด: PermissionError ชั่วคราว
+            # (สแกนไวรัส/ตัวซิงก์ไฟล์) มักคลายล็อกเองไม่กี่ร้อย ms ให้หลัง ffmpeg/analyze()
+            # จึงอ่านไฟล์สำเร็จตามปกติ แต่ diarization กินเวลานาน (วินาทีถึงนาที) พอถึงตอน
+            # write_result stat ไฟล์ใหม่อาจถูกผู้ใช้แทนที่ไปแล้ว (อัดคนละคนทับชื่อเดิม) และ
+            # เพราะไม่มี pre_analysis_stat มาเทียบ ผล "ok" จะถูกเขียนพร้อม stat ของไฟล์ใหม่
+            # ผูกเข้ากับ embedding ของไฟล์เก่า -- ต้องไม่วิเคราะห์ไฟล์ที่ผูกกับไบต์อะไรไม่ได้
+            # ตั้งแต่ต้นแทน ข้ามไปเลย (ไม่เรียก analyze/write_result) ใบสั่งงานยังอยู่ครบ
+            # (pending_requests ยังเห็นว่า "สั่งแล้วแต่ยังไม่มีผล") รอบ poll หน้าจะลองใหม่เอง
+            # เมื่อล็อกคลาย -- ผลพลอยได้คือไม่เสีย GPU diarization เต็มรอบไปกับผลที่ต้องทิ้ง
+            logger.warning(
+                "stat ไฟล์ %s ก่อนวิเคราะห์ไม่สำเร็จชั่วคราว (%s) -- ข้ามรอบ poll นี้ ไม่วิเคราะห์"
+                "ไฟล์ที่ผูกกับไบต์อะไรไม่ได้ รอบหน้าจะลองใหม่เองเมื่อล็อกคลาย",
+                audio_file,
+                e,
+            )
+            continue
+        try:
+            analyzed = enroll.analyze(audio_path, pipeline=diarization_pipeline)
+        except Exception:
+            # enroll.analyze ไม่ raise อยู่แล้วโดยสัญญาของมัน แต่กันไว้อีกชั้น: ไฟล์เดียว
+            # ที่พังต้องไม่ทำให้ไฟล์อื่นในคิวไม่ถูกทำ
+            logger.exception("Failed to analyze enrollment clip %s", audio_file)
+            continue
+        try:
+            written = enroll.write_result(
+                config.base_dir,
+                audio_file,
+                analyzed,
+                pre_analysis_stat=pre_analysis_stat,
+            )
+            # finding 4 ของรีวิวรอบนี้: write_result คืน None เมื่อผลถูกทิ้งเพราะผูกกับ
+            # ไบต์ไหนไม่ได้ (ไฟล์เสียงถูกแทนที่ระหว่างวิเคราะห์ ฯลฯ) -- เดิม log บรรทัด
+            # ข้างล่างนี้ยิง INFO "-> ok" แบบไม่มีเงื่อนไขเสมอ แม้ตอนที่ผลถูกทิ้งไปแล้ว
+            # ผู้คุมระบบจะเห็น WARNING เรื่องผูกไม่ได้ตามด้วย INFO อ้างว่าสำเร็จทันที ต้อง
+            # แยก log ตามค่าที่คืนจริง ไม่ใช่ตาม status ที่ analyze() รายงานมาเฉย ๆ
+            if written is None:
+                logger.warning(
+                    "Discarded the analysis result for enrollment clip %s "
+                    "(could not verify it against the audio on disk -- see the "
+                    "warning above); the card goes back to idle instead of ok",
+                    audio_file,
+                )
+            else:
+                logger.info(
+                    "Analyzed enrollment clip %s -> %s", audio_file, analyzed.get("status")
+                )
+        except Exception:
+            # เขียนผลไม่สำเร็จ (ดิสก์เต็ม/ไฟล์ถูกล็อกจน replace_with_retry หมดความ
+            # พยายาม) -- ถ้าปล่อยใบสั่งงานค้างไว้เฉย ๆ pending_requests จะยังเห็นว่า
+            # "สั่งแล้วแต่ยังไม่มีผล" แล้วสั่งวิเคราะห์ซ้ำ (ถอดเสียงเต็มรอบบน GPU) ทุก
+            # poll ไปเรื่อย ๆ ไม่มีที่สิ้นสุด ในขณะที่หน้าเว็บค้างที่ "กำลังวิเคราะห์"
+            # ตลอดกาล (finding 3) -- ลองเขียนผลล้มเหลวแบบย่อแทน ผู้ใช้จะได้เห็นเหตุผล
+            # และกดเอาไฟล์ออกจากรายการได้ แทนที่จะเห็นหน้าจอค้าง
+            logger.exception(
+                "Failed to write the result for enrollment clip %s", audio_file
+            )
+            try:
+                enroll.write_result(
+                    config.base_dir,
+                    audio_file,
+                    {
+                        "status": "rejected",
+                        "reason": "analysis_failed",
+                        "suggested_name": enroll.suggested_name_from(audio_file),
+                    },
+                )
+            except Exception:
+                # เขียนแม้แต่ผลล้มเหลวแบบย่อก็ยังไม่ได้ (ดิสก์เต็มจริง ๆ) -- ทางเดียวที่
+                # เหลือคือตัดใบสั่งงานทิ้งไม่ให้ค้างวนซ้ำไม่รู้จบ แม้ผู้ใช้จะไม่เห็นเหตุผล
+                # ที่ชัดเจนก็ตาม ดีกว่าไฟล์นี้กิน GPU ทุก poll ตลอดไป
+                logger.exception(
+                    "Failed to write even a minimal failure result for %s; "
+                    "dropping the stuck request",
+                    audio_file,
+                )
+                try:
+                    enroll.clear(config.base_dir, audio_file)
+                except Exception:
+                    logger.exception(
+                        "Failed to clear the stuck request for enrollment clip %s",
+                        audio_file,
+                    )
+
+
 def watch_loop(
     config: Config,
     poll_interval: float = 5.0,
@@ -46,6 +165,9 @@ def watch_loop(
                     logger.info("Processed %s -> %s", audio_path.name, meeting_dir)
                 except Exception:
                     logger.exception("Failed to process %s", audio_path.name)
+        # หลัง inbox เสมอ: การประชุมที่อัดซ้ำไม่ได้ต้องได้ GPU ก่อนงานลงทะเบียนเสียง
+        # ซึ่งผู้ใช้สั่งใหม่ได้ตลอด try/except ของตัวเองอยู่ข้างในแล้ว
+        process_enroll_requests(config, diarization_pipeline=diarization_pipeline)
         if single_pass:
             return
         time.sleep(poll_interval)

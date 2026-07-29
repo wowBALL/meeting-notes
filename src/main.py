@@ -16,6 +16,7 @@ if os.name == "nt":
 
 from src.config import load_config
 from src.diarize import load_diarization_pipeline
+from src.enroll import enroll_dir
 from src.transcribe import load_whisper_model
 from src.watcher import watch_loop
 
@@ -28,6 +29,10 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
     config.failed_dir.mkdir(parents=True, exist_ok=True)
     config.meetings_dir.mkdir(parents=True, exist_ok=True)
+    # enroll\ ไม่เคยถูกสร้างมาก่อน (finding 5 ของรีวิวรอบสุดท้าย) -- write_request
+    # ต้องการให้ไฟล์เสียงมีอยู่จริงก่อนเขียนใบสั่งงาน ผู้ใช้จึงต้องมีโฟลเดอร์นี้อยู่แล้ว
+    # ตั้งแต่ checkout ใหม่ ๆ ไม่งั้น README บอกให้วางไฟล์ในโฟลเดอร์ที่ไม่มีอยู่จริง
+    enroll_dir(config.base_dir).mkdir(parents=True, exist_ok=True)
 
     # Load both models once at startup, then reuse them for every file,
     # instead of reloading from disk on each meeting.

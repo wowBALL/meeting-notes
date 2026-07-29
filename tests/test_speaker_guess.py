@@ -16,14 +16,14 @@ def _provider(text: str) -> Provider:
 
 def test_guess_speaker_names_reads_the_json_the_model_returns():
     provider = _provider(
-        '{"ผู้พูด 2": {"name": "พี่เอ็ม", "evidence": "มีคนเรียกพี่เอ็มตอน 12:40"}}'
+        '{"ผู้พูด 2": {"name": "สมหญิง็ม", "evidence": "มีคนเรียกสมหญิง็มตอน 12:40"}}'
     )
 
     with patch("src.speaker_guess.resolve", return_value=provider):
         result = guess_speaker_names("# Transcript", ["ผู้พูด 2"], model="fake-model")
 
     assert result == {
-        "ผู้พูด 2": {"name": "พี่เอ็ม", "evidence": "มีคนเรียกพี่เอ็มตอน 12:40"}
+        "ผู้พูด 2": {"name": "สมหญิง็ม", "evidence": "มีคนเรียกสมหญิง็มตอน 12:40"}
     }
 
 

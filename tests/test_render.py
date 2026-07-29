@@ -72,9 +72,9 @@ def test_build_speaker_labels_uses_real_names_and_does_not_spend_numbers_on_them
         {"start": 1.0, "end": 2.0, "speaker": "SPEAKER_01", "text": "ข"},
     ]
 
-    labels = build_speaker_labels(merged, {"SPEAKER_00": "พี่เอ็ม"})
+    labels = build_speaker_labels(merged, {"SPEAKER_00": "สมหญิง็ม"})
 
-    assert labels == {"SPEAKER_00": "พี่เอ็ม", "SPEAKER_01": "ผู้พูด 1"}
+    assert labels == {"SPEAKER_00": "สมหญิง็ม", "SPEAKER_01": "ผู้พูด 1"}
 
 
 def test_build_speaker_labels_ignores_names_for_speakers_not_in_the_transcript():
@@ -89,11 +89,11 @@ def test_render_transcript_markdown_writes_known_names_in_place_of_the_label():
         {"start": 2.5, "end": 5.0, "speaker": "SPEAKER_01", "text": "ครับผม"},
     ]
 
-    result = render_transcript_markdown(merged, speaker_names={"SPEAKER_00": "พี่เอ็ม"})
+    result = render_transcript_markdown(merged, speaker_names={"SPEAKER_00": "สมหญิง็ม"})
 
     assert result == (
         "# Transcript\n\n"
-        "**พี่เอ็ม** [00:00]: สวัสดีครับ\n\n"
+        "**สมหญิง็ม** [00:00]: สวัสดีครับ\n\n"
         "**ผู้พูด 1** [00:02]: ครับผม"
     )
 

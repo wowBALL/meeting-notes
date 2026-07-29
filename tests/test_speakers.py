@@ -26,7 +26,7 @@ def test_save_then_load_registry_round_trips(tmp_path):
     speakers = [
         {
             "id": "abc123",
-            "name": "พี่เอ็ม",
+            "name": "สมหญิง็ม",
             "samples": [
                 {"embedding": [1.0, 0.0], "source": "2026-07-28_10-30-standup", "added": "2026-07-28"}
             ],
@@ -40,13 +40,13 @@ def test_save_then_load_registry_round_trips(tmp_path):
 
 
 def test_save_registry_writes_utf8_json_with_a_version(tmp_path):
-    save_registry(tmp_path, [{"id": "a", "name": "พี่เอ็ม", "samples": []}])
+    save_registry(tmp_path, [{"id": "a", "name": "สมหญิง็ม", "samples": []}])
 
     payload = json.loads(registry_path(tmp_path).read_text(encoding="utf-8"))
 
     assert payload["version"] == 1
     # ห้าม escape เป็น \uXXXX -- ชื่อไทยต้องอ่านออกเมื่อเปิดไฟล์ดูด้วยตา
-    assert "พี่เอ็ม" in registry_path(tmp_path).read_text(encoding="utf-8")
+    assert "สมหญิง็ม" in registry_path(tmp_path).read_text(encoding="utf-8")
 
 
 def test_load_registry_returns_empty_list_when_file_is_not_json(tmp_path):
@@ -108,10 +108,10 @@ def test_save_registry_raises_when_the_file_stays_locked(tmp_path):
 
 
 def test_clean_name_strips_markdown_and_newlines():
-    assert clean_name("  พี่เอ็ม  ") == "พี่เอ็ม"
+    assert clean_name("  สมหญิง็ม  ") == "สมหญิง็ม"
     assert clean_name("พี่\nเอ็ม") == "พี่ เอ็ม"
-    assert clean_name("**พี่เอ็ม**") == "พี่เอ็ม"
-    assert clean_name("[พี่เอ็ม]") == "พี่เอ็ม"
+    assert clean_name("**สมหญิง็ม**") == "สมหญิง็ม"
+    assert clean_name("[สมหญิง็ม]") == "สมหญิง็ม"
     assert clean_name("") == ""
 
 
@@ -155,18 +155,18 @@ def _person(name: str, embeddings: list[list[float]], speaker_id: str = "id-1") 
 
 
 def test_match_known_names_a_speaker_above_the_high_threshold():
-    registry = [_person("พี่เอ็ม", [[1.0, 0.0]])]
+    registry = [_person("สมหญิง็ม", [[1.0, 0.0]])]
 
     matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5)
 
-    assert matches["SPEAKER_00"].name == "พี่เอ็ม"
+    assert matches["SPEAKER_00"].name == "สมหญิง็ม"
     assert matches["SPEAKER_00"].speaker_id == "id-1"
     assert matches["SPEAKER_00"].confident is True
 
 
 def test_match_known_only_suggests_between_the_two_thresholds():
     # cos = 0.6 -> อยู่ระหว่างเกณฑ์: เสนอให้คนยืนยัน แต่ยังไม่ใส่ชื่อให้เอง
-    registry = [_person("พี่เอ็ม", [[1.0, 0.0]])]
+    registry = [_person("สมหญิง็ม", [[1.0, 0.0]])]
 
     matches = match_known({"SPEAKER_00": [0.6, 0.8]}, registry, high=0.7, low=0.5)
 
@@ -175,7 +175,7 @@ def test_match_known_only_suggests_between_the_two_thresholds():
 
 
 def test_match_known_ignores_anyone_below_the_low_threshold():
-    registry = [_person("พี่เอ็ม", [[1.0, 0.0]])]
+    registry = [_person("สมหญิง็ม", [[1.0, 0.0]])]
 
     matches = match_known({"SPEAKER_00": [0.0, 1.0]}, registry, high=0.7, low=0.5)
 
@@ -184,7 +184,7 @@ def test_match_known_ignores_anyone_below_the_low_threshold():
 
 def test_match_known_takes_the_best_sample_across_every_person():
     registry = [
-        _person("พี่เอ็ม", [[0.0, 1.0]], speaker_id="id-1"),
+        _person("สมหญิง็ม", [[0.0, 1.0]], speaker_id="id-1"),
         _person("พี่บี", [[0.6, 0.8], [1.0, 0.0]], speaker_id="id-2"),
     ]
 
@@ -195,11 +195,11 @@ def test_match_known_takes_the_best_sample_across_every_person():
 
 
 def test_match_known_skips_unusable_embeddings_on_both_sides():
-    registry = [_person("พี่เอ็ม", [[0.0, 0.0]])]
+    registry = [_person("สมหญิง็ม", [[0.0, 0.0]])]
 
     assert match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5) == {}
-    assert match_known({"SPEAKER_00": [0.0, 0.0]}, [_person("พี่เอ็ม", [[1.0, 0.0]])], high=0.7, low=0.5) == {}
-    assert match_known({}, [_person("พี่เอ็ม", [[1.0, 0.0]])], high=0.7, low=0.5) == {}
+    assert match_known({"SPEAKER_00": [0.0, 0.0]}, [_person("สมหญิง็ม", [[1.0, 0.0]])], high=0.7, low=0.5) == {}
+    assert match_known({}, [_person("สมหญิง็ม", [[1.0, 0.0]])], high=0.7, low=0.5) == {}
 
 
 def test_match_known_returns_nothing_for_an_empty_registry():
@@ -207,7 +207,7 @@ def test_match_known_returns_nothing_for_an_empty_registry():
 
 
 def test_match_known_ignores_a_person_with_no_samples():
-    registry = [_person("พี่เอ็ม", [])]
+    registry = [_person("สมหญิง็ม", [])]
 
     assert match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5) == {}
 
@@ -218,21 +218,21 @@ def test_match_known_breaks_a_tie_in_favour_of_whoever_is_first_in_the_registry(
     # กติกาคือ "ใครมาก่อนในทะเบียนชนะ" ถ้าวันหนึ่งเปลี่ยนเป็น `>=` พฤติกรรมนี้จะกลับกัน
     # และเทสต์นี้ต้องจับได้
     registry = [
-        _person("พี่เอ็ม", [[1.0, 0.0]], speaker_id="id-1"),
+        _person("สมหญิง็ม", [[1.0, 0.0]], speaker_id="id-1"),
         _person("พี่บี", [[1.0, 0.0]], speaker_id="id-2"),
     ]
 
     matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5)
 
     assert matches["SPEAKER_00"].speaker_id == "id-1"
-    assert matches["SPEAKER_00"].name == "พี่เอ็ม"
+    assert matches["SPEAKER_00"].name == "สมหญิง็ม"
 
 
 def test_add_sample_creates_a_new_person_with_an_id():
-    updated = add_sample([], "พี่เอ็ม", [1.0, 0.0], source="m1", today=date(2026, 7, 28))
+    updated = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", today=date(2026, 7, 28))
 
     assert len(updated) == 1
-    assert updated[0]["name"] == "พี่เอ็ม"
+    assert updated[0]["name"] == "สมหญิง็ม"
     assert updated[0]["id"]
     assert updated[0]["samples"] == [
         {"embedding": [1.0, 0.0], "source": "m1", "added": "2026-07-28"}
@@ -240,9 +240,9 @@ def test_add_sample_creates_a_new_person_with_an_id():
 
 
 def test_add_sample_appends_to_the_existing_person_when_the_name_matches():
-    existing = add_sample([], "พี่เอ็ม", [1.0, 0.0], source="m1", today=date(2026, 7, 28))
+    existing = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", today=date(2026, 7, 28))
 
-    updated = add_sample(existing, "  พี่เอ็ม  ", [0.9, 0.1], source="m2", today=date(2026, 7, 29))
+    updated = add_sample(existing, "  สมหญิง็ม  ", [0.9, 0.1], source="m2", today=date(2026, 7, 29))
 
     assert len(updated) == 1
     assert len(updated[0]["samples"]) == 2
@@ -252,7 +252,7 @@ def test_add_sample_appends_to_the_existing_person_when_the_name_matches():
 def test_add_sample_keeps_only_the_most_recent_samples():
     speakers = []
     for index in range(12):
-        speakers = add_sample(speakers, "พี่เอ็ม", [float(index), 1.0], source=f"m{index}", today=date(2026, 7, 28))
+        speakers = add_sample(speakers, "สมหญิง็ม", [float(index), 1.0], source=f"m{index}", today=date(2026, 7, 28))
 
     assert len(speakers[0]["samples"]) == 10
     assert speakers[0]["samples"][0]["source"] == "m2"
@@ -260,7 +260,7 @@ def test_add_sample_keeps_only_the_most_recent_samples():
 
 
 def test_add_sample_does_not_mutate_the_list_it_was_given():
-    original = add_sample([], "พี่เอ็ม", [1.0, 0.0], source="m1")
+    original = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1")
 
     add_sample(original, "พี่บี", [0.0, 1.0], source="m2")
 
@@ -273,7 +273,7 @@ def test_add_sample_rejects_a_name_that_cleans_down_to_nothing():
 
 
 def test_remove_speaker_drops_only_the_matching_id():
-    speakers = [_person("พี่เอ็ม", [[1.0, 0.0]], "id-1"), _person("พี่บี", [[0.0, 1.0]], "id-2")]
+    speakers = [_person("สมหญิง็ม", [[1.0, 0.0]], "id-1"), _person("พี่บี", [[0.0, 1.0]], "id-2")]
 
     assert remove_speaker(speakers, "id-1") == [speakers[1]]
     assert remove_speaker(speakers, "ไม่มีจริง") == speakers

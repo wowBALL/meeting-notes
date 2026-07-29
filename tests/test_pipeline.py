@@ -943,7 +943,7 @@ def test_process_file_writes_a_known_speakers_real_name_into_the_transcript(tmp_
     config.inbox_dir.mkdir(parents=True)
     audio_path = config.inbox_dir / "weekly-standup.mp3"
     audio_path.write_bytes(b"fake audio")
-    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+    _registry_with(tmp_path, "สมหญิง็ม", [1.0, 0.0])
 
     with (
         _mock_convert_to_wav(),
@@ -963,7 +963,7 @@ def test_process_file_writes_a_known_speakers_real_name_into_the_transcript(tmp_
         meeting_dir = process_file(audio_path, config)
 
     transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
-    assert "**พี่เอ็ม** [00:00]: สวัสดีครับ" in transcript
+    assert "**สมหญิง็ม** [00:00]: สวัสดีครับ" in transcript
     assert "ผู้พูด 1" not in transcript
 
     matched = _activity_events(config, "speakers_matched")
@@ -982,7 +982,7 @@ def test_process_file_only_counts_confident_matches_in_speakers_matched(tmp_path
     config.inbox_dir.mkdir(parents=True)
     audio_path = config.inbox_dir / "weekly-standup.mp3"
     audio_path.write_bytes(b"fake audio")
-    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+    _registry_with(tmp_path, "สมหญิง็ม", [1.0, 0.0])
 
     with (
         _mock_convert_to_wav(),
@@ -1020,7 +1020,7 @@ def test_process_file_keeps_the_anonymous_label_below_the_high_threshold(tmp_pat
     config.inbox_dir.mkdir(parents=True)
     audio_path = config.inbox_dir / "weekly-standup.mp3"
     audio_path.write_bytes(b"fake audio")
-    _registry_with(tmp_path, "พี่เอ็ม", [1.0, 0.0])
+    _registry_with(tmp_path, "สมหญิง็ม", [1.0, 0.0])
 
     with (
         _mock_convert_to_wav(),
@@ -1042,7 +1042,7 @@ def test_process_file_keeps_the_anonymous_label_below_the_high_threshold(tmp_pat
 
     transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
     assert "**ผู้พูด 1** [00:00]: สวัสดีครับ" in transcript
-    assert "พี่เอ็ม" not in transcript
+    assert "สมหญิง็ม" not in transcript
 
 
 def test_process_file_finishes_the_meeting_when_the_registry_cannot_be_read(tmp_path):
@@ -1147,12 +1147,12 @@ def test_process_file_attaches_the_model_guess_to_the_queue(tmp_path):
 
     _, guess_mock = _run_with_two_speakers(
         config,
-        guess={"ผู้พูด 2": {"name": "พี่เอ็ม", "evidence": "มีคนเรียกชื่อ"}},
+        guess={"ผู้พูด 2": {"name": "สมหญิง็ม", "evidence": "มีคนเรียกชื่อ"}},
     )
 
     speakers = load_all_pending(tmp_path)[0]["speakers"]
     assert speakers[0]["guess"] is None
-    assert speakers[1]["guess"] == {"name": "พี่เอ็ม", "evidence": "มีคนเรียกชื่อ"}
+    assert speakers[1]["guess"] == {"name": "สมหญิง็ม", "evidence": "มีคนเรียกชื่อ"}
     # ต้องส่งป้ายที่เขียนลงไฟล์จริงไปให้โมเดล ไม่ใช่ label ดิบของ pyannote
     assert guess_mock.call_args.args[1] == ["ผู้พูด 1", "ผู้พูด 2"]
 

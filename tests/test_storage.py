@@ -219,10 +219,10 @@ def test_rename_speaker_in_transcript_replaces_only_the_line_headings(tmp_path):
         encoding="utf-8",
     )
 
-    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 2", "พี่เอ็ม") is True
+    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 2", "สมหญิง็ม") is True
 
     text = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
-    assert text.startswith("# Transcript\n\n**พี่เอ็ม** [00:00]:")
+    assert text.startswith("# Transcript\n\n**สมหญิง็ม** [00:00]:")
     # ข้อความที่คนพูดต้องไม่ถูกแตะ แม้จะมีสตริงเดียวกันอยู่กลางบรรทัด
     assert "เมื่อกี้ **ผู้พูด 2** พูดว่าอะไรนะ" in text
     assert "**ผู้พูด 1** [00:05]" in text
@@ -235,12 +235,12 @@ def test_rename_speaker_in_transcript_reports_false_when_the_label_is_absent(tmp
         "# Transcript\n\n**ผู้พูด 1** [00:00]: ครับ\n", encoding="utf-8"
     )
 
-    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 9", "พี่เอ็ม") is False
+    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 9", "สมหญิง็ม") is False
 
 
 def test_rename_speaker_in_transcript_reports_false_when_the_file_is_gone(tmp_path):
     # meetings/ เป็นโฟลเดอร์ของผู้ใช้ เขาย้าย/ลบได้ตลอด -- การตั้งชื่อต้องไม่ล้มตาม
-    assert rename_speaker_in_transcript(tmp_path / "ไม่มีจริง", "ผู้พูด 1", "พี่เอ็ม") is False
+    assert rename_speaker_in_transcript(tmp_path / "ไม่มีจริง", "ผู้พูด 1", "สมหญิง็ม") is False
 
 
 def test_rename_speaker_in_transcript_survives_the_crlf_files_this_project_writes(tmp_path):
@@ -251,13 +251,13 @@ def test_rename_speaker_in_transcript_survives_the_crlf_files_this_project_write
         "# Transcript\r\n\r\n**ผู้พูด 2** [00:00]: ครับ\r\n".encode("utf-8")
     )
 
-    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 2", "พี่เอ็ม") is True
+    assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 2", "สมหญิง็ม") is True
 
     # ต้องอ่านเป็น bytes: read_text แปลง \r\n ให้เป็น \n ตั้งแต่ขาเข้า เทสที่อ่านด้วย
     # read_text จึงผ่านเหมือนกันหมดไม่ว่าไฟล์บนดิสก์จะเป็น CRLF หรือ LF -- พิสูจน์
     # อะไรเกี่ยวกับ CRLF ไม่ได้เลย ทั้งที่ชื่อเทสบอกว่าพิสูจน์
     raw = (meeting_dir / "transcript.md").read_bytes()
-    assert "**พี่เอ็ม** [00:00]: ครับ".encode("utf-8") in raw
+    assert "**สมหญิง็ม** [00:00]: ครับ".encode("utf-8") in raw
     assert raw.count(b"\r\n") > 0
     assert raw.count(b"\n") == raw.count(b"\r\n")
 
@@ -300,8 +300,8 @@ def test_rename_speaker_in_transcript_retries_when_windows_holds_the_old_file(tm
         return real_replace(self, target)
 
     with patch("pathlib.Path.replace", flaky_replace), patch("time.sleep"):
-        assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 1", "พี่เอ็ม") is True
+        assert rename_speaker_in_transcript(meeting_dir, "ผู้พูด 1", "สมหญิง็ม") is True
 
     assert attempts["count"] == 3
     text = transcript.read_text(encoding="utf-8")
-    assert "**พี่เอ็ม** [00:00]: ครับ" in text
+    assert "**สมหญิง็ม** [00:00]: ครับ" in text
