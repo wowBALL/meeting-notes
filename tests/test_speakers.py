@@ -143,12 +143,26 @@ def test_cosine_similarity_returns_zero_for_unusable_input():
     assert cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0]) == 0.0
 
 
-def _person(name: str, embeddings: list[list[float]], speaker_id: str = "id-1") -> dict:
+MODEL = "pyannote/speaker-diarization-community-1"
+OTHER_MODEL = "pyannote/speaker-diarization-3.1"
+
+
+def _person(
+    name: str,
+    embeddings: list[list[float]],
+    speaker_id: str = "id-1",
+    model: str = MODEL,
+) -> dict:
     return {
         "id": speaker_id,
         "name": name,
         "samples": [
-            {"embedding": embedding, "source": "meeting", "added": "2026-07-28"}
+            {
+                "embedding": embedding,
+                "source": "meeting",
+                "model": model,
+                "added": "2026-07-28",
+            }
             for embedding in embeddings
         ],
     }
@@ -157,7 +171,7 @@ def _person(name: str, embeddings: list[list[float]], speaker_id: str = "id-1") 
 def test_match_known_names_a_speaker_above_the_high_threshold():
     registry = [_person("สมหญิง็ม", [[1.0, 0.0]])]
 
-    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5)
+    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL)
 
     assert matches["SPEAKER_00"].name == "สมหญิง็ม"
     assert matches["SPEAKER_00"].speaker_id == "id-1"
@@ -168,7 +182,7 @@ def test_match_known_only_suggests_between_the_two_thresholds():
     # cos = 0.6 -> อยู่ระหว่างเกณฑ์: เสนอให้คนยืนยัน แต่ยังไม่ใส่ชื่อให้เอง
     registry = [_person("สมหญิง็ม", [[1.0, 0.0]])]
 
-    matches = match_known({"SPEAKER_00": [0.6, 0.8]}, registry, high=0.7, low=0.5)
+    matches = match_known({"SPEAKER_00": [0.6, 0.8]}, registry, high=0.7, low=0.5, model=MODEL)
 
     assert matches["SPEAKER_00"].confident is False
     assert matches["SPEAKER_00"].score == pytest.approx(0.6)
@@ -177,7 +191,7 @@ def test_match_known_only_suggests_between_the_two_thresholds():
 def test_match_known_ignores_anyone_below_the_low_threshold():
     registry = [_person("สมหญิง็ม", [[1.0, 0.0]])]
 
-    matches = match_known({"SPEAKER_00": [0.0, 1.0]}, registry, high=0.7, low=0.5)
+    matches = match_known({"SPEAKER_00": [0.0, 1.0]}, registry, high=0.7, low=0.5, model=MODEL)
 
     assert matches == {}
 
@@ -188,7 +202,7 @@ def test_match_known_takes_the_best_sample_across_every_person():
         _person("พี่บี", [[0.6, 0.8], [1.0, 0.0]], speaker_id="id-2"),
     ]
 
-    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5)
+    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL)
 
     assert matches["SPEAKER_00"].name == "พี่บี"
     assert matches["SPEAKER_00"].score == pytest.approx(1.0)
@@ -197,19 +211,19 @@ def test_match_known_takes_the_best_sample_across_every_person():
 def test_match_known_skips_unusable_embeddings_on_both_sides():
     registry = [_person("สมหญิง็ม", [[0.0, 0.0]])]
 
-    assert match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5) == {}
-    assert match_known({"SPEAKER_00": [0.0, 0.0]}, [_person("สมหญิง็ม", [[1.0, 0.0]])], high=0.7, low=0.5) == {}
-    assert match_known({}, [_person("สมหญิง็ม", [[1.0, 0.0]])], high=0.7, low=0.5) == {}
+    assert match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL) == {}
+    assert match_known({"SPEAKER_00": [0.0, 0.0]}, [_person("สมหญิง็ม", [[1.0, 0.0]])], high=0.7, low=0.5, model=MODEL) == {}
+    assert match_known({}, [_person("สมหญิง็ม", [[1.0, 0.0]])], high=0.7, low=0.5, model=MODEL) == {}
 
 
 def test_match_known_returns_nothing_for_an_empty_registry():
-    assert match_known({"SPEAKER_00": [1.0, 0.0]}, [], high=0.7, low=0.5) == {}
+    assert match_known({"SPEAKER_00": [1.0, 0.0]}, [], high=0.7, low=0.5, model=MODEL) == {}
 
 
 def test_match_known_ignores_a_person_with_no_samples():
     registry = [_person("สมหญิง็ม", [])]
 
-    assert match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5) == {}
+    assert match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL) == {}
 
 
 def test_match_known_breaks_a_tie_in_favour_of_whoever_is_first_in_the_registry():
@@ -222,27 +236,65 @@ def test_match_known_breaks_a_tie_in_favour_of_whoever_is_first_in_the_registry(
         _person("พี่บี", [[1.0, 0.0]], speaker_id="id-2"),
     ]
 
-    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5)
+    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL)
 
     assert matches["SPEAKER_00"].speaker_id == "id-1"
     assert matches["SPEAKER_00"].name == "สมหญิง็ม"
 
 
+def test_match_known_ignores_samples_recorded_under_a_different_model():
+    """เวกเตอร์ของสองโมเดลอยู่คนละพื้นที่ -- cosine ข้ามพื้นที่ให้เลขที่ไม่มีความหมาย
+
+    ตัวอย่างนี้เหมือนกันเป๊ะ (cos = 1.0) ซึ่งจะผ่านเกณฑ์ HIGH ไปใส่ชื่อให้อัตโนมัติ
+    ถ้าไม่มีการกรองตามโมเดล -- เป็นรูปทรงเดียวกับอันตรายที่เกณฑ์ 0.80 ตั้งมากัน
+    """
+    registry = [_person("สมหญิง็ม", [[1.0, 0.0]], model=OTHER_MODEL)]
+
+    assert match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL) == {}
+
+
+def test_match_known_still_uses_samples_from_the_matching_model_alongside_others():
+    """สลับโมเดลแล้วคนที่ enroll ไว้ฝั่งนั้นต้องยังถูกจำ ไม่ใช่ทะเบียนตายทั้งใบ"""
+    registry = [
+        _person("คนของโมเดลอื่น", [[1.0, 0.0]], speaker_id="id-1", model=OTHER_MODEL),
+        _person("คนของโมเดลนี้", [[0.9, 0.1]], speaker_id="id-2", model=MODEL),
+    ]
+
+    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL)
+
+    # 1.0 ของคนแรกชนะถ้านับ แต่ต้องถูกข้าม เหลือ 0.9939 ของคนที่สอง
+    assert matches["SPEAKER_00"].name == "คนของโมเดลนี้"
+
+
+def test_match_known_treats_a_sample_with_no_model_as_the_pipeline_used_before_tagging():
+    """ทะเบียนที่มีอยู่ก่อนฟีเจอร์นี้ถูกสร้างด้วย 3.1 เสมอ -- ต้องไม่ถูกทิ้งไปเฉย ๆ"""
+    legacy = {"id": "id-1", "name": "คนเก่า", "samples": [{"embedding": [1.0, 0.0]}]}
+
+    assert match_known({"S": [1.0, 0.0]}, [legacy], high=0.7, low=0.5, model=OTHER_MODEL)
+    assert match_known({"S": [1.0, 0.0]}, [legacy], high=0.7, low=0.5, model=MODEL) == {}
+
+
+def test_add_sample_records_the_model_that_produced_the_embedding():
+    updated = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=OTHER_MODEL)
+
+    assert updated[0]["samples"][0]["model"] == OTHER_MODEL
+
+
 def test_add_sample_creates_a_new_person_with_an_id():
-    updated = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", today=date(2026, 7, 28))
+    updated = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL, today=date(2026, 7, 28))
 
     assert len(updated) == 1
     assert updated[0]["name"] == "สมหญิง็ม"
     assert updated[0]["id"]
     assert updated[0]["samples"] == [
-        {"embedding": [1.0, 0.0], "source": "m1", "added": "2026-07-28"}
+        {"embedding": [1.0, 0.0], "source": "m1", "model": MODEL, "added": "2026-07-28"}
     ]
 
 
 def test_add_sample_appends_to_the_existing_person_when_the_name_matches():
-    existing = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", today=date(2026, 7, 28))
+    existing = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL, today=date(2026, 7, 28))
 
-    updated = add_sample(existing, "  สมหญิง็ม  ", [0.9, 0.1], source="m2", today=date(2026, 7, 29))
+    updated = add_sample(existing, "  สมหญิง็ม  ", [0.9, 0.1], source="m2", model=MODEL, today=date(2026, 7, 29))
 
     assert len(updated) == 1
     assert len(updated[0]["samples"]) == 2
@@ -252,7 +304,7 @@ def test_add_sample_appends_to_the_existing_person_when_the_name_matches():
 def test_add_sample_keeps_only_the_most_recent_samples():
     speakers = []
     for index in range(12):
-        speakers = add_sample(speakers, "สมหญิง็ม", [float(index), 1.0], source=f"m{index}", today=date(2026, 7, 28))
+        speakers = add_sample(speakers, "สมหญิง็ม", [float(index), 1.0], source=f"m{index}", model=MODEL, today=date(2026, 7, 28))
 
     assert len(speakers[0]["samples"]) == 10
     assert speakers[0]["samples"][0]["source"] == "m2"
@@ -260,16 +312,16 @@ def test_add_sample_keeps_only_the_most_recent_samples():
 
 
 def test_add_sample_does_not_mutate_the_list_it_was_given():
-    original = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1")
+    original = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL)
 
-    add_sample(original, "พี่บี", [0.0, 1.0], source="m2")
+    add_sample(original, "พี่บี", [0.0, 1.0], source="m2", model=MODEL)
 
     assert len(original) == 1
 
 
 def test_add_sample_rejects_a_name_that_cleans_down_to_nothing():
     with pytest.raises(ValueError):
-        add_sample([], "  **  ", [1.0, 0.0], source="m1")
+        add_sample([], "  **  ", [1.0, 0.0], source="m1", model=MODEL)
 
 
 def test_remove_speaker_drops_only_the_matching_id():

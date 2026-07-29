@@ -36,8 +36,10 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
 
     # Load both models once at startup, then reuse them for every file,
     # instead of reloading from disk on each meeting.
-    logging.info("Loading speaker-diarization model...")
-    diarization_pipeline = load_diarization_pipeline(config.hf_token)
+    logging.info("Loading speaker-diarization model (%s)...", config.diarization_model)
+    diarization_pipeline = load_diarization_pipeline(
+        config.hf_token, config.diarization_model
+    )
 
     logging.info("Loading Whisper model (%s)...", config.whisper_model)
     whisper_model = load_whisper_model(config.whisper_model)

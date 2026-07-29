@@ -25,6 +25,8 @@ _FAKE_WAV_BYTES = b"fake wav bytes " * (WAV_HEADER_ALLOWANCE // 16 + 2)
 
 from src.diarize import DiarizationResult
 
+MODEL = "pyannote/speaker-diarization-community-1"
+
 
 def _diarization(turns=None, embeddings=None) -> DiarizationResult:
     """ผลแยกผู้พูดปลอมในรูปที่ diarize_audio ของจริงคืนมา"""
@@ -935,7 +937,7 @@ def test_process_file_survives_an_activity_log_that_cannot_be_written(tmp_path):
 def _registry_with(tmp_path, name, embedding):
     from src.speakers import add_sample, save_registry
 
-    save_registry(tmp_path, add_sample([], name, embedding, source="ก่อนหน้า"))
+    save_registry(tmp_path, add_sample([], name, embedding, source="ก่อนหน้า", model=MODEL))
 
 
 def test_process_file_writes_a_known_speakers_real_name_into_the_transcript(tmp_path):

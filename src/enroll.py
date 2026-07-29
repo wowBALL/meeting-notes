@@ -125,8 +125,13 @@ def _seconds_by_speaker(turns: list[dict]) -> dict[str, float]:
     return seconds
 
 
-def analyze(audio_path: Path, pipeline: Any) -> dict:
+def analyze(audio_path: Path, pipeline: Any, model: str) -> dict:
     """ไฟล์เสียงหนึ่งไฟล์ -> ผลที่พร้อมเขียนลง <ชื่อ>.result.json
+
+    `model` คือชื่อ checkpoint ที่ `pipeline` ถูกโหลดมา -- ถูกบันทึกไปกับผลเพื่อให้
+    ตัวอย่างที่ถูกเก็บเข้าทะเบียนทีหลังติดป้ายโมเดลที่สร้างมันจริง ๆ ไม่ใช่โมเดลที่
+    ตั้งอยู่ ณ ตอนที่ผู้ใช้กดยืนยัน (ดู speakers.add_sample) ผลที่วิเคราะห์ค้างไว้ข้าม
+    การสลับโมเดลจึงยังผูกกับพื้นที่เวกเตอร์ที่ถูกต้องเสมอ
 
     รับ pipeline เข้ามาไม่โหลดเอง: ผู้เรียกคือ watcher ซึ่งโหลด pyannote ค้างไว้แล้ว
     และการโหลดซ้ำต่อไฟล์กินเวลา 10-20 วินาทีโดยไม่ได้อะไรกลับมา ผลพลอยได้ที่ตั้งใจ
@@ -180,7 +185,12 @@ def analyze(audio_path: Path, pipeline: Any) -> dict:
     if not is_usable_embedding(embedding):
         return {**base, "status": "rejected", "reason": "unusable_embedding"}
 
-    return {**base, "status": "ok", "embedding": [float(value) for value in embedding]}
+    return {
+        **base,
+        "status": "ok",
+        "model": model,
+        "embedding": [float(value) for value in embedding],
+    }
 
 
 def _sidecar_path(base_dir: Path, audio_file: str, suffix: str) -> Path | None:

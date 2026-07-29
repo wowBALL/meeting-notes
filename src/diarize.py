@@ -3,23 +3,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.config import DEFAULT_DIARIZATION_MODEL
+
 logger = logging.getLogger(__name__)
 
 
-DIARIZATION_CHECKPOINT = "pyannote/speaker-diarization-community-1"
-# ทดลองบน branch นี้เท่านั้น (experiment/diarization-community1) -- เปลี่ยนจาก
-# speaker-diarization-3.1 เพราะวัดกับ Meet1900 แล้วพบว่า community-1 (VBxClustering)
-# แยกคนที่ 3.1 ยัดรวมกันออกมาได้จริง (19.5% ของคู่ประโยคที่ 3.1 บอกว่าคนเดียวกัน แต่
-# community-1 แยก เทียบกับแค่ 1.1% ที่กลับกัน)
-#
-# embedding ของ community-1 คนละพื้นที่กับ wespeaker-voxceleb-resnet34-LM ที่ 3.1 ใช้
-# เกณฑ์ SPEAKER_MATCH_HIGH/LOW ที่วัดไว้กับ 3.1 (0.80/0.50) ยังไม่ได้วัดใหม่สำหรับ
-# embedding นี้ -- ทะเบียนต้องว่างก่อนสลับกลับไป 3.1 เสมอ ไม่งั้นตัวอย่างเสียงที่
-# enroll ไว้ตอนอยู่ branch นี้จะจำไม่ได้อีกฝั่งหนึ่ง
-def load_diarization_pipeline(hf_token: str) -> Any:
+def load_diarization_pipeline(
+    hf_token: str, checkpoint: str = DEFAULT_DIARIZATION_MODEL
+) -> Any:
+    """โหลด pipeline แยกผู้พูดตาม checkpoint ที่เลือก (ดู config.DIARIZATION_MODEL)
+
+    ค่า default อยู่ที่ config.py ที่เดียว ไม่ทำสำเนาไว้ที่นี่ -- โมดูลนี้กับ .env ต้อง
+    ตอบคำถาม "ตกลงใช้โมเดลไหน" ตรงกันเสมอ
+    """
     from pyannote.audio import Pipeline
 
-    pipeline = Pipeline.from_pretrained(DIARIZATION_CHECKPOINT, token=hf_token)
+    pipeline = Pipeline.from_pretrained(checkpoint, token=hf_token)
     # Pipeline.from_pretrained leaves the model on the CPU; nothing warns about
     # it, the work just runs an order of magnitude slower (measured: 15+ minutes
     # of diarization for a 50-minute meeting vs ~2 on the GPU). Same model, same
@@ -91,10 +90,13 @@ def _speaker_embeddings(result: Any, diarization: Any) -> dict[str, list[float]]
 
 
 def diarize_audio(
-    audio_path: Path, hf_token: str, pipeline: Any = None
+    audio_path: Path,
+    hf_token: str,
+    pipeline: Any = None,
+    checkpoint: str = DEFAULT_DIARIZATION_MODEL,
 ) -> DiarizationResult:
     if pipeline is None:
-        pipeline = load_diarization_pipeline(hf_token)
+        pipeline = load_diarization_pipeline(hf_token, checkpoint)
     result = pipeline(str(audio_path))
     diarization = result.speaker_diarization
     turns = []

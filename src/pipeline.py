@@ -79,6 +79,7 @@ def _match_known_speakers(
             load_registry(config.base_dir),
             high=config.speaker_match_high,
             low=config.speaker_match_low,
+            model=config.diarization_model,
         )
     except Exception as e:
         logger.warning("จับคู่เสียงกับทะเบียนไม่สำเร็จ ไปต่อโดยไม่ใส่ชื่อ: %s", e)
@@ -114,7 +115,9 @@ def _record_pending_speakers(
     เพื่อสิ่งที่เขาจะมาดูทีหลังเมื่อไหร่ก็ได้
     """
     try:
-        candidates = build_pending_speakers(merged, labels, embeddings, matches=matches)
+        candidates = build_pending_speakers(
+            merged, labels, embeddings, config.diarization_model, matches=matches
+        )
         if not candidates:
             return
         try:

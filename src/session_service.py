@@ -327,7 +327,17 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
 
             speakers.save_registry(
                 config.base_dir,
-                speakers.add_sample(registry, cleaned, entry["embedding"], source=meeting),
+                speakers.add_sample(
+                    registry,
+                    cleaned,
+                    entry["embedding"],
+                    source=meeting,
+                    # โมเดลที่ติดมากับคิว ไม่ใช่ config.diarization_model ตอนนี้ --
+                    # คิวอยู่ข้ามวันได้ ผู้ใช้สลับโมเดลระหว่างนั้นแล้วเวกเตอร์ตัวนี้
+                    # ยังเป็นของพื้นที่เดิมอยู่ดี คิวเก่าที่ไม่มีป้ายตกไปที่ 3.1 ตาม
+                    # speakers.sample_model ซึ่งเป็นความจริงของ repo นี้ก่อนมีป้าย
+                    model=speakers.sample_model(entry),
+                ),
             )
 
         # การแก้ไฟล์เก่าเป็นของแถม ทะเบียนคือของจริงเพราะมันไปออกดอกที่การประชุม
@@ -408,6 +418,9 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                 registry,
                 config.speaker_match_high,
                 config.speaker_match_low,
+                # เวกเตอร์นี้มาจาก result.json ที่วิเคราะห์ไว้ตอนไหนก็ได้ -- เทียบกับ
+                # ทะเบียนในพื้นที่ของ *มัน* ไม่ใช่ของโมเดลที่ตั้งอยู่ตอนนี้
+                model=speakers.sample_model(result),
             )
             match = matches.get(entry["audio_file"])
             if match is not None:
@@ -488,6 +501,9 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                         cleaned,
                         result["embedding"],
                         source=f"enroll:{audio_file}",
+                        # โมเดลที่วิเคราะห์ไฟล์นี้จริง ๆ (enroll.analyze บันทึกไว้)
+                        # ไม่ใช่ค่าใน config ตอนกดยืนยัน -- ผลค้างข้ามการสลับโมเดลได้
+                        model=speakers.sample_model(result),
                     ),
                 )
             except OSError as e:

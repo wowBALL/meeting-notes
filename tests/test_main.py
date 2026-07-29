@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 from unittest.mock import patch
 
+from src.config import DEFAULT_DIARIZATION_MODEL
 from src.main import main
 
 
@@ -44,7 +45,7 @@ def test_main_loads_diarization_pipeline_once_and_passes_to_watch_loop(
 
     # the GPU/CPU placement decision lives in load_diarization_pipeline, so the
     # watcher's long-lived pipeline must come from it -- not a bare from_pretrained
-    mock_load.assert_called_once_with("hf-test-token")
+    mock_load.assert_called_once_with("hf-test-token", DEFAULT_DIARIZATION_MODEL)
     assert (
         mock_watch_loop.call_args.kwargs["diarization_pipeline"] is loaded_pipeline
     )

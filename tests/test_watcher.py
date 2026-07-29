@@ -282,7 +282,7 @@ def test_process_enroll_requests_clears_sidecars_for_a_result_whose_file_was_rep
     audio_path = make_enroll_audio(tmp_path, "สมชาย.ogg")
     enroll.write_request(tmp_path, "สมชาย.ogg")
 
-    def analyze_then_replace(path, pipeline):
+    def analyze_then_replace(path, pipeline, model):
         # จำลองผู้ใช้แทนที่ไฟล์ผ่าน Explorer ระหว่างที่ diarization กำลังทำงานอยู่พอดี
         audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
         return {
@@ -314,7 +314,7 @@ def test_process_enroll_requests_logs_a_discard_not_a_success_when_binding_fails
     audio_path = make_enroll_audio(tmp_path, "สมชาย.ogg")
     enroll.write_request(tmp_path, "สมชาย.ogg")
 
-    def analyze_then_replace(path, pipeline):
+    def analyze_then_replace(path, pipeline, model):
         audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
         return {"status": "ok", "embedding": [0.5], "suggested_name": "สมชาย"}
 

@@ -20,10 +20,11 @@ MERGED = [
 ]
 LABELS = {"SPEAKER_00": "ผู้พูด 1", "SPEAKER_01": "ผู้พูด 2"}
 EMBEDDINGS = {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]}
+MODEL = "pyannote/speaker-diarization-community-1"
 
 
 def test_build_pending_speakers_reports_everyone_unknown():
-    result = build_pending_speakers(MERGED, LABELS, EMBEDDINGS)
+    result = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL)
 
     assert [entry["label"] for entry in result] == ["ผู้พูด 1", "ผู้พูด 2"]
     assert result[0]["diarization_id"] == "SPEAKER_00"
@@ -32,12 +33,15 @@ def test_build_pending_speakers_reports_everyone_unknown():
     assert result[1]["speaking_seconds"] == 27.0
     assert result[0]["guess"] is None
     assert result[0]["suggested"] is None
+    # คิวอยู่ข้ามการสลับ DIARIZATION_MODEL ได้ -- ป้ายนี้คือสิ่งเดียวที่บอกว่าเวกเตอร์
+    # ที่ค้างอยู่เป็นของพื้นที่ไหน ตอนที่ผู้ใช้กลับมากดตั้งชื่อในภายหลัง
+    assert result[0]["model"] == MODEL
 
 
 def test_build_pending_speakers_skips_people_already_recognized():
     matches = {"SPEAKER_00": Match("id-1", "สมหญิง็ม", 0.91, confident=True)}
 
-    result = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, matches=matches)
+    result = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL, matches=matches)
 
     assert [entry["label"] for entry in result] == ["ผู้พูด 2"]
 
@@ -45,7 +49,7 @@ def test_build_pending_speakers_skips_people_already_recognized():
 def test_build_pending_speakers_carries_a_mid_confidence_match_as_a_suggestion():
     matches = {"SPEAKER_00": Match("id-1", "สมหญิง็ม", 0.612345, confident=False)}
 
-    result = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, matches=matches)
+    result = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL, matches=matches)
 
     assert result[0]["suggested"] == {
         "speaker_id": "id-1",
@@ -57,7 +61,7 @@ def test_build_pending_speakers_carries_a_mid_confidence_match_as_a_suggestion()
 def test_build_pending_speakers_skips_speakers_who_barely_spoke():
     merged = [{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00", "text": "ครับ"}]
 
-    result = build_pending_speakers(merged, {"SPEAKER_00": "ผู้พูด 1"}, EMBEDDINGS)
+    result = build_pending_speakers(merged, {"SPEAKER_00": "ผู้พูด 1"}, EMBEDDINGS, MODEL)
 
     # เวกเตอร์จากเสียงไม่กี่วินาทีเชื่อถือไม่ได้พอจะเก็บเข้าทะเบียนถาวร
     assert result == []
@@ -70,7 +74,7 @@ def test_build_pending_speakers_skips_speakers_without_a_usable_embedding():
     ]
     labels = {"SPEAKER_UNKNOWN": "ผู้พูด 1", "SPEAKER_00": "ผู้พูด 2"}
 
-    result = build_pending_speakers(merged, labels, {"SPEAKER_00": [0.0, 0.0]})
+    result = build_pending_speakers(merged, labels, {"SPEAKER_00": [0.0, 0.0]}, MODEL)
 
     assert result == []
 
@@ -83,7 +87,7 @@ def test_build_pending_speakers_keeps_the_longest_lines_as_samples():
         {"start": 36.0, "end": 48.0, "speaker": "SPEAKER_00", "text": "อีกอัน"},
     ]
 
-    result = build_pending_speakers(merged, {"SPEAKER_00": "ผู้พูด 1"}, {"SPEAKER_00": [1.0, 0.0]})
+    result = build_pending_speakers(merged, {"SPEAKER_00": "ผู้พูด 1"}, {"SPEAKER_00": [1.0, 0.0]}, MODEL)
 
     samples = result[0]["samples"]
     assert len(samples) == 3
@@ -99,7 +103,7 @@ def test_build_pending_speakers_keeps_the_longest_lines_as_samples():
 
 
 def test_write_pending_then_load_all_pending_round_trips(tmp_path):
-    speakers = build_pending_speakers(MERGED, LABELS, EMBEDDINGS)
+    speakers = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL)
 
     path = write_pending(tmp_path, "2026-07-28_10-30-standup", "standup.ogg", speakers)
 
@@ -117,7 +121,7 @@ def test_write_pending_writes_nothing_when_there_is_nobody_to_name(tmp_path):
 
 
 def test_load_all_pending_skips_a_corrupt_file(tmp_path):
-    write_pending(tmp_path, "ดี", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "ดี", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
     (pending_dir(tmp_path) / "พัง.json").write_text("ไม่ใช่ json", encoding="utf-8")
 
     loaded = load_all_pending(tmp_path)
@@ -126,7 +130,7 @@ def test_load_all_pending_skips_a_corrupt_file(tmp_path):
 
 
 def test_load_pending_returns_the_record_for_a_queued_meeting(tmp_path):
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
 
     record = load_pending(tmp_path, "m1")
 
@@ -143,7 +147,7 @@ def test_load_pending_refuses_a_hostile_meeting_name(tmp_path):
     # ต้องวางไฟล์จริงไว้ตรงจุดที่ชื่อนี้จะ resolve ไปถึงถ้าไม่มีตัวกัน ไม่งั้นเทสผ่าน
     # เพราะ "ไฟล์ไม่มีอยู่" ไม่ใช่เพราะตัวกันทำงาน -- ลบ _is_safe_name ทิ้งก็ยังผ่าน
     # pending_dir คือ <base>/speakers/pending ดังนั้น "../../x" ชี้กลับมาที่ <base>/x.json
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
     reachable = tmp_path / "x.json"
     reachable.write_text(
         (pending_dir(tmp_path) / "m1.json").read_text(encoding="utf-8"), encoding="utf-8"
@@ -156,7 +160,7 @@ def test_load_pending_refuses_a_hostile_meeting_name(tmp_path):
 
 
 def test_find_pending_returns_the_entry_without_changing_the_file(tmp_path):
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
 
     entry = find_pending(tmp_path, "m1", "ผู้พูด 2")
 
@@ -166,7 +170,7 @@ def test_find_pending_returns_the_entry_without_changing_the_file(tmp_path):
 
 
 def test_find_pending_returns_none_for_an_unknown_meeting_or_label(tmp_path):
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
 
     assert find_pending(tmp_path, "ไม่มีจริง", "ผู้พูด 1") is None
     assert find_pending(tmp_path, "m1", "ผู้พูด 9") is None
@@ -178,7 +182,7 @@ def test_find_pending_refuses_a_meeting_name_that_escapes_the_folder(tmp_path):
 
 
 def test_resolve_pending_removes_one_speaker_and_keeps_the_rest(tmp_path):
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
 
     assert resolve_pending(tmp_path, "m1", "ผู้พูด 1") is True
 
@@ -187,7 +191,7 @@ def test_resolve_pending_removes_one_speaker_and_keeps_the_rest(tmp_path):
 
 
 def test_resolve_pending_deletes_the_file_once_everyone_is_named(tmp_path):
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
 
     resolve_pending(tmp_path, "m1", "ผู้พูด 1")
     resolve_pending(tmp_path, "m1", "ผู้พูด 2")
@@ -201,7 +205,7 @@ def test_resolve_pending_returns_false_when_there_is_nothing_to_remove(tmp_path)
 
 
 def test_resolve_pending_survives_a_delete_that_fails_on_the_last_speaker(tmp_path, monkeypatch):
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
     resolve_pending(tmp_path, "m1", "ผู้พูด 1")
 
     def failing_unlink(self, *args, **kwargs):
@@ -219,7 +223,7 @@ def test_resolve_pending_survives_a_failed_swap_on_the_rewrite_branch(tmp_path):
     # เขียนผ่านไฟล์ชั่วคราวแล้วค่อยสลับ (replace_with_retry) -- ถ้า replace ล้มกลางทาง
     # ไฟล์เดิมต้องยังอ่านได้ครบเหมือนก่อนเรียก และห้ามมี .tmp ตกค้าง ไม่งั้นผู้พูดที่
     # "เหลือ" ของการประชุมนี้จะหายไปจากหน้าเว็บทั้งที่ยังไม่ถูกตัดออกจากคิวจริง
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
     path = pending_dir(tmp_path) / "m1.json"
     original = path.read_text(encoding="utf-8")
 
@@ -235,7 +239,7 @@ def test_resolve_pending_survives_a_failed_swap_on_the_rewrite_branch(tmp_path):
 
 
 def test_write_pending_leaves_no_tmp_litter_when_the_swap_fails(tmp_path):
-    speakers = build_pending_speakers(MERGED, LABELS, EMBEDDINGS)
+    speakers = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL)
 
     with patch("pathlib.Path.replace", side_effect=OSError("disk full")):
         try:
@@ -248,7 +252,7 @@ def test_write_pending_leaves_no_tmp_litter_when_the_swap_fails(tmp_path):
 
 
 def test_resolve_pending_returns_false_when_the_trimmed_rewrite_fails(tmp_path, monkeypatch):
-    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS))
+    write_pending(tmp_path, "m1", "a.ogg", build_pending_speakers(MERGED, LABELS, EMBEDDINGS, MODEL))
 
     def failing_write_text(self, *args, **kwargs):
         raise OSError("disk full")

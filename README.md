@@ -44,7 +44,9 @@ ffmpeg -version
 
 โมเดลแยกผู้พูดเป็น gated model ต้องกดยอมรับเงื่อนไขก่อน **ทั้งสองหน้า** ไม่งั้นดาวน์โหลดไม่ได้:
 
-1. https://huggingface.co/pyannote/speaker-diarization-3.1 → กด Agree
+1. https://huggingface.co/pyannote/speaker-diarization-community-1 → กด Agree
+   (ค่าเริ่มต้น ถ้าตั้ง `DIARIZATION_MODEL` เป็น 3.1 ให้กดหน้า
+   https://huggingface.co/pyannote/speaker-diarization-3.1 แทน)
 2. https://huggingface.co/pyannote/segmentation-3.0 → กด Agree
 3. สร้าง token ที่ https://huggingface.co/settings/tokens (แบบ Read พอ)
 
@@ -235,6 +237,12 @@ start-meeting.bat
   แต่ยังเก็บคิวให้ตั้งชื่อเองได้ตามปกติ
 - ปรับความเข้มของการจำเสียงได้ที่ `SPEAKER_MATCH_HIGH` / `SPEAKER_MATCH_LOW` ใน `.env`
   ค่าสูงขึ้น = ใส่ชื่อให้น้อยลงแต่ผิดคนยากขึ้น
+- เลือกโมเดลแยกผู้พูดได้ที่ `DIARIZATION_MODEL` ใน `.env` — ค่าเริ่มต้นคือ
+  `pyannote/speaker-diarization-community-1` กลับไปใช้ `pyannote/speaker-diarization-3.1`
+  ได้ทุกเมื่อ **แต่เวกเตอร์เสียงของสองโมเดลอยู่คนละพื้นที่**: ตัวอย่างเสียงในทะเบียนถูก
+  ติดป้ายโมเดลที่สร้างมันไว้ และจะถูกใช้เฉพาะตอนที่โมเดลตรงกันเท่านั้น สลับโมเดลแล้ว
+  คนที่ลงทะเบียนไว้ฝั่งเดิมจะกลับไปเป็นป้าย "ผู้พูด N" จนกว่าจะลงทะเบียนใหม่ — ข้อมูล
+  เดิมไม่หาย สลับกลับมาก็จำได้เหมือนเดิม
 - ถ้าประชุมพังที่ขั้นสรุปแล้วลากกลับเข้า `inbox/` ตามหัวข้อ "ลองใหม่หลังจากพัง" ด้านบน
   ระบบจะใช้ transcript เดิมต่อโดยไม่ผ่านขั้นตอนคิวตั้งชื่ออีกครั้ง — ผู้พูดที่จำได้มั่นใจ
   แล้วยังมีชื่อจริงอยู่ใน transcript เดิมตามปกติ (เพราะจับคู่เสร็จไปก่อนเขียนไฟล์แล้ว)

@@ -78,7 +78,11 @@ def process_enroll_requests(config: Config, diarization_pipeline: Any = None) ->
             )
             continue
         try:
-            analyzed = enroll.analyze(audio_path, pipeline=diarization_pipeline)
+            analyzed = enroll.analyze(
+                audio_path,
+                pipeline=diarization_pipeline,
+                model=config.diarization_model,
+            )
         except Exception:
             # enroll.analyze ไม่ raise อยู่แล้วโดยสัญญาของมัน แต่กันไว้อีกชั้น: ไฟล์เดียว
             # ที่พังต้องไม่ทำให้ไฟล์อื่นในคิวไม่ถูกทำ

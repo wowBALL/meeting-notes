@@ -24,6 +24,19 @@ DEFAULT_SUMMARY_MODEL = "GLM-5.2"
 DEFAULT_UI_PORT = 8765
 DEFAULT_UI_LANG = "th"
 
+# โมเดลแยกผู้พูด เปลี่ยนได้ด้วย DIARIZATION_MODEL ใน .env โดยไม่ต้องแก้โค้ด
+#
+# community-1 (VBxClustering) เป็นค่าเริ่มต้นเพราะวัดกับไฟล์ประชุมจริงของเครื่องนี้แล้ว
+# (2026-07-29, Meet1900 80 นาที): 3.1 ยัดคนหลายคนรวมเป็นป้ายเดียว 94 จาก 145 ท่อนเป็น
+# "ผู้พูด 1" ก้อนใหญ่ของมันตกเกณฑ์ "คนเดียวจริงไหม" 2 ใน 3 ท่อนทดสอบ ส่วน community-1
+# กระจายเป็น 34/22/62/19/1/7 และก้อนใหญ่ผ่านทั้ง 3 ท่อน -- รันสดทั้งท่อ (Meet1903)
+# ใช้เวลา 10m54s เทียบกับ 3.1 ที่ 11m30s บนไฟล์เดียวกัน จึงไม่ได้แลกความเร็วมา
+#
+# 3.1 คือค่าที่ใช้มาก่อนหน้านี้ทั้งหมด กลับไปได้ด้วย DIARIZATION_MODEL=<ค่านี้> ใน .env
+# แต่ต้องอ่านหมายเหตุเรื่องทะเบียนใต้ DEFAULT_SPEAKER_MATCH_HIGH ก่อน
+DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
+LEGACY_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
+
 # เกณฑ์ความเหมือนของน้ำเสียง (cosine similarity): สูงกว่า HIGH = ใส่ชื่อให้เลย,
 # ระหว่าง LOW กับ HIGH = เสนอให้คนยืนยัน, ต่ำกว่า LOW = ถือว่าไม่รู้จัก
 #
@@ -38,20 +51,24 @@ DEFAULT_UI_LANG = "th"
 # ซึ่งเป็นฝั่งที่เสียหายน้อยกว่า: การไม่ใส่ชื่อแก้ได้ด้วยการคลิก การใส่ชื่อผิดคนลง
 # สรุปที่ระบุผู้รับผิดชอบแก้ไม่ได้ถ้าไม่มีใครสังเกต
 #
-# *** experiment/diarization-community1 ***: src/diarize.py บน branch นี้เปลี่ยนไป
-# ใช้ speaker-diarization-community-1 ซึ่ง embedding คนละพื้นที่กับ wespeaker ที่ตัว
-# เลขข้างบนวัดไว้ -- วัดซ้ำแล้ว (2026-07-29, Meet1900 ไฟล์เดิม, 3 คน 7 ท่อน) ด้วยค่าที่
-# ใช้จริงคือ "ท่อน enroll เทียบ centroid ของประชุม" (สิ่งที่ match_known() เทียบจริง
-# ไม่ใช่ท่อนเทียบท่อน): คนถูกต่ำสุด 0.865, คนผิดสูงสุด 0.637 (SPEAKER_04 ช่วงท้าย
-# เทียบ centroid ของ SPEAKER_05) -- 0.80/0.50 เดิมยังอยู่ในช่องว่างนี้พอดี ไม่ต้องขยับ
+# เกณฑ์คู่นี้ใช้ได้กับ DIARIZATION_MODEL ทั้งสองค่าที่รองรับ เพราะวัดแยกกันทีละตัว --
+# community-1 ใช้ embedding คนละพื้นที่กับ wespeaker ที่เลขข้างบนวัดไว้ จึงวัดซ้ำ
+# (2026-07-29, Meet1900 ไฟล์เดิม, 3 คน 7 ท่อน) ด้วยค่าที่ใช้จริงคือ "ท่อน enroll เทียบ
+# centroid ของประชุม" (สิ่งที่ match_known() เทียบจริง ไม่ใช่ท่อนเทียบท่อน): คนถูก
+# ต่ำสุด 0.865, คนผิดสูงสุด 0.637 (SPEAKER_04 ช่วงท้าย เทียบ centroid ของ SPEAKER_05)
+# -- 0.80/0.50 ยังอยู่ในช่องว่างนี้พอดี ไม่ต้องขยับตามโมเดล
 #
 # เหมือนคู่ 00/01 ของ 3.1: centroid ของ SPEAKER_04 กับ SPEAKER_05 ในประชุมเดียวกัน
 # คล้ายกันถึง 0.691 (คู่ที่คล้ายสุดของ community-1) เกณฑ์ 0.80 กันคู่นี้ไว้ในโซน
 # "เสนอให้ยืนยัน" เหมือนเดิม
 #
-# ยังไม่ได้วัด: ก้อนที่ใหญ่สุด (SPEAKER_04, 23.7 นาที) ตัดท่อนพูดคนเดียวต้น/กลาง/ท้าย
-# มาวิเคราะห์ซ้ำ ผ่านทั้ง 3 ท่อน (ต่างจาก 3.1 ที่ตกเป็น multiple_speakers 2/3 ครั้ง)
-# แปลว่าก้อนนี้น่าจะเป็นคนเดียวจริง ไม่ใช่หลายคนปนกันแบบที่ 3.1 เจอ
+# *** ทะเบียนเสียงกับการสลับโมเดล ***: เวกเตอร์จากคนละโมเดลอยู่คนละพื้นที่ เอามาหา
+# cosine กันได้ตัวเลขที่ "ดูใช้ได้" แต่ไม่มีความหมาย -- ปล่อยไว้เท่ากับใส่ชื่อผิดคนลง
+# transcript เงียบ ๆ ซึ่งเป็นอันตรายตัวเดียวกับที่เกณฑ์ 0.80 ตั้งมากัน ตัวอย่างเสียง
+# ทุกตัวในทะเบียนจึงถูกติดป้ายโมเดลที่สร้างมันไว้ และ speakers.match_known() ใช้เฉพาะ
+# ตัวอย่างที่ป้ายตรงกับโมเดลปัจจุบัน สลับโมเดลแล้วคนที่ enroll ไว้ในอีกฝั่งจะไม่ถูกจำ
+# (กลับไปเป็นป้าย "ผู้พูด N") จนกว่าจะ enroll ใหม่ -- แต่ข้อมูลเดิมไม่หาย สลับกลับมา
+# ก็ใช้ได้เหมือนเดิม
 #
 # LOW ยังไม่ได้วัด -- คนละคนที่วัดได้อยู่แถว 0.31-0.33 จึงยังห่างจาก 0.50 พอสมควร
 DEFAULT_SPEAKER_MATCH_HIGH = 0.80
@@ -69,6 +86,7 @@ class Config:
     whisper_model: str = "small"
     ui_port: int = DEFAULT_UI_PORT
     ui_lang: str = DEFAULT_UI_LANG
+    diarization_model: str = DEFAULT_DIARIZATION_MODEL
     speaker_match_high: float = DEFAULT_SPEAKER_MATCH_HIGH
     speaker_match_low: float = DEFAULT_SPEAKER_MATCH_LOW
 
@@ -99,6 +117,9 @@ def load_config(base_dir: Path | None = None) -> Config:
     except ValueError:
         ui_port = DEFAULT_UI_PORT
     ui_lang = os.environ.get("UI_LANG", DEFAULT_UI_LANG)
+    # ค่าว่าง/ช่องว่างล้วนใน .env (DIARIZATION_MODEL= ที่ลืมเติมค่า) ต้องตกกลับไปที่
+    # default ไม่ใช่ส่งสตริงว่างไปให้ Pipeline.from_pretrained ตายเอาตอนเปิดโปรแกรม
+    diarization_model = os.environ.get("DIARIZATION_MODEL", "").strip() or DEFAULT_DIARIZATION_MODEL
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -135,6 +156,7 @@ def load_config(base_dir: Path | None = None) -> Config:
         whisper_model=whisper_model,
         ui_port=ui_port,
         ui_lang=ui_lang,
+        diarization_model=diarization_model,
         speaker_match_high=speaker_match_high,
         speaker_match_low=speaker_match_low,
     )
