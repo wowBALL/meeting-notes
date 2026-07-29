@@ -596,6 +596,35 @@ def test_get_enroll_lists_files_with_state_and_never_leaks_vectors(tmp_path):
     assert "embedding" not in json.dumps(body)
 
 
+def test_get_enroll_surfaces_the_changed_during_analysis_flag_once(tmp_path):
+    """finding 5 ของรีวิวรอบนี้: เมื่อ write_result ล้างผลทิ้งเพราะไฟล์เปลี่ยนระหว่างวิเคราะห์
+    /api/enroll ต้องส่งคำอธิบายให้หน้าเว็บเห็นสักครั้งหนึ่ง ไม่ใช่แค่เด้งกลับไป "idle" เงียบ ๆ
+    โดยไม่มีร่องรอยอะไรให้ผู้ใช้รู้ว่าทำไม แล้วต้องหายไปเองในรอบ poll ถัดไป (ไม่ค้างถาวร)
+    """
+    config = make_config(tmp_path)
+    audio_path = tmp_path / "enroll" / "สมชาย.ogg"
+    put_enroll_audio(tmp_path)
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    stat_before = audio_path.stat()
+    pre_analysis_stat = (stat_before.st_size, stat_before.st_mtime)
+    audio_path.unlink()
+    audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
+    enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding": [0.1, 0.2]},
+        pre_analysis_stat=pre_analysis_stat,
+    )
+    client = create_app(config).test_client()
+
+    first = client.get("/api/enroll").get_json()
+    assert first["files"][0]["state"] == "idle"
+    assert first["files"][0]["changed_during_analysis"] is True
+
+    second = client.get("/api/enroll").get_json()
+    assert "changed_during_analysis" not in second["files"][0]
+
+
 def test_get_enroll_reports_the_minimum_speaking_seconds_threshold(tmp_path):
     """finding 5: MIN_SPEAKING_SECONDS ต้องมาจากแหล่งเดียว (src/speakers.py) หน้าเว็บ
     ต้องอ่านค่ามาแสดง ไม่ใช่ฝังตัวเลข 10 ซ้ำไว้เป็นสตริงคงที่อีกชุดหนึ่ง
@@ -766,6 +795,23 @@ def test_post_analyze_rejects_a_filename_that_escapes_the_folder(tmp_path):
 
     assert response.status_code == 400
     assert not (tmp_path / "evil.request.json").exists()
+
+
+def test_post_analyze_rejects_a_filename_thats_not_an_audio_extension(tmp_path):
+    """finding 6: เดิม route นี้เช็คแค่ is_safe_filename -- ชื่อที่ปลอดภัยแต่ไม่ใช่ไฟล์เสียง
+    (เช่น notes.txt ที่มีอยู่จริงใน enroll/) ผ่านเข้ามาเขียน notes.txt.request.json ได้ ซึ่ง
+    ไม่มีอะไรกวาดทิ้งเลย (ไฟล์ต้นทางยังอยู่จริง) กลายเป็นขยะค้างตลอดกาล
+    """
+    config = make_config(tmp_path)
+    directory = tmp_path / "enroll"
+    directory.mkdir()
+    (directory / "notes.txt").write_bytes(b"not audio")
+    client = create_app(config).test_client()
+
+    response = client.post("/api/enroll/analyze", json={"files": ["notes.txt"]})
+
+    assert response.status_code == 404
+    assert not (directory / "notes.txt.request.json").exists()
 
 
 def test_post_confirm_saves_the_embedding_and_archives_the_file(tmp_path):

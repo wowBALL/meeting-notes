@@ -436,6 +436,20 @@ def test_write_request_does_not_queue_a_file_thats_locked_instead_of_raising(
     assert not (tmp_path / "enroll" / "สมชาย.ogg.request.json").exists()
 
 
+def test_write_request_refuses_a_file_whose_extension_is_not_audio(tmp_path):
+    """finding 6: /api/enroll/analyze เดิมเช็คแค่ is_safe_filename ก่อนเรียก write_request --
+    ชื่อที่ปลอดภัยแต่ไม่ใช่ไฟล์เสียง (เช่น notes.txt ที่มีอยู่จริงใน enroll/) ผ่านเข้ามาเขียน
+    notes.txt.request.json ได้ ทั้งที่ scan_audio ไม่มีวันเห็นมัน (ไม่ใช่ AUDIO_EXTENSIONS)
+    และ orphan sweep ก็ไม่ลบให้ (ไฟล์ต้นทางยังอยู่จริง) -- กลายเป็นขยะค้างตลอดกาล
+    """
+    directory = tmp_path / "enroll"
+    directory.mkdir()
+    (directory / "notes.txt").write_bytes(b"not audio")
+
+    assert enroll.write_request(tmp_path, "notes.txt") is None
+    assert not (directory / "notes.txt.request.json").exists()
+
+
 def test_pending_requests_lists_requests_that_have_no_result_yet(tmp_path):
     make_audio(tmp_path, "a.ogg")
     make_audio(tmp_path, "b.ogg")
@@ -450,6 +464,75 @@ def test_pending_requests_lists_requests_that_have_no_result_yet(tmp_path):
 
 def test_pending_requests_is_empty_when_the_folder_does_not_exist(tmp_path):
     assert enroll.pending_requests(tmp_path) == []
+
+
+def test_pending_requests_skips_a_locked_folder_instead_of_raising(tmp_path, monkeypatch, caplog):
+    """Minor C: directory.is_dir() ที่นี่เดิมเป็นแบบดิบ ไม่มี try/except เลย -- ต้องคืน []
+    ให้รอบ poll นี้แทนการปล่อยให้ PermissionError หลุดขึ้นไปฆ่า watcher ทั้งตัว
+    """
+    (tmp_path / "enroll").mkdir()
+    real_is_dir = Path.is_dir
+
+    def flaky_is_dir(self, *args, **kwargs):
+        if self == enroll.enroll_dir(tmp_path):
+            raise PermissionError("locked by antivirus")
+        return real_is_dir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", flaky_is_dir)
+
+    with caplog.at_level("WARNING"):
+        assert enroll.pending_requests(tmp_path) == []
+    assert "enroll" in caplog.text
+
+
+def test_pending_requests_does_not_lose_other_files_when_one_result_sidecar_is_locked(
+    tmp_path, monkeypatch
+):
+    """Minor C (finding 1 ของรีวิวรอบนี้): ก่อนแก้ result.is_file() เป็นการเรียกดิบ --
+    PermissionError ชั่วคราวจาก sidecar ผลของไฟล์เดียวหลุดออกไปเป็น exception จริง แล้ว
+    ฟังก์ชันทั้งก้อน raise ทำให้ watcher.process_enroll_requests (ซึ่งครอบด้วย try/except
+    Exception เดียว) ข้ามการวิเคราะห์ *ทุกไฟล์ที่ค้างอยู่* ในรอบ poll นั้น ไม่ใช่แค่ไฟล์ที่ล็อก
+    ต้องไม่ raise เลย และ 'a' ที่ไม่เกี่ยวข้องต้องยังอยู่ในผลลัพธ์
+    """
+    make_audio(tmp_path, "a.ogg")
+    make_audio(tmp_path, "locked.ogg")
+    enroll.write_request(tmp_path, "a.ogg")
+    enroll.write_request(tmp_path, "locked.ogg")
+    locked_result_path = tmp_path / "enroll" / "locked.ogg.result.json"
+    real_stat = Path.stat
+
+    def flaky_stat(self, *args, **kwargs):
+        if self == locked_result_path:
+            raise PermissionError("locked by antivirus")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    waiting = enroll.pending_requests(tmp_path)
+
+    assert "a.ogg" in waiting
+    # ambiguous ต้องถูกนับเป็น "มีผลแล้ว" (finding 5 ของรีวิวรอบนี้) -- ไม่งั้นไฟล์นี้จะถูก
+    # ส่งวิเคราะห์ซ้ำทั้งที่ไม่รู้แน่ชัดว่ามีผลอยู่แล้วหรือไม่
+    assert "locked.ogg" not in waiting
+
+
+def test_pending_requests_treats_a_locked_request_sidecar_as_still_queued(tmp_path, monkeypatch):
+    """ล็อกชั่วคราวที่ request.json (ไม่ใช่ result.json) ต้องไม่ถูกตีความว่า "ยังไม่ได้สั่งงาน"
+    -- PermissionError แปลว่าไฟล์มีอยู่จริง (แค่เข้าไม่ได้ชั่วครู่) ไม่ใช่ไฟล์หายไป
+    """
+    make_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    locked_request_path = tmp_path / "enroll" / "สมชาย.ogg.request.json"
+    real_stat = Path.stat
+
+    def flaky_stat(self, *args, **kwargs):
+        if self == locked_request_path:
+            raise PermissionError("locked by antivirus")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    assert enroll.pending_requests(tmp_path) == ["สมชาย.ogg"]
 
 
 def test_write_result_stamps_the_file_and_keeps_the_embedding(tmp_path):
@@ -477,6 +560,59 @@ def test_write_result_records_the_audio_files_size_and_mtime(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["audio_size"] == stat.st_size
     assert payload["audio_mtime"] == pytest.approx(stat.st_mtime)
+
+
+def test_write_result_verifies_binding_for_a_payload_carrying_an_embedding_without_status_ok(
+    tmp_path,
+):
+    """finding 2 ของรีวิวรอบนี้: การ์ดกันไม่ให้ embedding หลุดโดยไม่ผ่านการยืนยัน binding
+    เดิมเช็คจาก analyzed.get("status") == "ok" ซึ่งเป็นแค่ตัวแทนของสิ่งที่ต้องกันจริง --
+    ถ้า analyzed มี "embedding" ติดมาโดยไม่มี status "ok" (เช่นถูกแก้ไขระหว่างทาง หรือผู้เรียก
+    ในอนาคตที่ไม่ผ่าน analyze()) ต้องยังถูกบังคับให้ยืนยัน binding เหมือนกันทุกประการ ไม่ใช่
+    หลุดผ่านไปได้เงียบ ๆ เพราะ status ไม่ตรงกับ "ok" พอดี
+    """
+    make_audio(tmp_path, "สมชาย.ogg")
+
+    result_path = enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "weird", "embedding": [0.9, 0.9]},
+        # ไม่มี pre_analysis_stat มาเทียบ -- ต้องยืนยันไม่ได้เหมือนกรณี status "ok"
+    )
+
+    assert result_path is None
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.result.json").exists()
+
+
+def test_write_result_computed_binding_wins_over_a_spread_analyzed_dict(tmp_path):
+    """finding 3 ของรีวิวรอบนี้: payload เดิม spread **analyzed หลัง audio_size/audio_mtime
+    -- ถ้า analyzed มีคีย์ audio_file/analyzed/audio_size/audio_mtime ปนมาด้วย มันจะทับค่าที่
+    คำนวณไว้แบบเงียบ ๆ ทำให้ผลที่เขียนลงดิสก์ผูกกับ binding ปลอมแทนที่จะเป็น binding จริงที่
+    เพิ่งยืนยันผ่านไป ต้อง spread **analyzed ก่อนแล้วให้ bookkeeping keys ตามหลังเสมอ
+    """
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    stat = audio_path.stat()
+    pre_analysis_stat = (stat.st_size, stat.st_mtime)
+
+    path = enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {
+            "status": "ok",
+            "embedding": [0.1],
+            "audio_file": "ปลอม.ogg",
+            "analyzed": "ปลอม",
+            "audio_size": -999,
+            "audio_mtime": -999.0,
+        },
+        pre_analysis_stat=pre_analysis_stat,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["audio_file"] == "สมชาย.ogg"
+    assert payload["audio_size"] == stat.st_size
+    assert payload["audio_mtime"] == pytest.approx(stat.st_mtime)
+    assert payload["analyzed"] != "ปลอม"
 
 
 def test_read_result_returns_none_when_the_audio_file_was_replaced_after_analysis(tmp_path):
@@ -656,6 +792,55 @@ def test_write_result_clears_both_sidecars_when_the_file_was_replaced_mid_analys
     assert not (tmp_path / "enroll" / "สมชาย.ogg.request.json").exists()
     # ไฟล์ใหม่ (คนละคน) ที่วางทับต้องยังอยู่ให้วิเคราะห์ใหม่ได้ ไม่ถูกแตะต้อง
     assert audio_path.is_file()
+
+
+def test_write_result_leaves_a_changed_marker_when_it_discards_a_result(tmp_path):
+    """finding 5 ของรีวิวรอบนี้: การล้าง sidecar เพราะผูกไม่ได้ (CRITICAL A) ทำให้การ์ดเด้ง
+    จาก "กำลังวิเคราะห์" กลับไป "รอวิเคราะห์" แบบเงียบ ๆ โดยไม่มีร่องรอยอะไรบอกผู้ใช้เลยว่า
+    ทำไม -- ต้องทิ้งเครื่องหมายไว้ให้ list_entries อ่านแล้วอธิบายเหตุผลได้
+    """
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    stat_before_analysis = audio_path.stat()
+    pre_analysis_stat = (stat_before_analysis.st_size, stat_before_analysis.st_mtime)
+    audio_path.unlink()
+    audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
+
+    enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding": [0.1, 0.2]},
+        pre_analysis_stat=pre_analysis_stat,
+    )
+
+    assert (tmp_path / "enroll" / "สมชาย.ogg.changed.json").exists()
+
+
+def test_list_entries_reports_the_changed_marker_once_then_clears_it(tmp_path):
+    """finding 5 ของรีวิวรอบนี้: คำเตือน "ไฟล์เปลี่ยนระหว่างวิเคราะห์" ต้องโผล่ให้ผู้ใช้เห็น
+    ครั้งเดียวแล้วหายไปเอง (ไม่ค้าง state ถาวร) -- และไฟล์ยังต้องเป็น "idle" วิเคราะห์ใหม่ได้
+    ปกติ ไม่ใช่ทางตันแบบ rejected ค้างไว้
+    """
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    stat_before_analysis = audio_path.stat()
+    pre_analysis_stat = (stat_before_analysis.st_size, stat_before_analysis.st_mtime)
+    audio_path.unlink()
+    audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
+    enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding": [0.1, 0.2]},
+        pre_analysis_stat=pre_analysis_stat,
+    )
+
+    first = enroll.list_entries(tmp_path)
+    assert first[0]["state"] == "idle"
+    assert first[0]["changed_during_analysis"] is True
+
+    second = enroll.list_entries(tmp_path)
+    assert "changed_during_analysis" not in second[0]
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.changed.json").exists()
 
 
 def test_write_result_keeps_ok_when_the_file_matches_the_pre_analysis_stat(tmp_path):

@@ -301,6 +301,39 @@ def test_process_enroll_requests_clears_sidecars_for_a_result_whose_file_was_rep
     assert enroll.list_entries(tmp_path)[0]["state"] == "idle"
 
 
+def test_process_enroll_requests_logs_a_discard_not_a_success_when_binding_fails(
+    tmp_path, caplog
+):
+    """finding 4 ของรีวิวรอบนี้: เดิม log INFO "Analyzed ... -> ok" ยิงแบบไม่มีเงื่อนไขเสมอ
+    หลังเรียก write_result แม้ตอนที่ write_result คืน None เพราะผลถูกทิ้งไป (ผูกกับไฟล์เสียง
+    ไม่ได้) -- ผู้คุมระบบจะเห็น WARNING เรื่องผูกไม่ได้ตามด้วย INFO อ้างว่าสำเร็จทันที ต้อง log
+    ตามค่าที่ write_result คืนจริง ไม่ใช่ log "-> ok" ทุกครั้งที่ analyze() รายงาน status ok
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = make_enroll_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+
+    def analyze_then_replace(path, pipeline):
+        audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
+        return {"status": "ok", "embedding": [0.5], "suggested_name": "สมชาย"}
+
+    with (
+        patch("src.watcher.enroll.analyze", side_effect=analyze_then_replace),
+        caplog.at_level("INFO"),
+    ):
+        watch_loop(config, single_pass=True)
+
+    assert not any(
+        "Analyzed enrollment clip" in record.message and "-> ok" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        record.levelname == "WARNING" and "Discarded" in record.message
+        for record in caplog.records
+    )
+
+
 def test_process_enroll_requests_skips_analysis_when_the_pre_stat_fails(tmp_path, monkeypatch):
     """finding 1 (blocks merge): เดิมตรงนี้ pre_stat ที่ stat() ไม่สำเร็จถูกตั้งเป็น None
     แล้ว "เดินหน้าวิเคราะห์ต่อ" อยู่ดี -- write_result.เดิมเช็คแค่ pre_analysis_stat is not

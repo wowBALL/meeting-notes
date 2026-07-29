@@ -85,15 +85,28 @@ def process_enroll_requests(config: Config, diarization_pipeline: Any = None) ->
             logger.exception("Failed to analyze enrollment clip %s", audio_file)
             continue
         try:
-            enroll.write_result(
+            written = enroll.write_result(
                 config.base_dir,
                 audio_file,
                 analyzed,
                 pre_analysis_stat=pre_analysis_stat,
             )
-            logger.info(
-                "Analyzed enrollment clip %s -> %s", audio_file, analyzed.get("status")
-            )
+            # finding 4 ของรีวิวรอบนี้: write_result คืน None เมื่อผลถูกทิ้งเพราะผูกกับ
+            # ไบต์ไหนไม่ได้ (ไฟล์เสียงถูกแทนที่ระหว่างวิเคราะห์ ฯลฯ) -- เดิม log บรรทัด
+            # ข้างล่างนี้ยิง INFO "-> ok" แบบไม่มีเงื่อนไขเสมอ แม้ตอนที่ผลถูกทิ้งไปแล้ว
+            # ผู้คุมระบบจะเห็น WARNING เรื่องผูกไม่ได้ตามด้วย INFO อ้างว่าสำเร็จทันที ต้อง
+            # แยก log ตามค่าที่คืนจริง ไม่ใช่ตาม status ที่ analyze() รายงานมาเฉย ๆ
+            if written is None:
+                logger.warning(
+                    "Discarded the analysis result for enrollment clip %s "
+                    "(could not verify it against the audio on disk -- see the "
+                    "warning above); the card goes back to idle instead of ok",
+                    audio_file,
+                )
+            else:
+                logger.info(
+                    "Analyzed enrollment clip %s -> %s", audio_file, analyzed.get("status")
+                )
         except Exception:
             # เขียนผลไม่สำเร็จ (ดิสก์เต็ม/ไฟล์ถูกล็อกจน replace_with_retry หมดความ
             # พยายาม) -- ถ้าปล่อยใบสั่งงานค้างไว้เฉย ๆ pending_requests จะยังเห็นว่า

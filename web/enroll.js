@@ -47,6 +47,12 @@ const UI = {
     reason_unusable_embedding:
       "ถอดเวกเตอร์เสียงจากไฟล์นี้ไม่ได้ ลองใช้ไฟล์ที่เสียงชัดกว่านี้",
     reason_analysis_failed: "วิเคราะห์ไฟล์นี้ไม่สำเร็จ",
+    // finding 5 ของรีวิวรอบนี้: ไฟล์เสียงเปลี่ยนระหว่างที่กำลังวิเคราะห์อยู่พอดี (คนละไบต์
+    // กับที่ผลนี้อ้างถึง) -- ผลถูกทิ้งไปเงียบ ๆ ที่ src/enroll.py (write_result) การ์ดจึงเด้ง
+    // กลับไป "รอวิเคราะห์" เอง ข้อความนี้อธิบายเหตุผลให้ผู้ใช้เห็นสักครั้งหนึ่งแทนความเงียบ
+    changedDuringAnalysis:
+      "ไฟล์เสียงมีการเปลี่ยนแปลงระหว่างที่กำลังวิเคราะห์อยู่ ผลก่อนหน้าจึงถูกทิ้งไป " +
+      "กรุณากดวิเคราะห์อีกครั้ง",
     // ความคล้ายกับคนที่มีอยู่แล้วในทะเบียน (finding B ของรีวิวรอบสุดท้าย) -- คำนวณที่
     // เซิร์ฟเวอร์เท่านั้น หน้านี้แค่โชว์ชื่อกับคะแนนที่ปัดมาแล้ว
     matchSimilar: 'คล้ายกับ "{name}" ที่มีอยู่แล้วในทะเบียน ({score})',
@@ -106,6 +112,9 @@ const UI = {
     reason_unusable_embedding:
       "No usable voice vector could be extracted. Try a cleaner recording",
     reason_analysis_failed: "Analyzing this file failed",
+    changedDuringAnalysis:
+      "The audio file changed while it was being analyzed, so the previous result was " +
+      "discarded. Please analyze it again.",
     matchSimilar: 'Similar to "{name}", already in the registry ({score})',
     matchMerge:
       'Saving under the name "{name}" will merge this sample into that person right away, ' +
@@ -238,6 +247,13 @@ function renderFile(file) {
   box.append(node("div", "meta", bits.join(" · ")));
 
   if (file.state !== "done") {
+    // finding 5 ของรีวิวรอบนี้: server ล้าง sidecar ทิ้งเงียบ ๆ เมื่อผูกผลกับไฟล์เสียงไม่ได้
+    // (ไฟล์เปลี่ยนระหว่างวิเคราะห์) แล้วส่งธงนี้มาครั้งเดียว (ดู enroll.list_entries /
+    // _consume_changed_marker) -- ต้องโชว์ก่อนคืนการ์ด ไม่งั้นผู้ใช้เห็นแค่ "รอวิเคราะห์"
+    // เฉย ๆ โดยไม่รู้ว่าทำไมงานที่ทำไปหลายนาทีถึงหายไป
+    if (file.changed_during_analysis) {
+      box.append(node("div", "note warn", t().changedDuringAnalysis));
+    }
     box.append(dismissButton(file));
     return box;
   }

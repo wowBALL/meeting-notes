@@ -39,6 +39,11 @@ AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg"}
 
 REQUEST_SUFFIX = ".request.json"
 RESULT_SUFFIX = ".result.json"
+# finding 5: เครื่องหมายชั่วคราวบอกว่าผล "ถูกล้างทิ้งเพราะผูกกับไฟล์เสียงไม่ได้" (ดู
+# write_result) ไม่ใช่ sidecar งาน -- ไม่มีใครอ่านมันเพื่อสั่งงานอะไรเลย มีไว้ให้ list_entries
+# อ่านครั้งเดียวแล้วลบทิ้งทันที (ดู _consume_changed_marker) เพื่อบอกผู้ใช้ว่าทำไมการ์ดถึง
+# เด้งกลับไป "รอวิเคราะห์" เฉย ๆ โดยไม่มีคำอธิบาย ไม่มี state ค้างถาวรเลยแม้แต่บิตเดียว
+CHANGED_SUFFIX = ".changed.json"
 
 
 def enroll_dir(base_dir: Path) -> Path:
@@ -198,6 +203,10 @@ def result_path(base_dir: Path, audio_file: str) -> Path | None:
     return _sidecar_path(base_dir, audio_file, RESULT_SUFFIX)
 
 
+def _changed_marker_path(base_dir: Path, audio_file: str) -> Path | None:
+    return _sidecar_path(base_dir, audio_file, CHANGED_SUFFIX)
+
+
 def _write_json(path: Path, payload: dict) -> None:
     """เขียนผ่านไฟล์ชั่วคราวแล้วค่อยสลับ แบบเดียวกับ save_registry และ write_pending
 
@@ -224,9 +233,18 @@ def write_request(base_dir: Path, audio_file: str, now: datetime | None = None) 
 
     ตรวจว่าไฟล์เสียงมีอยู่จริงก่อนเขียน เพราะใบสั่งงานที่ไม่มีไฟล์คู่กันจะทำให้ watcher
     ต้องรับมือกับสภาพที่ป้องกันได้ตั้งแต่ต้นทาง
+
+    finding 6: /api/enroll/analyze เดิมเช็คแค่ is_safe_filename ก่อนเรียกฟังก์ชันนี้ -- ชื่อ
+    ที่ปลอดภัยแต่ไม่ใช่ไฟล์เสียง (เช่น notes.txt ที่มีอยู่จริงใน enroll/) ผ่านเข้ามาเขียน
+    notes.txt.request.json ได้ สิ่งนี้ scan_audio ไม่มีวันเห็น (ไม่ใช่ AUDIO_EXTENSIONS) และ
+    orphan sweep ก็ไม่ลบให้ (ไฟล์ต้นทางยังอยู่จริง) -- กลายเป็นขยะค้างตลอดกาล เช็คนามสกุลที่
+    ชั้นเดียวกับที่ตรวจชื่อไปแล้ว (ก่อนแตะดิสก์เลย) กันไม่ให้ sidecar กินไม่ได้แบบนี้เกิดขึ้น
+    ตั้งแต่ต้น ไม่ต้องพึ่งการเช็คใน scan_audio/analyze เพียงอย่างเดียว
     """
     path = request_path(base_dir, audio_file)
     if path is None:
+        return None
+    if Path(audio_file).suffix.lower() not in AUDIO_EXTENSIONS:
         return None
     audio_path = enroll_dir(base_dir) / audio_file
     try:
@@ -258,16 +276,43 @@ def pending_requests(base_dir: Path) -> list[str]:
 
     "ยังไม่มีผล" คือเงื่อนไขที่ทำให้งานไม่ถูกทำซ้ำ: watcher เขียนผลเป็นสิ่งสุดท้าย
     ใบสั่งงานที่ค้างเพราะเครื่องดับกลางทางจึงถูกหยิบไปทำใหม่รอบหน้าเอง
+
+    Minor C: จุดนี้เคยเป็นที่เดียวในไฟล์ที่ยังเรียก .is_dir()/.is_file() ดิบ ๆ อยู่ (ทำให้
+    คำกล่าวอ้างของ _confirmed_missing ที่ว่า "idiom เดียวกันทุกจุดในไฟล์นี้" ไม่จริง) --
+    PermissionError ชั่วคราวจาก sidecar ตัวเดียวหลุดออกไปเป็น exception จริง แล้ว
+    watcher.process_enroll_requests ครอบการเรียกฟังก์ชันนี้ทั้งก้อนด้วย try/except Exception
+    เดียว ผลคือไฟล์ที่ค้างอยู่ *ทุกไฟล์* ในรอบ poll นั้นถูกข้ามไปหมด ไม่ใช่แค่ไฟล์ที่ถูกล็อก
+    ต้องใช้ _confirmed_missing แบบเดียวกับ list_entries/read_result/_sweep_orphan_sidecars
+
+    sidecar ผลที่อ่านไม่ชัดเจน (ล็อกชั่วคราว) ต้องถือว่า "มีผลแล้ว" เสมอ ไม่ใช่ "ยังไม่มีผล" --
+    ถ้าตีความผิดเป็นฝั่งหลัง ไฟล์ที่วิเคราะห์เสร็จสมบูรณ์แล้วจริงจะถูกส่งวิเคราะห์ซ้ำ (ถอดเสียง
+    เต็มรอบบน GPU) ทั้งที่ผลที่ถูกต้องนอนอยู่บนดิสก์แล้ว แค่ sidecar ถูกล็อกชั่วครู่เท่านั้น
     """
     directory = enroll_dir(base_dir)
-    if not directory.is_dir():
+    try:
+        is_dir = directory.is_dir()
+    except OSError as e:
+        logger.warning(
+            "stat โฟลเดอร์ enroll/ ไม่สำเร็จชั่วคราว (%s) -- ถือว่ายังไม่มีใบสั่งงานค้างให้เห็น"
+            "รอบ poll นี้",
+            e,
+        )
+        return []
+    if not is_dir:
         return []
     audio_files = {path.name for path in scan_audio(base_dir)}
     waiting = []
     for audio_file in sorted(audio_files):
         request = request_path(base_dir, audio_file)
         result = result_path(base_dir, audio_file)
-        if request is not None and request.is_file() and not result.is_file():
+        if request is None or result is None:
+            continue
+        request_queued = not _confirmed_missing(request)
+        # ambiguous (ล็อกชั่วคราว) ต้องนับเป็น "มีผลแล้ว" เสมอ (finding 5 ของรีวิวรอบนี้) --
+        # กันไม่ให้ไฟล์ที่วิเคราะห์เสร็จแล้วจริงถูกส่งวิเคราะห์ซ้ำเพียงเพราะอ่าน sidecar ผล
+        # ไม่ทันจังหวะ poll นี้
+        has_result = not _confirmed_missing(result)
+        if request_queued and not has_result:
             waiting.append(audio_file)
     return waiting
 
@@ -310,12 +355,29 @@ def write_result(
     ของมนุษย์ ไม่มีอะไรสั่งวิเคราะห์ซ้ำอัตโนมัติ (ไม่มี request.json ค้างให้ pending_requests
     เห็น) จึงไม่มีทางวนซ้ำไม่รู้จบ
 
-    finding 5: เดิมกรณี "ผูกไม่ได้" เขียนข้อความ detail อธิบายเหตุผลไว้ในไฟล์ (เช่น "ไฟล์
-    เสียงถูกแทนที่ระหว่างการวิเคราะห์") แต่ read_result (ดูด้านล่าง) ล้าง sidecar ที่ audio_
+    finding 5 (รอบก่อนหน้า): เดิมกรณี "ผูกไม่ได้" เขียนข้อความ detail อธิบายเหตุผลไว้ในไฟล์
+    (เช่น "ไฟล์เสียงถูกแทนที่ระหว่างการวิเคราะห์") แต่ read_result ล้าง sidecar ที่ audio_
     size/audio_mtime เป็น null ทิ้งแบบไม่มีเงื่อนไขก่อนคืนค่าเสมอ -- ข้อความนั้นจึงไม่มีทาง
-    ถูกอ่านโดยใครเลยแม้แต่ครั้งเดียว (unreachable message) ตอนนี้ไม่ต้องกังวลเรื่องนี้อีก
-    เพราะไม่เขียน detail แบบนั้นแล้ว (ล้างทิ้งไปเลยแทน) แต่ถ้าจะกลับไปเขียน rejected ค้างไว้
-    อีกในอนาคต ต้องจำไว้ว่า detail ในเคสนี้จะไม่มีผู้ใช้คนไหนเห็นเลย ไม่ใช่แค่ "อาจจะไม่เห็น"
+    ถูกอ่านโดยใครเลยแม้แต่ครั้งเดียว (unreachable message) ตอนนี้เขียนคำอธิบายแยกไว้เป็น
+    เครื่องหมายชั่วคราวต่างหาก (_mark_changed_during_analysis) แทน ซึ่ง list_entries เป็น
+    ผู้อ่านโดยตรง ไม่ผ่าน read_result เลย จึงไม่ชนปัญหาเดิมอีก (ดู finding 5 ของรีวิวรอบนี้
+    ด้านล่าง ตรงจุดที่เรียก clear() แล้ว mark)
+
+    finding 2 ของรีวิวรอบนี้: การ์ดกันไม่ให้ embedding หลุดออกไปโดยไม่ผ่านการยืนยัน binding
+    เดิมเช็คจาก analyzed.get("status") == "ok" -- แต่สิ่งที่ต้องกันจริง ๆ คือ "embedding"
+    ต่างหาก ไม่ใช่สตริง "ok" ซึ่งเป็นแค่ตัวแทน (proxy) ของมัน วันนี้ analyze() รับประกันว่า
+    เฉพาะ branch status "ok" เท่านั้นที่ใส่ embedding มาด้วย จึงยังไม่มีทางเรียกจริงที่ทำให้
+    ต่างกัน (unreachable) แต่ผู้เรียกในอนาคต (หรือ analyzed ที่ถูกแก้ไขระหว่างทาง) ที่ส่ง
+    embedding มาพร้อม status อื่นจะหลุดผ่านการเช็คแบบเดิมไปได้เงียบ ๆ -- เป็นรูปทรงเดียวกับ
+    บั๊ก fail-open ที่ใช้เวลาแก้สามรอบกว่าจะปิดสนิท (ดู docstring ของ CRITICAL A/B ด้านบน)
+    เช็คทั้งสองเงื่อนไขไว้ด้วยกันกันไม่ให้กลับไปเป็นแบบเดิมโดยไม่ได้ตั้งใจ
+
+    finding 3 ของรีวิวรอบนี้: payload เดิม spread **analyzed หลัง audio_size/audio_mtime --
+    ถ้า analyzed มีคีย์ audio_file/analyzed/audio_size/audio_mtime ปนมาด้วย (ไม่เกิดขึ้นจริง
+    วันนี้เพราะ analyze() ไม่เคยใส่คีย์เหล่านี้) มันจะทับค่าที่คำนวณไว้แบบเงียบ ๆ กลายเป็นว่า
+    ผลที่เขียนลงดิสก์ผูกกับ binding ปลอมที่ analyzed ใส่มาเอง ไม่ใช่ binding จริงที่เพิ่ง
+    ยืนยันผ่านด้านบน -- ต้อง spread **analyzed ก่อน แล้วให้คีย์ bookkeeping ตามหลัง ค่าที่
+    คำนวณเองจึงชนะเสมอไม่ว่า analyzed จะมีอะไรปนมา
     """
     path = result_path(base_dir, audio_file)
     if path is None:
@@ -328,7 +390,10 @@ def write_result(
         audio_size = None
         audio_mtime = None
 
-    if analyzed.get("status") == "ok":
+    # finding 2: เช็คทั้ง status "ok" (เดิม) และการมี "embedding" ตรง ๆ -- คีย์ตายตัวคือ
+    # embedding ไม่ใช่สตริง status ที่เป็นแค่ตัวแทน กันไว้สองชั้นไม่ให้ใครทำให้ embedding
+    # หลุดผ่านการยืนยัน binding ไปได้โดยไม่ตั้งใจในอนาคต
+    if analyzed.get("status") == "ok" or "embedding" in analyzed:
         cannot_bind_reason = None
         if audio_size is None or audio_mtime is None:
             # CRITICAL B: stat ไม่สำเร็จตอนเขียนผล -- ไม่มีทางผูกกับไฟล์ไหนได้เลย
@@ -348,19 +413,94 @@ def write_result(
                 cannot_bind_reason,
             )
             clear(base_dir, audio_file)
+            # finding 5 ของรีวิวรอบนี้: clear() ทำให้การ์ดเงียบ ๆ เด้งจาก "กำลังวิเคราะห์"
+            # กลับไป "รอวิเคราะห์" โดยไม่มีร่องรอยอะไรเลยว่าทำไม -- ทิ้งเครื่องหมายไว้ให้
+            # list_entries อ่านครั้งเดียวแล้วลบทิ้ง (ดู _mark_changed_during_analysis กับ
+            # _consume_changed_marker) หน้าเว็บจะได้อธิบายเหตุผลให้ผู้ใช้เห็นสักครั้งหนึ่ง
+            _mark_changed_during_analysis(base_dir, audio_file, now)
             return None
 
     _write_json(
         path,
         {
+            **analyzed,
             "audio_file": audio_file,
             "analyzed": (now or datetime.now()).isoformat(timespec="seconds"),
             "audio_size": audio_size,
             "audio_mtime": audio_mtime,
-            **analyzed,
         },
     )
     return path
+
+
+def _mark_changed_during_analysis(
+    base_dir: Path, audio_file: str, now: datetime | None
+) -> None:
+    """ทิ้งเครื่องหมายไว้บอกว่าผลของไฟล์นี้เพิ่งถูกล้างเพราะผูกกับไบต์ไหนไม่ได้ (finding 5)
+
+    ไม่มี state ค้างถาวร: list_entries เป็นผู้เดียวที่อ่านเครื่องหมายนี้ และลบทิ้งทันทีที่อ่าน
+    เจอ (ดู _consume_changed_marker) -- ส่งคำเตือนให้ /api/enroll เห็นครั้งเดียวแล้วหายไปเอง
+    การ์ดจึงไม่ค้างสถานะเตือนตลอดกาล และไม่มีการวิเคราะห์ซ้ำเกิดขึ้นจากเครื่องหมายนี้เลยไม่ว่า
+    กรณีใด -- มันเป็นแค่ข้อมูลสำหรับแสดงผล ไม่ใช่ใบสั่งงานที่ pending_requests มองเห็น
+
+    เขียนแบบ best-effort เท่านั้น: เขียนไม่สำเร็จก็แค่ไม่มีคำเตือนโผล่ในรอบนี้ ไม่ทำให้การ
+    เคลียร์ sidecar หลักที่เพิ่งทำไปด้านบน (ซึ่งสำคัญกว่า) เสียหายหรือ raise ย้อนขึ้นไป
+    """
+    path = _changed_marker_path(base_dir, audio_file)
+    if path is None:
+        return
+    try:
+        _write_json(
+            path,
+            {
+                "audio_file": audio_file,
+                "changed": (now or datetime.now()).isoformat(timespec="seconds"),
+            },
+        )
+    except OSError as e:
+        logger.warning(
+            "เขียนเครื่องหมายแจ้งเตือน 'ไฟล์เปลี่ยนระหว่างวิเคราะห์' ของ %s ไม่สำเร็จ (%s) -- "
+            "ผู้ใช้จะไม่เห็นคำเตือนรอบนี้ แต่การ์ดยังกลับไป idle ให้วิเคราะห์ใหม่ได้ตามปกติ",
+            audio_file,
+            e,
+        )
+
+
+def _consume_changed_marker(base_dir: Path, audio_file: str) -> bool:
+    """True ถ้ามีเครื่องหมาย "เปลี่ยนระหว่างวิเคราะห์" ค้างอยู่ -- อ่านแล้วลบทิ้งทันที
+
+    "รายงานครั้งเดียวแล้วหาย" โดยเจตนา (finding 5): ไม่เก็บ state ถาวรใด ๆ นอกจากไฟล์นี้เอง
+    ซึ่งลบตัวเองทิ้งทันทีที่ list_entries อ่านเจอ -- รอบ poll ถัดไปจะไม่เห็นคำเตือนซ้ำอีก และ
+    ไฟล์ยังเป็น state "idle" ตามปกติ วิเคราะห์ใหม่ได้ทันที ไม่ใช่ทางตันแบบ rejected ค้างไว้
+
+    ล็อกชั่วคราวที่ทำให้อ่านไม่ชัดเจนถูกปฏิบัติแบบเดียวกับจุดอื่นในไฟล์นี้: ข้ามไปก่อน ไม่ลบ
+    ไม่ฟันธง แค่ไม่แสดงคำเตือนรอบนี้ -- เครื่องหมายที่เขียนไม่สำเร็จ (best-effort) ก็ทำให้
+    ฟังก์ชันนี้คืน False เป็นปกติอยู่แล้วเช่นกัน (ไม่มีไฟล์ให้เจอ)
+    """
+    path = _changed_marker_path(base_dir, audio_file)
+    if path is None:
+        return False
+    try:
+        exists = path.is_file()
+    except OSError as e:
+        logger.warning(
+            "stat เครื่องหมาย 'ไฟล์เปลี่ยนระหว่างวิเคราะห์' ของ %s ไม่สำเร็จชั่วคราว (%s) -- "
+            "ข้ามการแสดงคำเตือนรอบนี้ ไม่ลบทิ้ง",
+            audio_file,
+            e,
+        )
+        return False
+    if not exists:
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning(
+            "ลบเครื่องหมาย 'ไฟล์เปลี่ยนระหว่างวิเคราะห์' ของ %s ไม่ได้ (%s)", audio_file, e
+        )
+    return True
 
 
 def read_result(base_dir: Path, audio_file: str) -> dict | None:
@@ -446,7 +586,14 @@ def read_result(base_dir: Path, audio_file: str) -> dict | None:
 
 
 def clear(base_dir: Path, audio_file: str) -> None:
-    for path in (request_path(base_dir, audio_file), result_path(base_dir, audio_file)):
+    # เครื่องหมาย "เปลี่ยนระหว่างวิเคราะห์" (finding 5) รวมอยู่ในชุดที่ต้องล้างด้วย -- ไม่งั้น
+    # เครื่องหมายเก่าจากรอบก่อนหน้าจะค้างอยู่ให้ list_entries เห็นซ้ำผิดรอบ เช่นตอนผู้ใช้กด
+    # "เอาออกจากรายการ" ก่อนที่จะทันเห็นคำเตือนนั้นเลยด้วยซ้ำ
+    for path in (
+        request_path(base_dir, audio_file),
+        result_path(base_dir, audio_file),
+        _changed_marker_path(base_dir, audio_file),
+    ):
         if path is None:
             continue
         try:
@@ -482,7 +629,7 @@ def _confirmed_missing(path: Path) -> bool:
 
 
 def _sweep_orphan_sidecars(base_dir: Path) -> None:
-    """ลบ .request.json/.result.json ที่ไฟล์เสียงต้นทางหายไปแล้ว
+    """ลบ .request.json/.result.json/.changed.json ที่ไฟล์เสียงต้นทางหายไปแล้ว
 
     list_entries กวาดเฉพาะไฟล์เสียง sidecar กำพร้า (เกิดจากผู้ใช้ลบไฟล์เสียงผ่าน Explorer
     เพราะหน้าเว็บไม่เคยมีปุ่มเอาไฟล์ที่วิเคราะห์แล้วออกโดยไม่ลงทะเบียน -- ดู finding 1)
@@ -508,7 +655,7 @@ def _sweep_orphan_sidecars(base_dir: Path) -> None:
     for path in directory.iterdir():
         # เช็คชื่อก่อน (ไม่มี I/O) แล้วค่อย is_file() เฉพาะไฟล์ที่ชื่อลงท้ายแบบ sidecar
         # จริง ๆ -- กันไม่ให้ต้อง stat() ไฟล์เสียงทุกไฟล์ในโฟลเดอร์โดยไม่จำเป็น
-        for suffix in (REQUEST_SUFFIX, RESULT_SUFFIX):
+        for suffix in (REQUEST_SUFFIX, RESULT_SUFFIX, CHANGED_SUFFIX):
             if not path.name.endswith(suffix):
                 continue
             try:
@@ -571,6 +718,11 @@ def list_entries(base_dir: Path) -> list[dict]:
     finding 2: path.stat() เดิมดัก FileNotFoundError อย่างเดียว -- PermissionError ชั่วคราว
     (Minor C) หลุดออกไปเป็น 500 ทั้งหน้าได้ ต้องข้ามแถวนั้นไปแค่รอบนี้เหมือนกัน ไม่ใช่ raise
     และ request.is_file() ก็ต้องกันแบบเดียวกัน (ไม่ใช่ is_file() ตรง ๆ)
+
+    finding 5: จุดนี้เป็นผู้เดียวที่อ่าน "เครื่องหมายเปลี่ยนระหว่างวิเคราะห์" ที่ write_result
+    ทิ้งไว้ (ดู _mark_changed_during_analysis) แล้วลบทิ้งทันที (_consume_changed_marker) --
+    เพราะเป็นจุดที่หน้าเว็บ poll ถี่ที่สุดอยู่แล้วเช่นเดียวกับเหตุผลของการกวาด sidecar กำพร้า
+    ข้างบน คำเตือนจึงโผล่ให้ผู้ใช้เห็นแค่ครั้งเดียวแล้วหายไปเอง ไม่ค้างสถานะตลอดไป
     """
     _sweep_orphan_sidecars(base_dir)
     entries = []
@@ -611,6 +763,8 @@ def list_entries(base_dir: Path) -> list[dict]:
             "size_bytes": size_bytes,
             "suggested_name": suggested_name_from(audio_file),
         }
+        if _consume_changed_marker(base_dir, audio_file):
+            entry["changed_during_analysis"] = True
         if result is not None:
             entry.update(
                 {key: value for key, value in result.items() if key != "embedding"}
