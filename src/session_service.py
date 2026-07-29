@@ -81,6 +81,10 @@ class RecorderState:
         self.warnings = []
         self.last_result = None
         self.devices = {}
+        # เดียวกับ stop_event: Event เดียวที่ recorder thread เช็คสด ๆ ทุกบล็อกเสียง
+        # ไม่ใช่คำสั่งที่ต้องส่งข้าม process -- คงอยู่ข้าม recording แต่ต้อง clear()
+        # ทุกครั้งที่เปิดห้องใหม่ ไม่งั้นห้องถัดไปจะเริ่มโดยไมค์ปิดอยู่แล้วอย่างเงียบ ๆ
+        self.mic_muted = threading.Event()
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -93,6 +97,7 @@ class RecorderState:
                 "warnings": list(self.warnings),
                 "last_result": self.last_result,
                 "devices": dict(self.devices),
+                "mic_muted": self.mic_muted.is_set(),
             }
 
 
@@ -173,7 +178,9 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             state.warnings = []
             state.last_result = None
             state.devices = {}
+            state.mic_muted.clear()
             stop_event = state.stop_event
+            mic_muted = state.mic_muted
             room, model = state.room, state.model
 
         def on_event(code, params=None, level="info"):
@@ -191,7 +198,9 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             # ตัวอัดที่ระเบิดต้องไม่ทิ้งหน้าจอค้างที่ "กำลังอัด" ตลอดไป -- สถานะ
             # ต้องกลับไป idle ไม่ว่าจะจบทางไหน
             try:
-                result = recorder(room, model, config, stop_event, on_event)
+                result = recorder(
+                    room, model, config, stop_event, on_event, mic_muted=mic_muted
+                )
             except Exception:
                 logger.exception("ตัวอัดล้มระหว่างทำงาน")
                 result = None
@@ -215,6 +224,25 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             state.status = "stopping"
             state.stop_event.set()
         return jsonify({"ok": True}), 202
+
+    @app.post("/api/session/mic")
+    def set_mic_muted():
+        # ปิดได้เฉพาะตอนกำลังอัดจริง: ตอน idle ไม่มี mic_muted.clear() ของห้องถัดไป
+        # มาล้างค่านี้ทิ้ง ถ้ายอมให้ตั้งตอน idle ได้ ค่าจะรั่วข้ามไปห้องหน้าโดยไม่ตั้งใจ
+        payload = request.get_json(silent=True) or {}
+        muted = bool(payload.get("muted"))
+        with state.lock:
+            if state.status != "recording":
+                return jsonify({"error": "not_recording"}), 409
+            if muted:
+                state.mic_muted.set()
+            else:
+                state.mic_muted.clear()
+            room = state.room
+        activity.append(
+            config.base_dir, room or "unnamed", "mic_muted" if muted else "mic_unmuted"
+        )
+        return jsonify({"ok": True, "muted": muted}), 200
 
     @app.get("/api/speakers/pending")
     def list_pending_speakers():

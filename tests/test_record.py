@@ -365,6 +365,40 @@ def test_make_callback_converts_stereo_block_to_mono_and_queues_it():
     assert np.allclose(queued, [0.5, 0.5])
 
 
+def test_make_callback_passes_audio_through_when_not_muted():
+    q = queue.Queue()
+    callback = record.make_callback(q, channels=1, muted=threading.Event())
+    in_data = np.array([0.8, -0.6], dtype=np.float32).tobytes()
+
+    callback(in_data, 2, {}, 0)
+
+    assert np.allclose(q.get_nowait(), [0.8, -0.6])
+
+
+def test_make_callback_defaults_to_unmuted_when_no_event_is_given():
+    q = queue.Queue()
+    callback = record.make_callback(q, channels=1)
+    in_data = np.array([0.3], dtype=np.float32).tobytes()
+
+    callback(in_data, 1, {}, 0)
+
+    assert np.allclose(q.get_nowait(), [0.3])
+
+
+def test_make_callback_queues_silence_when_muted():
+    # เช็คก่อนใส่คิว ไม่ใช่ตอน mix -- เสียงที่ปิดไมค์ไว้ต้องไม่มีทางถูกเขียนลงดิสก์
+    # เลยแม้แต่บล็อกเดียว
+    q = queue.Queue()
+    muted = threading.Event()
+    muted.set()
+    callback = record.make_callback(q, channels=1, muted=muted)
+    in_data = np.array([0.8, -0.6], dtype=np.float32).tobytes()
+
+    callback(in_data, 2, {}, 0)
+
+    assert np.array_equal(q.get_nowait(), np.zeros(2, dtype=np.float32))
+
+
 def _queue_with(*blocks):
     q: "queue.Queue[np.ndarray]" = queue.Queue()
     for block in blocks:
@@ -729,6 +763,37 @@ def test_run_recording_stops_when_the_event_is_set(tmp_path, monkeypatch):
     assert [s.closed for s in calls["streams"]] == [True, True]
     assert calls["terminated"] is True
     assert "encode_done" in events
+
+
+def test_run_recording_wires_mic_muted_into_the_mic_stream_only(tmp_path, monkeypatch):
+    """ปิดไมค์ต้องไม่แตะเสียงคู่สนทนาเลย -- ถ้า Event เดียวกันหลุดไปโดนลำโพงด้วย
+    การปิดไมค์หนึ่งครั้งจะทำให้ครึ่งการประชุมหายไปเงียบ ๆ โดยไม่มีใครสังเกตจนจบ
+    """
+    calls = _fake_audio(monkeypatch)
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        record, "record_streams_to_session", lambda *a, **k: ["part0001.wav"]
+    )
+    monkeypatch.setattr(record, "finish_or_discard", lambda s, i: tmp_path / "meet.ogg")
+
+    seen_muted = []
+    real_make_callback = record.make_callback
+
+    def spy(block_queue, channels, muted=None):
+        seen_muted.append(muted)
+        return real_make_callback(block_queue, channels, muted)
+
+    monkeypatch.setattr(record, "make_callback", spy)
+
+    stop_event = threading.Event()
+    stop_event.set()
+    mic_muted = threading.Event()
+
+    record.run_recording("meet", "claude-opus-5", config, stop_event, mic_muted=mic_muted)
+
+    # mic stream is opened before the speaker/loopback stream
+    assert seen_muted[0] is mic_muted
+    assert seen_muted[1] is not mic_muted
 
 
 def test_run_recording_writes_the_manifest_before_recording_starts(

@@ -23,7 +23,7 @@ def make_config(tmp_path):
     )
 
 
-def blocking_recorder(name, model, config, stop_event, on_event=None):
+def blocking_recorder(name, model, config, stop_event, on_event=None, mic_muted=None):
     """ตัวอัดปลอมที่รอ stop_event เหมือนของจริง"""
     if on_event:
         on_event("room_opened", {"room": name or "", "model": model or ""})
@@ -115,6 +115,88 @@ def test_stopping_twice_is_refused_the_second_time(client):
     assert client.post("/api/session/stop").status_code == 409
 
 
+def test_state_reports_mic_muted_as_false_by_default(client):
+    assert client.get("/api/state").get_json()["mic_muted"] is False
+
+
+def test_muting_the_mic_while_recording_updates_the_state(client):
+    client.post("/api/session", json={"model": "claude-opus-5", "name": "x"})
+
+    response = client.post("/api/session/mic", json={"muted": True})
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "muted": True}
+    assert client.get("/api/state").get_json()["mic_muted"] is True
+
+    client.post("/api/session/mic", json={"muted": False})
+    assert client.get("/api/state").get_json()["mic_muted"] is False
+
+    client.post("/api/session/stop")
+
+
+def test_muting_the_mic_while_idle_is_refused(client):
+    response = client.post("/api/session/mic", json={"muted": True})
+
+    assert response.status_code == 409
+    assert client.get("/api/state").get_json()["mic_muted"] is False
+
+
+def test_mic_muted_resets_when_a_new_room_opens(client):
+    # ค่าที่ค้างจากห้องก่อนต้องไม่รั่วเข้าห้องถัดไป -- ไม่งั้นประชุมใหม่จะเริ่มโดย
+    # ไมค์ปิดอยู่แล้วโดยไม่มีใครกดปิดเองในรอบนี้
+    client.post("/api/session", json={"model": "claude-opus-5", "name": "x"})
+    client.post("/api/session/mic", json={"muted": True})
+    client.post("/api/session/stop")
+    _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    client.post("/api/session", json={"model": "claude-opus-5", "name": "y"})
+
+    assert client.get("/api/state").get_json()["mic_muted"] is False
+
+    client.post("/api/session/stop")
+
+
+def test_mic_mute_events_land_in_the_activity_log(client, config):
+    client.post("/api/session", json={"model": "claude-opus-5", "name": "x"})
+    client.post("/api/session/mic", json={"muted": True})
+    client.post("/api/session/mic", json={"muted": False})
+
+    codes = [e["code"] for e in tail(config.base_dir)]
+    assert "mic_muted" in codes
+    assert "mic_unmuted" in codes
+
+    client.post("/api/session/stop")
+
+
+def test_the_mic_muted_flag_passed_to_the_recorder_reflects_the_endpoint(config):
+    """เทสต์นี้ตรวจว่า Event ที่ endpoint แก้กับที่ recorder เห็นเป็นอันเดียวกันจริง
+    ไม่ใช่แค่ state.mic_muted ในหน้าเว็บที่ขยับแต่ recorder ไม่รู้เรื่อง
+    """
+    captured = {}
+
+    def capturing_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None):
+        captured["event"] = mic_muted
+        stop_event.wait(timeout=5)
+        return None
+
+    app = create_app(config, recorder=capturing_recorder, worker_probe=lambda: True)
+    client = app.test_client()
+    client.post("/api/session", json={"model": "claude-opus-5", "name": "x"})
+    for _ in range(60):
+        if "event" in captured:
+            break
+        time.sleep(0.05)
+    assert "event" in captured
+
+    client.post("/api/session/mic", json={"muted": True})
+    assert captured["event"].is_set() is True
+
+    client.post("/api/session/mic", json={"muted": False})
+    assert captured["event"].is_set() is False
+
+    client.post("/api/session/stop")
+
+
 def test_elapsed_seconds_counts_up_while_recording(client):
     client.post("/api/session", json={"model": "claude-opus-5", "name": "standup"})
 
@@ -126,7 +208,7 @@ def test_elapsed_seconds_counts_up_while_recording(client):
 
 
 def test_warnings_from_the_recorder_reach_the_state(config):
-    def warning_recorder(name, model, cfg, stop_event, on_event=None):
+    def warning_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None):
         on_event("device_changed", {"old": "A", "new": "B"}, "warn")
         stop_event.wait(timeout=5)
         return None
@@ -146,7 +228,7 @@ def test_warnings_from_the_recorder_reach_the_state(config):
 def test_a_recorder_that_crashes_returns_the_state_to_idle(config):
     """ตัวอัดที่ระเบิดต้องไม่ทิ้งหน้าจอค้างที่ 'กำลังอัด' ตลอดไป"""
 
-    def crashing_recorder(name, model, cfg, stop_event, on_event=None):
+    def crashing_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None):
         raise RuntimeError("พัง")
 
     app = create_app(config, recorder=crashing_recorder, worker_probe=lambda: True)
@@ -195,7 +277,7 @@ def test_activity_text_is_rendered_in_the_requested_language(client, config):
 
 
 def test_warning_text_is_rendered_too(config):
-    def warning_recorder(name, model, cfg, stop_event, on_event=None):
+    def warning_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None):
         on_event("device_changed", {"old": "A", "new": "B"}, "warn")
         stop_event.wait(timeout=5)
         return None

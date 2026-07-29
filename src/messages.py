@@ -19,6 +19,8 @@ MESSAGES = {
             'อุปกรณ์เสียงเปลี่ยนจาก "{old}" เป็น "{new}" — '
             "เครื่องอัดยังดักฟังตัวเดิมอยู่ เสียงคู่สนทนาจะไม่ถูกอัด"
         ),
+        "mic_muted": "ปิดไมค์แล้ว -- เสียงจากไมค์จะไม่ถูกอัด",
+        "mic_unmuted": "เปิดไมค์กลับมาแล้ว",
         "room_closed": "ปิดห้องแล้ว กำลังบีบอัดไฟล์เสียง",
         "encode_started": "กำลังบีบอัดไฟล์เสียง",
         "encode_done": "บันทึกไปที่ {path}",
@@ -106,6 +108,8 @@ MESSAGES = {
             'Audio device changed from "{old}" to "{new}" — the recorder is '
             "still listening to the old one, so the far end will not be captured."
         ),
+        "mic_muted": "Mic muted -- audio from the microphone will not be recorded",
+        "mic_unmuted": "Mic unmuted again",
         "room_closed": "Room ended, encoding the audio",
         "encode_started": "Encoding the audio",
         "encode_done": "Saved to {path}",

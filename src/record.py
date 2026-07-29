@@ -68,10 +68,22 @@ def drain_next_block(block_queue: "queue.Queue[np.ndarray]", timeout: float) -> 
         return np.zeros(0, dtype=np.float32)
 
 
-def make_callback(block_queue: "queue.Queue[np.ndarray]", channels: int):
+def make_callback(
+    block_queue: "queue.Queue[np.ndarray]",
+    channels: int,
+    muted: threading.Event | None = None,
+):
+    """`muted` ถูกเช็คก่อนใส่คิวเสมอ ไม่ใช่ตอน mix -- เสียงที่ปิดไมค์ไว้จะไม่มีทาง
+    ถูกเขียนลงดิสก์เลยแม้แต่บล็อกเดียว ไม่ใช่แค่ถูกทำให้เงียบทีหลัง ซึ่งสำคัญเพราะ
+    นี่คือเสียงคนพูดจริงที่ผู้ใช้เลือกจะไม่ให้เข้าประชุม
+    """
+
     def callback(in_data, frame_count, time_info, status):
         block = np.frombuffer(in_data, dtype=np.float32).reshape(-1, channels)
-        block_queue.put(to_mono(block.copy()))
+        mono = to_mono(block.copy())
+        if muted is not None and muted.is_set():
+            mono = np.zeros_like(mono)
+        block_queue.put(mono)
         return (None, pyaudio.paContinue)
 
     return callback
@@ -341,6 +353,7 @@ def run_recording(
     config,
     stop_event: threading.Event,
     on_event=None,
+    mic_muted: threading.Event | None = None,
 ) -> Path | None:
     """อัดจนกว่า stop_event จะถูก set แล้วคืน path ของไฟล์ที่ encode แล้ว
 
@@ -350,8 +363,14 @@ def run_recording(
 
     stop_event รับมาจากผู้เรียก นั่นคือทั้งหมดที่ทำให้ปุ่มบนหน้าจอหยุดการอัดได้
     โดยไม่ต้องปลอมสัญญาณ Ctrl+C ข้าม process บน Windows
+
+    mic_muted เป็น Event เดียวกัน: ผู้เรียกอยู่นอกฟังก์ชันนี้เป็นคนสั่ง set/clear
+    ระหว่างอัด ไม่มี event ส่งมา (ทางเข้า CLI ที่ไม่มีปุ่ม) แปลว่าไม่มีทางถูกปิดไมค์
+    เลยตลอดการอัด -- สร้าง Event สดที่ไม่มีใครแตะแทน ไม่ใช่ None ที่ทุกจุดต้องเช็ค
     """
     emit = on_event or _noop_event
+    if mic_muted is None:
+        mic_muted = threading.Event()
 
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
     recover_orphan_sessions(config.inbox_dir, emit)
@@ -387,7 +406,9 @@ def run_recording(
                 input=True,
                 input_device_index=mic_device["index"],
                 frames_per_buffer=4096,
-                stream_callback=make_callback(mic_queue, int(mic_device["maxInputChannels"])),
+                stream_callback=make_callback(
+                    mic_queue, int(mic_device["maxInputChannels"]), mic_muted
+                ),
             )
             speaker_stream = p.open(
                 format=pyaudio.paFloat32,

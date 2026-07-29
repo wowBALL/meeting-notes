@@ -21,6 +21,9 @@ const UI = {
     close: "ปิดการประชุม",
     mic: "ไมค์",
     spk: "ลำโพง",
+    muteMic: "🎙 ปิดไมค์",
+    unmuteMic: "🔇 เปิดไมค์กลับ",
+    micMutedNote: "ไมค์ปิดอยู่ — เสียงจากไมค์จะไม่ถูกอัด เสียงคู่สนทนายังอัดตามปกติ",
     closing: "กำลังปิด…",
     untitled: "ประชุมไม่ได้ตั้งชื่อ",
     activity: "จอแสดงผลการทำงาน",
@@ -68,6 +71,9 @@ const UI = {
     close: "End meeting",
     mic: "Mic",
     spk: "Speaker",
+    muteMic: "🎙 Mute mic",
+    unmuteMic: "🔇 Unmute mic",
+    micMutedNote: "Mic is muted — mic audio is not being recorded. The far end still is.",
     closing: "Ending…",
     untitled: "Untitled meeting",
     activity: "Activity",
@@ -385,12 +391,18 @@ function viewRecording(state) {
            <div>${esc(x.spk)} · ${esc(devices.loopback || "—")}</div>
          </div>`
       : "";
-  return `${warningsHtml(state)}
+  const micMutedNote = state.mic_muted
+    ? `<div class="note warn">⚠ ${esc(x.micMutedNote)}</div>`
+    : "";
+  return `${warningsHtml(state)}${micMutedNote}
     <div class="rec-wrap">
       <span class="rec-badge"><span class="dot"></span>${esc(x.rec)}</span>
       <div class="timer" id="clock">${fmtClock(state.elapsed_seconds || 0)}</div>
       <div class="sub">${esc(state.room || x.untitled)} · ${esc(modelLabel || "")}</div>
       ${deviceRows}
+      <button class="plain mic-toggle ${state.mic_muted ? "muted" : ""}" id="micToggle" ${isStopping ? "disabled" : ""}>
+        ${esc(state.mic_muted ? x.unmuteMic : x.muteMic)}
+      </button>
       <button class="danger" id="stop" ${isStopping ? "disabled" : ""}>
         ${esc(isStopping ? x.closing : x.close)}
       </button>
@@ -454,6 +466,7 @@ function signatureOf(state, view, progress) {
     state.room,
     state.model,
     JSON.stringify(state.devices || {}),
+    state.mic_muted,
     model,
     lang,
     stopping,
@@ -540,6 +553,8 @@ function wire() {
   if (go) go.onclick = openRoom;
   const stop = el("stop");
   if (stop) stop.onclick = () => el("scrim").classList.remove("hide");
+  const micToggle = el("micToggle");
+  if (micToggle) micToggle.onclick = () => toggleMic(!lastState.mic_muted);
   const again = el("again");
   if (again)
     again.onclick = () => {
@@ -583,6 +598,19 @@ async function openRoom() {
       pendingSignalJob = null;
       roomDraft = "";
     }
+  } catch (e) {
+    offline = true;
+  }
+  await poll();
+}
+
+async function toggleMic(muted) {
+  try {
+    await fetch("/api/session/mic", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ muted }),
+    });
   } catch (e) {
     offline = true;
   }
