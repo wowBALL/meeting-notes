@@ -112,9 +112,42 @@ def test_enroll_html_reuses_the_shared_stylesheet():
     assert "--accent:" not in text
 
 
+def _key_value_text(block: str, key: str) -> str:
+    """เนื้อหาสตริงจริงของคีย์ระดับบนสุดหนึ่งตัว รวมสตริงที่ถูกต่อกันด้วย +
+    ข้ามหลายบรรทัด (เช่น reason_too_short ใน enroll.js) เข้าเป็นก้อนเดียว
+
+    หาบรรทัดที่ขึ้นต้นด้วย `    <key>:` แล้วเก็บไปจนถึงบรรทัดก่อนคีย์ระดับบนสุด
+    ถัดไป (หรือจบ block) จากนั้นดึงเฉพาะเนื้อหาในเครื่องหมายคำพูดคู่ทั้งหมดมาต่อกัน
+    -- ไม่สนใจ operator + หรือการเยื้องบรรทัดต่อ เพราะสนใจแค่ความยาวข้อความจริง
+    """
+    lines = block.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(rf"^ {{4}}{re.escape(key)}:", line):
+            start = i
+            break
+    assert start is not None, f"ไม่พบคีย์ {key} ใน block"
+
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if re.match(r"^ {4}\w+:", lines[j]):
+            end = j
+            break
+
+    value_text = "\n".join(lines[start:end])
+    return "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', value_text))
+
+
 def test_enroll_page_explains_every_rejection_reason():
-    """เหตุผลที่ backend ส่งได้ทุกตัวต้องมีข้อความอธิบาย ไม่งั้นผู้ใช้เห็นช่องว่าง"""
+    """เหตุผลที่ backend ส่งได้ทุกตัวต้องมีคำอธิบายจริงในทั้งสองภาษา ไม่ใช่แค่ชื่อ
+    property ปรากฏในไฟล์ -- reason_multiple_speakers เองก็มีคำว่า multiple_speakers
+    อยู่แล้วในชื่อคีย์ เทสต์เดิมจึงผ่านได้แม้ค่าจะว่างเปล่า"""
     text = ENROLL_JS_PATH.read_text(encoding="utf-8")
+
+    th_block = _extract_object_block(text, "th")
+    en_block = _extract_object_block(text, "en")
+    th_keys = _top_level_keys(th_block)
+    en_keys = _top_level_keys(en_block)
 
     for reason in (
         "multiple_speakers",
@@ -122,4 +155,17 @@ def test_enroll_page_explains_every_rejection_reason():
         "unusable_embedding",
         "analysis_failed",
     ):
-        assert reason in text, f"enroll.js ไม่มีข้อความสำหรับเหตุผล {reason}"
+        key = f"reason_{reason}"
+        assert key in th_keys, f"UI.th ของ enroll.js ไม่มีคีย์ {key}"
+        assert key in en_keys, f"UI.en ของ enroll.js ไม่มีคีย์ {key}"
+
+        th_value = _key_value_text(th_block, key)
+        en_value = _key_value_text(en_block, key)
+        assert len(th_value) >= 20, (
+            f"th.{key} สั้นเกินไป ({len(th_value)} ตัวอักษร) -- ดูเหมือนจะไม่ใช่"
+            " คำอธิบายจริง"
+        )
+        assert len(en_value) >= 20, (
+            f"en.{key} สั้นเกินไป ({len(en_value)} ตัวอักษร) -- ดูเหมือนจะไม่ใช่"
+            " a real explanation"
+        )

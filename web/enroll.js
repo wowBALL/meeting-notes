@@ -26,12 +26,15 @@ const UI = {
       "งานจะถูกส่งให้ตัวประมวลผล ถ้ากำลังถอดเทปประชุมอยู่ คิวนี้จะรอจนเสร็จก่อน",
     save: "บันทึก",
     dismiss: "เอาออกจากรายการ",
-    play: "▶ ฟังเสียง",
     spoke: "พูดจริง {s} วินาที",
     found: "พบผู้พูด {n} คน",
     savedAs: "บันทึก {name} เข้าทะเบียนแล้ว",
     errName: "ชื่อนี้ใช้ไม่ได้ ลองใหม่",
     errSave: "บันทึกไม่สำเร็จ ไฟล์ยังอยู่ที่เดิม ลองใหม่ได้",
+    errLoad: "โหลดรายการไฟล์ไม่สำเร็จ อาจเป็นเพราะเซิร์ฟเวอร์หยุดทำงานหรือการเชื่อมต่อขาด",
+    retry: "ลองใหม่",
+    errAction: "การทำงานนี้ไม่สำเร็จ อาจเป็นเพราะการเชื่อมต่อขาด ลองใหม่อีกครั้ง",
+    reasonUnknown: "ไฟล์นี้ใช้ลงทะเบียนไม่ได้ด้วยเหตุผลที่ระบบยังไม่รู้จัก ลองไฟล์อื่นหรือติดต่อผู้ดูแล",
     reason_multiple_speakers:
       "ไฟล์นี้มีมากกว่าหนึ่งคน ลงทะเบียนไม่ได้เพราะระบบไม่รู้ว่าคุณหมายถึงใคร — " +
       "ตัดเอาเฉพาะช่วงที่คนเดียวพูดแล้ววางใหม่",
@@ -67,12 +70,15 @@ const UI = {
       "The job goes to the worker. If it is transcribing a meeting, this waits until that finishes.",
     save: "Save",
     dismiss: "Remove from list",
-    play: "▶ Play",
     spoke: "{s} seconds of speech",
     found: "{n} speaker(s) found",
     savedAs: "Saved {name} to the registry",
     errName: "That name cannot be used, try another",
     errSave: "Could not save. The file is untouched, you can try again",
+    errLoad: "Could not load the file list. The server may be down or the connection dropped",
+    retry: "Retry",
+    errAction: "That did not go through, possibly a dropped connection. Try again",
+    reasonUnknown: "This file cannot be enrolled for a reason this page does not recognize yet. Try another file or contact an admin",
     reason_multiple_speakers:
       "More than one person speaks in this file, so there is no way to tell who you mean — " +
       "trim it down to a stretch where only one person talks",
@@ -96,6 +102,10 @@ let speakers = [];
 let worker = false;
 let busy = false;
 let notice = null;
+let loadError = null;
+// เก็บ handle ของ poll ที่ตั้งไว้ -- ยกเลิกของเก่าก่อนตั้งใหม่เสมอ กัน chain
+// ซ้อนกันหลายสายเวลา load() ถูกเรียกซ้ำจากปุ่มต่าง ๆ ระหว่างที่ยังมีคิวค้าง
+let pollHandle = null;
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -106,15 +116,31 @@ function node(tag, className, text) {
 }
 
 async function load() {
-  const response = await fetch("/api/enroll");
-  const body = await response.json();
-  files = body.files || [];
-  speakers = body.speakers || [];
-  worker = body.worker === true;
-  busy = files.some((file) => file.state === "queued");
+  // ยกเลิก poll ที่ตั้งไว้ก่อนหน้าทุกครั้งที่ load() ถูกเรียก ไม่ว่าจะเรียกจาก
+  // timer เองหรือจากปุ่ม refresh/save/dismiss/remove -- กันไม่ให้เกิด chain
+  // การ poll ซ้อนกันหลายสายพร้อมกัน
+  if (pollHandle !== null) {
+    clearTimeout(pollHandle);
+    pollHandle = null;
+  }
+  try {
+    const response = await fetch("/api/enroll");
+    if (!response.ok) throw new Error(`http ${response.status}`);
+    const body = await response.json();
+    files = body.files || [];
+    speakers = body.speakers || [];
+    worker = body.worker === true;
+    busy = files.some((file) => file.state === "queued");
+    loadError = null;
+  } catch (err) {
+    // โหลดครั้งแรกล้มเหลวก็ต้องยัง render ได้ -- ไม่งั้นหน้าจะค้างเป็น
+    // skeleton เปล่า ๆ ไม่มีอะไรให้กดเลย
+    loadError = t().errLoad;
+    busy = false;
+  }
   render();
   // poll ต่อเฉพาะตอนที่มีงานค้างจริง หน้าที่นิ่งแล้วไม่ควรยิงทุกสองวินาทีตลอดไป
-  if (busy) setTimeout(load, 2000);
+  if (busy) pollHandle = setTimeout(load, 2000);
 }
 
 function chipFor(file) {
@@ -143,13 +169,23 @@ function renderFile(file) {
   if (file.state !== "done") return box;
 
   if (file.status !== "ok") {
-    const why = node("div", "note warn", t()[`reason_${file.reason}`] || file.reason);
+    const reasonKey = `reason_${file.reason}`;
+    const knownReason = t()[reasonKey];
+    // เหตุผลที่ไม่รู้จักต้องไม่โผล่เป็นโค้ดดิบให้ผู้ใช้เห็นตรง ๆ -- ถ้าไม่มีคำแปล
+    // ให้ใช้ประโยคกลาง ๆ แทน แล้วค่อยโชว์โค้ดแยกไว้ต่างหากแบบไม่ปนกับข้อความ error
+    const why = node("div", "note warn", knownReason || t().reasonUnknown);
     box.append(why);
+    if (!knownReason) box.append(node("div", "meta", file.reason));
     const dismiss = node("button", "plain", t().dismiss);
     dismiss.onclick = async () => {
-      await fetch(`/api/enroll/${encodeURIComponent(file.audio_file)}`, {
-        method: "DELETE",
-      });
+      try {
+        const response = await fetch(`/api/enroll/${encodeURIComponent(file.audio_file)}`, {
+          method: "DELETE",
+        });
+        if (!response.ok) notice = t().errAction;
+      } catch (err) {
+        notice = t().errAction;
+      }
       load();
     };
     box.append(dismiss);
@@ -164,18 +200,24 @@ function renderFile(file) {
   save.style.width = "auto";
   save.onclick = async () => {
     save.disabled = true;
-    const response = await fetch("/api/enroll/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ audio_file: file.audio_file, name: input.value }),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (response.ok) {
-      notice = fill(t().savedAs, { name: body.name });
-    } else {
-      notice = body.error === "bad_name" ? t().errName : t().errSave;
-      save.disabled = false;
+    try {
+      const response = await fetch("/api/enroll/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio_file: file.audio_file, name: input.value }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (response.ok) {
+        notice = fill(t().savedAs, { name: body.name });
+      } else {
+        notice = body.error === "bad_name" ? t().errName : t().errSave;
+      }
+    } catch (err) {
+      // fetch เองพังก่อนถึง response ได้ (เน็ตหลุด/เซิร์ฟเวอร์ตาย) -- ต้องไม่ปล่อย
+      // ปุ่มค้าง disabled อยู่แบบนั้นตลอดไปโดยไม่มีข้อความอะไรเลย
+      notice = t().errSave;
     }
+    // load() เรียก render() เสมอไม่ว่าจะสำเร็จหรือพัง ปุ่มใหม่จึงไม่ disabled ค้าง
     load();
   };
   row.append(input, save);
@@ -192,6 +234,15 @@ function render() {
 
   const body = el("body");
   body.replaceChildren();
+
+  if (loadError) {
+    // แสดง error เด่นสุดบนหัวหน้าเสมอ พร้อมปุ่มลองใหม่ที่ใช้งานได้จริง -- โหลด
+    // ครั้งแรกพังไม่ควรทำให้หน้าเหลือแค่ skeleton เปล่าที่กดอะไรไม่ได้เลย
+    body.append(node("div", "note warn", loadError));
+    const retry = node("button", "plain", t().retry);
+    retry.onclick = () => load();
+    body.append(retry);
+  }
 
   if (notice) {
     body.append(node("div", "note ok", notice));
@@ -212,11 +263,16 @@ function render() {
     button.disabled = busy;
     button.onclick = async () => {
       button.disabled = true;
-      await fetch("/api/enroll/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: ready.map((file) => file.audio_file) }),
-      });
+      try {
+        const response = await fetch("/api/enroll/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ files: ready.map((file) => file.audio_file) }),
+        });
+        if (!response.ok) notice = t().errAction;
+      } catch (err) {
+        notice = t().errAction;
+      }
       load();
     };
     body.append(button, node("div", "note", t().queueNote));
@@ -240,7 +296,12 @@ function render() {
     );
     const remove = node("button", "del", t().remove);
     remove.onclick = async () => {
-      await fetch(`/api/speakers/${speaker.id}`, { method: "DELETE" });
+      try {
+        const response = await fetch(`/api/speakers/${speaker.id}`, { method: "DELETE" });
+        if (!response.ok) notice = t().errAction;
+      } catch (err) {
+        notice = t().errAction;
+      }
       load();
     };
     row.append(remove);
