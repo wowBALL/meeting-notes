@@ -16,7 +16,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from src import activity, pending, speakers
+from src import activity, enroll, pending, speakers
 from src.messages import render
 from src.record import run_recording
 from src.storage import rename_speaker_in_transcript, safe_meeting_dir
@@ -337,6 +337,112 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         if directory is None or not (directory / audio_file).is_file():
             return jsonify({"error": "not_found"}), 404
         return send_from_directory(directory, audio_file, conditional=True)
+
+    @app.get("/enroll")
+    def enroll_page():
+        # หน้าแยกโดยเจตนา ไม่มีลิงก์จากหน้าจอ idle -- หน้าจอเดิมไม่ถูกแตะเลยแม้แต่
+        # บรรทัดเดียว ต้องมาก่อน route catch-all ข้างล่างไม่งั้นถูกกลืน
+        return send_from_directory(WEB_DIR, "enroll.html")
+
+    @app.get("/api/enroll")
+    def list_enroll():
+        return jsonify(
+            {
+                "files": enroll.list_entries(config.base_dir),
+                # หน้านี้สั่งงานให้ watcher ทำ ถ้า watcher ไม่ได้รัน ไฟล์จะค้างที่
+                # "กำลังวิเคราะห์" ตลอดไปโดยไม่มีอะไรบอกผู้ใช้ว่าทำไม
+                "worker": worker_ready(),
+                "speakers": [
+                    {
+                        "id": speaker["id"],
+                        "name": speaker["name"],
+                        "sample_count": len(speaker.get("samples", [])),
+                    }
+                    for speaker in speakers.load_registry(config.base_dir)
+                ],
+            }
+        )
+
+    @app.post("/api/enroll/analyze")
+    def analyze_enroll():
+        """สั่งวิเคราะห์ -- เขียนแค่ใบสั่งงาน งานจริงทำที่ watcher
+
+        ตอบ 202 ไม่ใช่ 200 เพราะยังไม่มีอะไรเสร็จ หน้าเว็บต้อง poll ต่อ
+        """
+        payload = request.get_json(silent=True) or {}
+        files = payload.get("files")
+        if not isinstance(files, list) or not files:
+            return jsonify({"error": "bad_request"}), 400
+        if not all(enroll.is_safe_filename(name) for name in files):
+            return jsonify({"error": "bad_request"}), 400
+        queued = [
+            name for name in files if enroll.write_request(config.base_dir, name)
+        ]
+        if not queued:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify({"ok": True, "queued": queued}), 202
+
+    @app.post("/api/enroll/confirm")
+    def confirm_enroll():
+        """ยืนยันชื่อแล้วเก็บเสียงเข้าทะเบียน
+
+        ลำดับเดียวกับ /api/speakers/confirm: ตรวจให้ผ่านและบันทึกทะเบียนให้สำเร็จก่อน
+        แล้วค่อยย้ายไฟล์ -- ย้ายก่อนแล้วบันทึกพลาดคือผู้ใช้เสียทั้งชื่อที่พิมพ์และไฟล์
+        ที่จะลองใหม่
+        """
+        payload = request.get_json(silent=True) or {}
+        audio_file = payload.get("audio_file")
+        if not enroll.is_safe_filename(audio_file):
+            return jsonify({"error": "bad_request"}), 400
+
+        result = enroll.read_result(config.base_dir, audio_file)
+        if result is None:
+            return jsonify({"error": "not_found"}), 404
+        if result.get("status") != "ok":
+            return jsonify({"error": "not_enrollable"}), 400
+        # ไฟล์ผลถูกแก้มือได้และมาจากเวอร์ชันเก่ากว่านี้ได้ -- เวกเตอร์ศูนย์ที่หลุดเข้า
+        # ทะเบียนจะ "เหมือน" กับเวกเตอร์ศูนย์อื่นทุกตัว ต้องเช็คก่อนแตะทะเบียนเลย
+        if not speakers.is_usable_embedding(result.get("embedding")):
+            return jsonify({"error": "bad_embedding"}), 400
+
+        name = payload.get("name")
+        if not isinstance(name, str) or not speakers.clean_name(name):
+            return jsonify({"error": "bad_name"}), 400
+        cleaned = speakers.clean_name(name)
+
+        with _registry_lock:
+            registry = speakers.load_registry(config.base_dir)
+            try:
+                speakers.save_registry(
+                    config.base_dir,
+                    speakers.add_sample(
+                        registry,
+                        cleaned,
+                        result["embedding"],
+                        source=f"enroll:{audio_file}",
+                    ),
+                )
+            except OSError as e:
+                # ทะเบียนยังไม่ถูกแก้ ไฟล์ต้องอยู่ที่เดิมให้ลองใหม่ได้
+                logger.warning("บันทึกทะเบียนจากการลงทะเบียนเสียงไม่ได้: %s", e)
+                return jsonify({"error": "save_failed"}), 500
+
+        # ทะเบียนถูกเซฟไปแล้ว = เสียงถูกจำแล้วจริง การย้ายไฟล์ไม่สำเร็จจึงต้องไม่กลายเป็น
+        # 500 ที่บอกผู้ใช้ว่าล้มเหลว เพราะเขาจะกดใหม่แล้วได้ตัวอย่างซ้ำในทะเบียน
+        try:
+            enroll.archive(config.base_dir, audio_file)
+        except OSError as e:
+            logger.warning("ย้าย %s เข้า done/ ไม่ได้ แต่เสียงถูกจำแล้ว: %s", audio_file, e)
+        return jsonify({"ok": True, "name": cleaned})
+
+    @app.delete("/api/enroll/<path:audio_file>")
+    def dismiss_enroll(audio_file):
+        """เอาไฟล์ออกจากรายการโดยไม่ลงทะเบียน -- ย้ายเข้า done/ ไม่ลบทิ้ง"""
+        if not enroll.is_safe_filename(audio_file):
+            return jsonify({"error": "bad_request"}), 400
+        if enroll.archive(config.base_dir, audio_file) is None:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify({"ok": True})
 
     @app.get("/<path:filename>")
     def static_file(filename):

@@ -1,8 +1,10 @@
 import json
 import time
+from unittest.mock import patch
 
 import pytest
 
+from src import enroll, speakers
 from src.config import Config
 from src.pending import build_pending_speakers, pending_dir, write_pending
 from src.session_service import create_app
@@ -555,3 +557,217 @@ def test_speaker_audio_endpoint_is_404_when_the_file_was_moved(client, config):
     (config.meetings_dir / meeting).mkdir(parents=True)
 
     assert client.get(f"/api/speakers/audio/{meeting}").status_code == 404
+
+
+def put_enroll_audio(base_dir, name="สมชาย.ogg"):
+    directory = base_dir / "enroll"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_bytes(b"fake audio")
+
+
+def test_get_enroll_lists_files_with_state_and_never_leaks_vectors(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding": [0.1, 0.2], "suggested_name": "สมชาย"},
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    assert body["files"][0]["audio_file"] == "สมชาย.ogg"
+    assert body["files"][0]["state"] == "done"
+    assert "embedding" not in json.dumps(body)
+
+
+def test_get_enroll_reports_whether_the_worker_is_running(tmp_path):
+    config = make_config(tmp_path)
+    client = create_app(config, worker_probe=lambda: False).test_client()
+
+    # ไม่มี watcher = ไฟล์จะค้างที่ "กำลังวิเคราะห์" ตลอดไป ผู้ใช้ต้องเห็นสาเหตุ
+    assert client.get("/api/enroll").get_json()["worker"] is False
+
+
+def test_get_enroll_also_returns_the_current_registry(tmp_path):
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมหญิง", [0.1, 0.2], source="enroll:x.ogg")
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    assert body["speakers"][0]["name"] == "สมหญิง"
+    assert body["speakers"][0]["sample_count"] == 1
+    assert "embedding" not in json.dumps(body)
+
+
+def test_post_analyze_writes_a_request_for_each_named_file(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path, "a.ogg")
+    put_enroll_audio(tmp_path, "b.ogg")
+    client = create_app(config).test_client()
+
+    response = client.post("/api/enroll/analyze", json={"files": ["a.ogg", "b.ogg"]})
+
+    assert response.status_code == 202
+    assert enroll.pending_requests(tmp_path) == ["a.ogg", "b.ogg"]
+
+
+def test_post_analyze_rejects_a_filename_that_escapes_the_folder(tmp_path):
+    config = make_config(tmp_path)
+    (tmp_path / "enroll").mkdir()
+    client = create_app(config).test_client()
+
+    response = client.post("/api/enroll/analyze", json={"files": ["../../evil.ogg"]})
+
+    assert response.status_code == 400
+    assert not (tmp_path / "evil.request.json").exists()
+
+
+def test_post_confirm_saves_the_embedding_and_archives_the_file(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1, 0.2, 0.3]}
+    )
+    client = create_app(config).test_client()
+
+    response = client.post(
+        "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย (เล็ก)"}
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "name": "สมชาย (เล็ก)"}
+    registry = speakers.load_registry(tmp_path)
+    assert registry[0]["name"] == "สมชาย (เล็ก)"
+    assert registry[0]["samples"][0]["embedding"] == [0.1, 0.2, 0.3]
+    assert registry[0]["samples"][0]["source"] == "enroll:สมชาย.ogg"
+    assert (tmp_path / "enroll" / "done" / "สมชาย.ogg").is_file()
+
+
+def test_post_confirm_merges_into_an_existing_person_of_the_same_name(tmp_path):
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", [0.9], source="meeting-1")
+    )
+    put_enroll_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    client = create_app(config).test_client()
+
+    client.post("/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"})
+
+    registry = speakers.load_registry(tmp_path)
+    # ชื่อซ้ำ = คนเดิม การสร้าง entry ที่สองทำให้โปรไฟล์แตกเป็นสองก้อนที่ต่างก็อ่อนแอ
+    assert len(registry) == 1
+    assert len(registry[0]["samples"]) == 2
+
+
+def test_post_confirm_refuses_a_rejected_result(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "rejected", "reason": "multiple_speakers", "speaker_count": 3},
+    )
+    client = create_app(config).test_client()
+
+    response = client.post(
+        "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "not_enrollable"
+    assert speakers.load_registry(tmp_path) == []
+    assert (tmp_path / "enroll" / "สมชาย.ogg").is_file()
+
+
+def test_post_confirm_refuses_a_zero_vector(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.0, 0.0]}
+    )
+    client = create_app(config).test_client()
+
+    response = client.post(
+        "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "bad_embedding"
+    assert speakers.load_registry(tmp_path) == []
+
+
+def test_post_confirm_refuses_a_name_that_is_empty_after_cleaning(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    client = create_app(config).test_client()
+
+    response = client.post(
+        "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "***"}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "bad_name"
+    # ไฟล์ต้องยังอยู่ให้ลองใหม่ได้
+    assert (tmp_path / "enroll" / "สมชาย.ogg").is_file()
+
+
+def test_post_confirm_leaves_the_file_alone_when_saving_the_registry_fails(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    client = create_app(config).test_client()
+
+    with patch("src.speakers.save_registry", side_effect=OSError("disk full")):
+        response = client.post(
+            "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"}
+        )
+
+    assert response.status_code == 500
+    # บันทึกไม่สำเร็จแล้วย้ายไฟล์ = ผู้ใช้เสียทั้งชื่อที่พิมพ์และไฟล์ที่จะลองใหม่
+    assert (tmp_path / "enroll" / "สมชาย.ogg").is_file()
+    assert not (tmp_path / "enroll" / "done" / "สมชาย.ogg").exists()
+
+
+def test_post_confirm_returns_404_when_there_is_no_result_yet(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    client = create_app(config).test_client()
+
+    response = client.post(
+        "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_delete_enroll_archives_the_file_without_touching_the_registry(tmp_path):
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_result(
+        tmp_path, "สมชาย.ogg", {"status": "rejected", "reason": "too_short"}
+    )
+    client = create_app(config).test_client()
+
+    response = client.delete("/api/enroll/สมชาย.ogg")
+
+    assert response.status_code == 200
+    assert (tmp_path / "enroll" / "done" / "สมชาย.ogg").is_file()
+    assert speakers.load_registry(tmp_path) == []
+
+
+def test_get_enroll_page_is_served(tmp_path):
+    config = make_config(tmp_path)
+    client = create_app(config).test_client()
+
+    response = client.get("/enroll")
+
+    assert response.status_code == 200
+    assert b"enroll.js" in response.data
