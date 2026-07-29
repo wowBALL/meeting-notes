@@ -671,7 +671,7 @@ def test_get_enroll_reports_the_best_registry_match_when_at_or_above_the_low_thr
         tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1")
     )
     put_enroll_audio(tmp_path)
-    # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.50) กับ HIGH (0.70) เกณฑ์
+    # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.50) กับ HIGH (0.80) เกณฑ์
     # เริ่มต้นของ Config พอดี ไม่ถึงขั้นเสนอให้รวมชื่อ แต่ต้องเตือนให้เห็น
     write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.6, 0.8]})
     client = create_app(config).test_client()

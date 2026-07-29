@@ -1,6 +1,10 @@
 import pytest
 
-from src.config import load_config
+from src.config import (
+    DEFAULT_SPEAKER_MATCH_HIGH,
+    DEFAULT_SPEAKER_MATCH_LOW,
+    load_config,
+)
 
 
 def test_load_config_reads_required_env_vars(tmp_path, monkeypatch):
@@ -139,7 +143,9 @@ def test_load_config_uses_default_speaker_thresholds(tmp_path, monkeypatch):
 
     config = load_config(base_dir=tmp_path)
 
-    assert config.speaker_match_high == 0.70
+    # ค่าตัวเลขเขียนตรง ๆ ที่นี่ที่เดียว: การขยับเกณฑ์ต้องเป็นการตัดสินใจที่มีคนแก้
+    # เทสต์ตาม ไม่ใช่สิ่งที่เลื่อนไปเองเพราะทุกที่อ้างค่าคงที่ตัวเดียวกันหมด
+    assert config.speaker_match_high == 0.80
     assert config.speaker_match_low == 0.50
 
 
@@ -150,7 +156,8 @@ def test_load_config_falls_back_when_a_threshold_is_not_a_number(tmp_path, monke
 
     config = load_config(base_dir=tmp_path)
 
-    assert config.speaker_match_high == 0.70
+    # เทสต์นี้ถามว่า "ตกกลับไปใช้ค่าเริ่มต้นไหม" ไม่ใช่ "ค่าเริ่มต้นเป็นเท่าไร"
+    assert config.speaker_match_high == DEFAULT_SPEAKER_MATCH_HIGH
 
 
 def test_load_config_falls_back_to_both_defaults_when_the_thresholds_are_inverted(
@@ -165,8 +172,8 @@ def test_load_config_falls_back_to_both_defaults_when_the_thresholds_are_inverte
     with caplog.at_level("WARNING"):
         config = load_config(base_dir=tmp_path)
 
-    assert config.speaker_match_high == 0.70
-    assert config.speaker_match_low == 0.50
+    assert config.speaker_match_high == DEFAULT_SPEAKER_MATCH_HIGH
+    assert config.speaker_match_low == DEFAULT_SPEAKER_MATCH_LOW
     assert "0.4" in caplog.text
     assert "0.6" in caplog.text
 
