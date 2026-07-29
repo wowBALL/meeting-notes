@@ -1,15 +1,16 @@
 import inspect
 import json
+import subprocess
 import time
 from unittest.mock import patch
 
 import pytest
 
-from src import enroll, speakers
+from src import enroll, session_service, speakers
 from src.activity import append, tail
 from src.config import Config
 from src.pending import build_pending_speakers, pending_dir, write_pending
-from src.session_service import create_app
+from src.session_service import create_app, probe_worker
 from src.speakers import add_sample, load_registry, save_registry
 
 
@@ -1113,3 +1114,55 @@ def test_get_enroll_page_is_served(tmp_path):
 
     assert response.status_code == 200
     assert b"enroll.js" in response.data
+
+
+def _capture_probe_run(monkeypatch, returncode):
+    """เรียก probe_worker โดยดัก subprocess.run ไว้ คืน (ผลลัพธ์, kwargs ที่ส่งเข้าไป)"""
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, returncode)
+
+    monkeypatch.setattr(session_service.subprocess, "run", fake_run)
+    return probe_worker(), captured
+
+
+def test_worker_probe_does_not_create_a_console_window(monkeypatch):
+    """probe ต้องส่ง CREATE_NO_WINDOW เสมอ
+
+    ถ้าธงนี้หายไป bug จะกลับมาแบบที่มองไม่เห็นในเทสต์อื่นเลย: service ที่วิดเจ็ตเปิด
+    ด้วย pythonw.exe ไม่มี console ลูกที่เป็น console subsystem จึงได้ console ใหม่
+    ทุกตัว แล้ว Windows 11 ส่งต่อให้ Windows Terminal -- หน้าต่างดำเด้งทุก 10 วินาที
+    ตามรอบแคชของ probe เทสต์นี้จับที่ธง เพราะการเด้งหน้าต่างเป็นผลข้างเคียงระดับ OS
+    ที่ assert จากในโปรเซสไม่ได้
+    """
+    _, captured = _capture_probe_run(monkeypatch, 0)
+
+    assert captured["creationflags"] == session_service._NO_WINDOW
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):  # Windows เท่านั้น
+        # กันเทสต์ผ่านแบบว่างเปล่า -- ถ้า _NO_WINDOW เป็น 0 การเทียบข้างบนก็ยังผ่าน
+        assert captured["creationflags"] == subprocess.CREATE_NO_WINDOW != 0
+
+
+@pytest.mark.parametrize("returncode,expected", [(0, True), (1, False)])
+def test_worker_probe_still_reads_the_exit_code(monkeypatch, returncode, expected):
+    """ธงใหม่ต้องไม่เปลี่ยนคำตอบของ probe -- 0 คือ watcher รันอยู่ นอกนั้นคือไม่"""
+    result, captured = _capture_probe_run(monkeypatch, returncode)
+
+    assert result is expected
+    assert captured["command"] == session_service._WORKER_PROBE_COMMAND
+    assert captured["capture_output"] is True
+    assert captured["timeout"] == 10
+
+
+def test_worker_probe_is_false_when_powershell_cannot_be_launched(monkeypatch):
+    """ตัวกันเดิมต้องยังอยู่: launch ไม่ได้ = ตอบไม่รู้ ไม่ใช่โยน 500 ออกหน้าเว็บ"""
+
+    def boom(command, **kwargs):
+        raise OSError("powershell หายไป")
+
+    monkeypatch.setattr(session_service.subprocess, "run", boom)
+
+    assert probe_worker() is False
