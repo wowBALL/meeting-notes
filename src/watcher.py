@@ -57,8 +57,26 @@ def process_enroll_requests(config: Config, diarization_pipeline: Any = None) ->
                 pre_stat.st_size,
                 pre_stat.st_mtime,
             )
-        except OSError:
-            pre_analysis_stat = None
+        except OSError as e:
+            # finding 1 (blocks merge): เดิมตรงนี้ตั้ง pre_analysis_stat = None แล้ว "เดินหน้า
+            # วิเคราะห์ต่อ" -- write_result.เดิมเช็คแค่ elif pre_analysis_stat is not None and
+            # ... ทำให้ None ข้ามการเปรียบเทียบไปเงียบ ๆ เท่ากับปิดการป้องกันทั้งหมดที่เพิ่ง
+            # เพิ่มเข้ามา (CRITICAL A) พอดีตอนที่ต้องการมันที่สุด: PermissionError ชั่วคราว
+            # (สแกนไวรัส/ตัวซิงก์ไฟล์) มักคลายล็อกเองไม่กี่ร้อย ms ให้หลัง ffmpeg/analyze()
+            # จึงอ่านไฟล์สำเร็จตามปกติ แต่ diarization กินเวลานาน (วินาทีถึงนาที) พอถึงตอน
+            # write_result stat ไฟล์ใหม่อาจถูกผู้ใช้แทนที่ไปแล้ว (อัดคนละคนทับชื่อเดิม) และ
+            # เพราะไม่มี pre_analysis_stat มาเทียบ ผล "ok" จะถูกเขียนพร้อม stat ของไฟล์ใหม่
+            # ผูกเข้ากับ embedding ของไฟล์เก่า -- ต้องไม่วิเคราะห์ไฟล์ที่ผูกกับไบต์อะไรไม่ได้
+            # ตั้งแต่ต้นแทน ข้ามไปเลย (ไม่เรียก analyze/write_result) ใบสั่งงานยังอยู่ครบ
+            # (pending_requests ยังเห็นว่า "สั่งแล้วแต่ยังไม่มีผล") รอบ poll หน้าจะลองใหม่เอง
+            # เมื่อล็อกคลาย -- ผลพลอยได้คือไม่เสีย GPU diarization เต็มรอบไปกับผลที่ต้องทิ้ง
+            logger.warning(
+                "stat ไฟล์ %s ก่อนวิเคราะห์ไม่สำเร็จชั่วคราว (%s) -- ข้ามรอบ poll นี้ ไม่วิเคราะห์"
+                "ไฟล์ที่ผูกกับไบต์อะไรไม่ได้ รอบหน้าจะลองใหม่เองเมื่อล็อกคลาย",
+                audio_file,
+                e,
+            )
+            continue
         try:
             analyzed = enroll.analyze(audio_path, pipeline=diarization_pipeline)
         except Exception:

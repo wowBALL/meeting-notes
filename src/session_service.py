@@ -476,8 +476,12 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         # request นี้ล้มเหลวได้อีก ดักแค่ OSError จึงขัดกับเจตนาที่เขียนไว้เอง
         try:
             enroll.archive(config.base_dir, audio_file)
-        except Exception as e:
-            logger.warning("ย้าย %s เข้า done/ ไม่ได้ แต่เสียงถูกจำแล้ว: %s", audio_file, e)
+        except Exception:
+            # finding 6: ดักกว้างจาก OSError เป็น Exception โดยตั้งใจ (ดูคอมเมนต์ด้านบน
+            # เรื่อง shutil.Error) -- สำหรับ exception ที่ไม่คาดคิดจริง ๆ ซึ่งเป็นเหตุผลที่
+            # ขยายมาดักกว้างขนาดนี้ traceback คือส่วนที่มีประโยชน์ที่สุดตอนสืบสาเหตุ ใช้
+            # logger.exception แทน logger.warning เพื่อให้ traceback ไม่หายไป
+            logger.exception("ย้าย %s เข้า done/ ไม่ได้ แต่เสียงถูกจำแล้ว", audio_file)
             # archive() ปกติเรียก clear() เองหลังย้ายไฟล์สำเร็จ แต่พังก่อนถึงตรงนั้น --
             # ถ้าปล่อย result.json เดิมไว้ การ์ดนี้จะยังโชว์สถานะ "พร้อมบันทึก" ในรอบหน้า
             # กดซ้ำได้ตัวอย่างซ้ำเข้าทะเบียนคนเดิม (finding 2 ของรีวิวรอบสุดท้าย) ล้าง
@@ -504,8 +508,12 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             return jsonify({"error": "bad_request"}), 400
         try:
             archived = enroll.archive(config.base_dir, audio_file)
-        except Exception as e:
-            logger.warning("เอา %s ออกจากรายการไม่ได้ (archive ล้มเหลว): %s", audio_file, e)
+        except Exception:
+            # finding 6: เช่นเดียวกับ confirm_enroll ด้านบน -- ดักกว้างจาก OSError เป็น
+            # Exception โดยตั้งใจ (ดู docstring ของฟังก์ชันนี้ เรื่อง PermissionError จาก
+            # shutil.move) ใช้ logger.exception เพื่อไม่ให้ traceback ของ exception ที่ไม่
+            # คาดคิดจริง ๆ หายไป
+            logger.exception("เอา %s ออกจากรายการไม่ได้ (archive ล้มเหลว)", audio_file)
             return jsonify({"error": "archive_failed"}), 500
         if archived is None:
             return jsonify({"error": "not_found"}), 404

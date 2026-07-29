@@ -78,20 +78,36 @@ def scan_audio(base_dir: Path) -> list[Path]:
     ไม่ลงไปใน done/ เพราะไฟล์ในนั้นลงทะเบียนไปแล้ว การเห็นมันโผล่ในรายการอีกรอบ
     แปลว่าผู้ใช้จะลงทะเบียนคนเดิมซ้ำโดยไม่ได้ตั้งใจ
 
-    Minor C: path.is_file() ใน python เวอร์ชันนี้กลืนเฉพาะ ENOENT/ENOTDIR แล้วคืน False --
-    PermissionError (สแกนไวรัส/ตัวซิงก์ไฟล์ล็อกไฟล์ไว้ชั่วครู่) หลุดออกไปเป็น exception จริง
-    ไม่ถูกกลืน ถ้าปล่อยให้ลอยขึ้นไปตรง ๆ /api/enroll ทั้งหน้าจะ 500 เพราะไฟล์ตัวเดียวที่ถูก
-    ล็อกชั่วคราว -- ข้ามไฟล์นั้นไปแค่รอบ poll นี้ดีกว่า รอบถัดไปจะเห็นมันใหม่เองเมื่อคลายล็อก
+    Minor C / finding 2-3: Path.is_file()/is_dir() ใน python เวอร์ชันนี้กลืนเฉพาะ
+    ENOENT/ENOTDIR/EBADF/WSAELOOP แล้วคืน False -- PermissionError (สแกนไวรัส/ตัวซิงก์
+    ไฟล์ล็อกไฟล์ไว้ชั่วครู่) หลุดออกไปเป็น exception จริง ไม่ถูกกลืน ถ้าปล่อยให้ลอยขึ้นไปตรง ๆ
+    /api/enroll ทั้งหน้าจะ 500 เพราะไฟล์ (หรือทั้งโฟลเดอร์) ตัวเดียวที่ถูกล็อกชั่วคราว -- ทั้ง
+    directory.is_dir() และ path.is_file() ต่อไฟล์จึงต้องอยู่ใน try/except OSError ของตัวเอง
+    ข้ามไปแค่รอบ poll นี้ดีกว่า รอบถัดไปจะเห็นใหม่เองเมื่อคลายล็อก และต้อง log ไว้ (finding 3)
+    ไม่งั้นไฟล์ที่ล็อกค้างถาวรจะไม่โผล่ใน /enroll ตลอดกาลโดยไม่มีร่องรอยอะไรให้ตามหาเลย
     """
     directory = enroll_dir(base_dir)
-    if not directory.is_dir():
+    try:
+        is_dir = directory.is_dir()
+    except OSError as e:
+        logger.warning(
+            "stat โฟลเดอร์ enroll/ ไม่สำเร็จชั่วคราว (%s) -- ถือว่ายังไม่มีไฟล์ให้เห็นรอบ poll นี้",
+            e,
+        )
+        return []
+    if not is_dir:
         return []
     audio_files = []
     for path in directory.iterdir():
         try:
             if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
                 audio_files.append(path)
-        except OSError:
+        except OSError as e:
+            logger.warning(
+                "stat ไฟล์ %s ใน enroll/ ไม่สำเร็จชั่วคราว (%s) -- ข้ามไฟล์นี้ไปรอบ poll นี้",
+                path.name,
+                e,
+            )
             continue
     return sorted(audio_files)
 
@@ -212,7 +228,20 @@ def write_request(base_dir: Path, audio_file: str, now: datetime | None = None) 
     path = request_path(base_dir, audio_file)
     if path is None:
         return None
-    if not (enroll_dir(base_dir) / audio_file).is_file():
+    audio_path = enroll_dir(base_dir) / audio_file
+    try:
+        exists = audio_path.is_file()
+    except OSError as e:
+        # finding 2: PermissionError ชั่วคราวหลุดออกจาก is_file() ได้ (Minor C) -- ไม่รู้
+        # แน่ชัดว่าไฟล์มีอยู่จริงไหม อย่าฟันธงว่า "ไม่มี" ผิด ๆ แค่ไม่สั่งงานรอบนี้ ผู้ใช้
+        # กดวิเคราะห์ใหม่ได้เองเมื่อล็อกคลาย
+        logger.warning(
+            "stat ไฟล์ %s ก่อนสั่งวิเคราะห์ไม่สำเร็จชั่วคราว (%s) -- ไม่สั่งงานรอบนี้",
+            audio_file,
+            e,
+        )
+        return None
+    if not exists:
         return None
     _write_json(
         path,
@@ -250,7 +279,7 @@ def write_result(
     pre_analysis_stat: tuple[int, float] | None = None,
     now: datetime | None = None,
 ) -> Path | None:
-    """ผลวิเคราะห์ พร้อมผูกติดกับขนาด/mtime ของไฟล์เสียง ณ ตอนเขียน (CRITICAL A/B)
+    """ผลวิเคราะห์ พร้อมผูกติดกับขนาด/mtime ของไฟล์เสียง ณ ตอนเขียน (CRITICAL A/B, finding 1/4)
 
     เดิมฟังก์ชันนี้ stat() ไฟล์แค่ตอนเขียนผล (T3 นาทีให้หลัง) แล้วเชื่อว่า "ตรงกับไฟล์บน
     ดิสก์ตอนนี้" คือพอแล้ว -- แต่ analyze() อ่านไบต์ไปตั้งแต่ T1 diarization ใช้เวลานาน
@@ -259,16 +288,34 @@ def write_result(
     ผู้เรียก (watcher.process_enroll_requests) จึงต้อง stat() ไฟล์ *ก่อน* ส่งเข้า analyze()
     แล้วส่ง (size, mtime) นั้นมาเป็น pre_analysis_stat -- ถ้าไม่ตรงกับ stat ตอนเขียนผล
     แปลว่าไฟล์ถูกแทนที่ระหว่างวิเคราะห์ ผล "ok" ที่ได้จึงบรรยายไบต์ที่ไม่มีอยู่บนดิสก์แล้ว
-    ต้องลดสถานะเป็น rejected แทน ไม่ปล่อยให้ embedding ของคนเดิมไปแอบอยู่ใต้ชื่อไฟล์ใหม่
+    ต้องลดสถานะแทน ไม่ปล่อยให้ embedding ของคนเดิมไปแอบอยู่ใต้ชื่อไฟล์ใหม่
 
-    ผู้เรียกเดิมที่ไม่ส่ง pre_analysis_stat มา (None) จะไม่ถูกเช็คคู่นี้ -- คงพฤติกรรมเดิม
-    ไว้ให้ผู้เรียกที่ไม่ได้อยู่ในเส้นทาง watcher (เช่นเทสต์ที่เขียนผลตรง ๆ)
+    finding 1 (defense in depth): pre_analysis_stat=None ต้องถูกปฏิบัติเหมือน "ผูกไม่ได้"
+    ด้วยเช่นกัน ไม่ใช่ "ข้ามการเช็คคู่นี้ไปเงียบ ๆ" อย่างเดิม -- คอมเมนต์เก่าที่นี่เคยให้เหตุผล
+    ว่าต้อง "คงพฤติกรรมเดิมไว้ให้ผู้เรียกอื่นที่ไม่ได้อยู่ในเส้นทาง watcher" แต่นั่นคือช่องโหว่
+    เอง: ไม่มี production caller ตัวไหนส่ง payload status "ok" เข้ามาโดยไม่ผ่าน
+    watcher.process_enroll_requests (ซึ่งตอนนี้ stat ไม่สำเร็จก็ continue ไม่วิเคราะห์เลย
+    ดู watcher.py) -- pre_analysis_stat ที่เป็น None พร้อม status "ok" จึงแปลว่าไม่มีทางรู้
+    เลยว่าผลนี้เป็นของไฟล์เสียงไบต์ชุดไหน ต้องถือว่ายืนยันไม่ได้เหมือนกับกรณี stat ไม่สำเร็จ
+    ตอนเขียนผล ไม่ใช่ "ผ่านเพราะไม่มีอะไรให้เทียบ"
 
-    อ่าน stat ไม่สำเร็จตอนเขียนผล (ไฟล์หายไปแล้ว เช่นผู้ใช้กด "เอาออกจากรายการ" ระหว่างที่
-    กำลังวิเคราะห์อยู่พอดี -- ดู session_service.dismiss_enroll) เดิมเขียน None ทั้งคู่แล้ว
-    ปล่อย "ok" หลุดออกไปเงียบ ๆ ตอนนี้ไม่มีทางผูกผลนี้กับไฟล์ใดได้เลย ต้องลดสถานะเป็น
-    rejected เช่นกัน ไม่ใช่แค่บันทึก None แล้วหวังว่า read_result จะจับได้ (มันจับไม่ได้ --
-    ดู read_result ด้านล่าง: null ต้องแปลว่ายืนยันไม่ได้ ไม่ใช่ผ่านการเช็ค)
+    finding 4: ทุกกรณีที่ผูกไม่ได้ (stat ไม่สำเร็จตอนเขียนผล / pre_analysis_stat เป็น None /
+    ไฟล์ถูกแทนที่ระหว่างวิเคราะห์) ตอนนี้ "ล้าง" ทั้งสอง sidecar ทิ้งแทนการเขียน rejected
+    ค้างไว้เหมือนเดิม -- ถ้าเขียน rejected ค้างไว้ (โดยเฉพาะกรณีไฟล์ถูกแทนที่: ไฟล์ใหม่ยังอยู่
+    บนดิสก์จริง) audio_size/audio_mtime ที่บันทึกจะ "ตรง" กับไฟล์ใหม่ที่อยู่ ณ ตอนนี้พอดี
+    ทำให้ rejected นั้น "ยืนยันได้" ตลอดกาลสำหรับไฟล์ใหม่ การ์ดค้างที่ "ใช้ไม่ได้" (state
+    "done") ไปตลอด เพราะปุ่มวิเคราะห์เก็บเฉพาะไฟล์ state "idle" -- ไฟล์ที่วางใหม่ถูกต้องทุก
+    ไบต์กลายเป็นทางตันที่ทำได้แค่เอาออกจากรายการ (ดู done/) ล้างทิ้งทั้งคู่ (request+result)
+    ให้การ์ดกลับไป idle ทันทีดีกว่า: ผู้ใช้กดวิเคราะห์ไฟล์ที่วางใหม่ได้เองเป็นการกระทำใหม่
+    ของมนุษย์ ไม่มีอะไรสั่งวิเคราะห์ซ้ำอัตโนมัติ (ไม่มี request.json ค้างให้ pending_requests
+    เห็น) จึงไม่มีทางวนซ้ำไม่รู้จบ
+
+    finding 5: เดิมกรณี "ผูกไม่ได้" เขียนข้อความ detail อธิบายเหตุผลไว้ในไฟล์ (เช่น "ไฟล์
+    เสียงถูกแทนที่ระหว่างการวิเคราะห์") แต่ read_result (ดูด้านล่าง) ล้าง sidecar ที่ audio_
+    size/audio_mtime เป็น null ทิ้งแบบไม่มีเงื่อนไขก่อนคืนค่าเสมอ -- ข้อความนั้นจึงไม่มีทาง
+    ถูกอ่านโดยใครเลยแม้แต่ครั้งเดียว (unreachable message) ตอนนี้ไม่ต้องกังวลเรื่องนี้อีก
+    เพราะไม่เขียน detail แบบนั้นแล้ว (ล้างทิ้งไปเลยแทน) แต่ถ้าจะกลับไปเขียน rejected ค้างไว้
+    อีกในอนาคต ต้องจำไว้ว่า detail ในเคสนี้จะไม่มีผู้ใช้คนไหนเห็นเลย ไม่ใช่แค่ "อาจจะไม่เห็น"
     """
     path = result_path(base_dir, audio_file)
     if path is None:
@@ -281,31 +328,27 @@ def write_result(
         audio_size = None
         audio_mtime = None
 
-    payload = analyzed
     if analyzed.get("status") == "ok":
+        cannot_bind_reason = None
         if audio_size is None or audio_mtime is None:
             # CRITICAL B: stat ไม่สำเร็จตอนเขียนผล -- ไม่มีทางผูกกับไฟล์ไหนได้เลย
-            payload = {
-                "status": "rejected",
-                "reason": "analysis_failed",
-                "suggested_name": analyzed.get(
-                    "suggested_name", suggested_name_from(audio_file)
-                ),
-                "detail": "ผูกผลกับไฟล์เสียงไม่ได้ตอนเขียนผล (ไฟล์เสียงหายไปแล้ว)",
-            }
-        elif pre_analysis_stat is not None and pre_analysis_stat != (
-            audio_size,
-            audio_mtime,
-        ):
+            cannot_bind_reason = "stat ไฟล์เสียงไม่สำเร็จตอนเขียนผล (ไฟล์เสียงหายไปแล้ว)"
+        elif pre_analysis_stat is None:
+            # finding 1 defense in depth: ไม่มี stat ก่อนวิเคราะห์ให้เทียบเลย
+            cannot_bind_reason = "ไม่มี pre_analysis_stat ให้เทียบ ยืนยันไม่ได้ว่าผลนี้เป็นของไฟล์ไหน"
+        elif pre_analysis_stat != (audio_size, audio_mtime):
             # CRITICAL A: ไฟล์เสียงถูกแทนที่ระหว่างที่กำลังวิเคราะห์อยู่พอดี
-            payload = {
-                "status": "rejected",
-                "reason": "analysis_failed",
-                "suggested_name": analyzed.get(
-                    "suggested_name", suggested_name_from(audio_file)
-                ),
-                "detail": "ไฟล์เสียงถูกแทนที่ระหว่างการวิเคราะห์",
-            }
+            cannot_bind_reason = "ไฟล์เสียงถูกแทนที่ระหว่างการวิเคราะห์"
+
+        if cannot_bind_reason is not None:
+            logger.warning(
+                "ผลวิเคราะห์ของ %s ผูกกับไฟล์เสียงไม่ได้ (%s) -- ล้าง sidecar ทิ้งทั้งคู่แทน "
+                "การเขียน rejected ค้างไว้ (finding 4) ให้การ์ดกลับไป idle",
+                audio_file,
+                cannot_bind_reason,
+            )
+            clear(base_dir, audio_file)
+            return None
 
     _write_json(
         path,
@@ -314,7 +357,7 @@ def write_result(
             "analyzed": (now or datetime.now()).isoformat(timespec="seconds"),
             "audio_size": audio_size,
             "audio_mtime": audio_mtime,
-            **payload,
+            **analyzed,
         },
     )
     return path
@@ -331,17 +374,29 @@ def read_result(base_dir: Path, audio_file: str) -> dict | None:
     เวกเตอร์เสียงของคนเดิมไปเสนอให้ยืนยันภายใต้ชื่อไฟล์ใหม่ -- ต้องถือว่า "ไม่มีผล" และ
     เก็บกวาด sidecar เก่าทิ้งไปเลย ไม่ปล่อยค้างให้ผูกผิดซ้ำได้อีก
 
-    CRITICAL B: audio_size/audio_mtime เป็น null (write_result stat ไม่สำเร็จตอนเขียน --
-    เดิมคิดว่าไม่มีทางเกิดขึ้นได้เพราะไฟล์เสียงต้องมีอยู่ก่อนถึงจะวิเคราะห์ได้ แต่จริง ๆ
-    เกิดได้ เช่นผู้ใช้กด "เอาออกจากรายการ" ระหว่าง watcher กำลังวิเคราะห์อยู่พอดี ไฟล์เลย
-    หายไปตอน write_result stat -- ถ้ามีไฟล์ชื่อเดียวกันถูกวางกลับเข้ามาใหม่ทีหลัง) ต้อง
-    ถือว่า "ยืนยันไม่ได้" ไม่ใช่ "ผ่านการเช็คเพราะไม่มีอะไรให้เทียบ" ไม่งั้นเท่ากับปิดการ
-    ป้องกันทั้งหมดไว้พอดีตอนที่ต้องการมันที่สุด (write_result เองก็ลด status เป็น
-    rejected ไปแล้วตั้งแต่ตอนเขียนเมื่อผูกไม่ได้ แต่ sidecar เก่าจากก่อนแก้ไข หรือไฟล์ที่
-    ถูกแก้มือ ก็ยังต้องกันตรงนี้ด้วยอีกชั้น -- defense in depth)
+    CRITICAL B: audio_size/audio_mtime เป็น null ต้องถือว่า "ยืนยันไม่ได้" ไม่ใช่ "ผ่านการ
+    เช็คเพราะไม่มีอะไรให้เทียบ" ไม่งั้นเท่ากับปิดการป้องกันทั้งหมดไว้พอดีตอนที่ต้องการมัน
+    ที่สุด -- ปกติแล้ว write_result เองจะไม่เขียน null แบบนี้ค้างไว้เลยด้วยซ้ำตั้งแต่
+    finding 4 (มันล้าง sidecar ทิ้งทั้งคู่แทนตอนผูกไม่ได้ ดู write_result ด้านบน) แต่
+    sidecar เก่าจากก่อนแก้ไข หรือไฟล์ที่ถูกแก้มือ ยังมีทางมี audio_size/audio_mtime เป็น
+    null ค้างอยู่บนดิสก์ได้อยู่ดี -- ต้องกันตรงนี้ด้วยอีกชั้น (defense in depth) เช่นกัน
+
+    finding 2: path.is_file() ด้านล่างต้องอยู่ใน try/except OSError -- PermissionError
+    ชั่วคราวหลุดออกมาได้ (Minor C) ไม่ถูกกลืนเป็น False เหมือน ENOENT
     """
     path = result_path(base_dir, audio_file)
-    if path is None or not path.is_file():
+    if path is None:
+        return None
+    try:
+        exists = path.is_file()
+    except OSError as e:
+        logger.warning(
+            "stat sidecar ผล %s ไม่สำเร็จชั่วคราว (%s) -- ถือว่ายืนยันไม่ได้รอบนี้ ไม่ลบทิ้ง",
+            path.name,
+            e,
+        )
+        return None
+    if not exists:
         return None
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
@@ -402,13 +457,20 @@ def clear(base_dir: Path, audio_file: str) -> None:
             logger.warning("ลบไฟล์ประกอบของ %s ไม่ได้: %s", audio_file, e)
 
 
-def _audio_confirmed_missing(path: Path) -> bool:
-    """True ต่อเมื่อไฟล์เสียงหายไปจริง (FileNotFoundError/NotADirectoryError) เท่านั้น
+def _confirmed_missing(path: Path) -> bool:
+    """True ต่อเมื่อ path หายไปจริง (FileNotFoundError/NotADirectoryError) เท่านั้น
 
-    Minor C: Path.is_file() กลืน OSError ทุกชนิดแล้วคืน False เงียบ ๆ -- PermissionError
-    ชั่วคราว (โปรแกรมสแกนไวรัส/ตัวซิงก์ไฟล์ล็อกไฟล์ไว้ชั่วครู่ ดู storage.replace_with_retry)
-    จึงถูกตีความว่า "ไฟล์เสียงไม่มีอยู่" ผิด ๆ แล้วลบ sidecar ของผลวิเคราะห์ที่เสร็จ
-    สมบูรณ์แล้วทิ้งไปฟรี ๆ ต้องแยกให้ชัดว่า "หายจริง" กับ "ไม่รู้แน่ชัด" ไม่ใช่อย่างเดียวกัน
+    Minor C / finding 2: ใช้ idiom เดียวกันทุกจุดในไฟล์นี้ที่ต้องตัดสินใจว่าไฟล์/โฟลเดอร์
+    "หายไปแล้วจริง" หรือแค่ "ไม่รู้แน่ชัด" -- Path.is_file()/is_dir()/exists() กลืนเฉพาะ
+    ENOENT/ENOTDIR/EBADF/WSAELOOP แล้วคืน False เงียบ ๆ ส่วน PermissionError ชั่วคราว
+    (โปรแกรมสแกนไวรัส/ตัวซิงก์ไฟล์ล็อกไฟล์ไว้ชั่วครู่ ดู storage.replace_with_retry) หลุด
+    ออกไปเป็น exception จริง ถ้าตีความ False ของ .is_file() ว่า "ไม่มีอยู่" ตรง ๆ จะลบ
+    sidecar ของผลวิเคราะห์ที่เสร็จสมบูรณ์แล้วทิ้งไปฟรี ๆ ต้องแยกให้ชัดว่า "หายจริง" (True)
+    กับ "มีอยู่จริง หรือไม่รู้แน่ชัด" (False ทั้งคู่) ไม่ใช่อย่างเดียวกัน -- ผู้เรียกต้อง
+    ปฏิบัติกับทั้งสองกรณีที่คืน False เหมือนกันคือ "อย่าลบ อย่าฟันธง ข้ามรอบนี้ไปก่อน"
+
+    เดิมชื่อ _audio_confirmed_missing เฉพาะไฟล์เสียง -- เปลี่ยนชื่อเป็นกลาง ๆ เพื่อใช้ซ้ำกับ
+    การเช็คไฟล์/โฟลเดอร์อื่นในโมดูลนี้ด้วย (finding 2) แทนที่จะเขียน idiom เดิมซ้ำอีกชุด
     """
     try:
         path.stat()
@@ -427,9 +489,21 @@ def _sweep_orphan_sidecars(base_dir: Path) -> None:
     จึงมองไม่เห็นในรายการเลย แต่ยังนอนอยู่บนดิสก์พร้อมผูกเข้ากับไฟล์ใหม่ชื่อเดียวกันที่ถูก
     วางเข้ามาทีหลัง ลบทิ้งที่นี่ตัดปัญหาตั้งแต่ต้น ไม่ต้องพึ่งการเช็ค size/mtime ใน
     read_result เพียงอย่างเดียว
+
+    finding 2: ทั้ง directory.is_dir() และ path.is_file() ต่อ sidecar ต้องอยู่ใน
+    try/except OSError ของตัวเอง (PermissionError ชั่วคราวหลุดออกไปเป็น exception จริง
+    ไม่ถูกกลืน) -- ไม่งั้นไฟล์ที่ถูกล็อกชั่วคราวหนึ่งตัวทำให้ /api/enroll ทั้งหน้า 500
     """
     directory = enroll_dir(base_dir)
-    if not directory.is_dir():
+    try:
+        is_dir = directory.is_dir()
+    except OSError as e:
+        logger.warning(
+            "stat โฟลเดอร์ enroll/ ไม่สำเร็จชั่วคราว (%s) -- ข้ามการกวาด sidecar กำพร้ารอบนี้",
+            e,
+        )
+        return
+    if not is_dir:
         return
     for path in directory.iterdir():
         # เช็คชื่อก่อน (ไม่มี I/O) แล้วค่อย is_file() เฉพาะไฟล์ที่ชื่อลงท้ายแบบ sidecar
@@ -437,10 +511,19 @@ def _sweep_orphan_sidecars(base_dir: Path) -> None:
         for suffix in (REQUEST_SUFFIX, RESULT_SUFFIX):
             if not path.name.endswith(suffix):
                 continue
-            if not path.is_file():
+            try:
+                exists = path.is_file()
+            except OSError as e:
+                logger.warning(
+                    "stat sidecar %s ไม่สำเร็จชั่วคราว (%s) -- ข้ามไปรอบนี้ ไม่ลบทิ้ง",
+                    path.name,
+                    e,
+                )
+                break
+            if not exists:
                 break
             audio_file = path.name[: -len(suffix)]
-            if _audio_confirmed_missing(directory / audio_file):
+            if _confirmed_missing(directory / audio_file):
                 try:
                     path.unlink()
                 except FileNotFoundError:
@@ -484,6 +567,10 @@ def list_entries(base_dir: Path) -> list[dict]:
 
     กวาด sidecar กำพร้าทิ้งทุกครั้งที่เรียก (finding 1) เพราะจุดนี้กำลังแจกแจงโฟลเดอร์
     enroll/ อยู่แล้ว และเป็นจุดที่หน้าเว็บ poll ถี่ที่สุด
+
+    finding 2: path.stat() เดิมดัก FileNotFoundError อย่างเดียว -- PermissionError ชั่วคราว
+    (Minor C) หลุดออกไปเป็น 500 ทั้งหน้าได้ ต้องข้ามแถวนั้นไปแค่รอบนี้เหมือนกัน ไม่ใช่ raise
+    และ request.is_file() ก็ต้องกันแบบเดียวกัน (ไม่ใช่ is_file() ตรง ๆ)
     """
     _sweep_orphan_sidecars(base_dir)
     entries = []
@@ -491,16 +578,30 @@ def list_entries(base_dir: Path) -> list[dict]:
         audio_file = path.name
         try:
             # ไฟล์นี้ถูก archive ไปพอดีโดย request อื่นระหว่างที่กำลังแจกแจงรายการอยู่ได้
-            # (finding 5) -- ข้ามแถวนี้ไปเฉย ๆ ดีกว่าปล่อยให้ FileNotFoundError หลุดออกไป
+            # (finding 5 เดิม) -- ข้ามแถวนี้ไปเฉย ๆ ดีกว่าปล่อยให้ FileNotFoundError หลุดออกไป
             # เป็น 500 ทั้งหน้า
             size_bytes = path.stat().st_size
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as e:
+            logger.warning(
+                "stat ไฟล์ %s ไม่สำเร็จชั่วคราว (%s) -- ข้ามแถวนี้ไปรอบนี้", audio_file, e
+            )
             continue
         request = request_path(base_dir, audio_file)
+        try:
+            request_queued = request is not None and request.is_file()
+        except OSError as e:
+            logger.warning(
+                "stat ใบสั่งงานของ %s ไม่สำเร็จชั่วคราว (%s) -- ถือว่ายังไม่มีใบสั่งงานรอบนี้",
+                audio_file,
+                e,
+            )
+            request_queued = False
         result = read_result(base_dir, audio_file)
         if result is not None:
             state = "done"
-        elif request is not None and request.is_file():
+        elif request_queued:
             state = "queued"
         else:
             state = "idle"

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from src import enroll
@@ -262,14 +263,19 @@ def test_a_failing_result_write_falls_back_to_a_minimal_failure_result(tmp_path)
     assert result["reason"] == "analysis_failed"
 
 
-def test_process_enroll_requests_rejects_a_result_whose_file_was_replaced_mid_analysis(
+def test_process_enroll_requests_clears_sidecars_for_a_result_whose_file_was_replaced_mid_analysis(
     tmp_path,
 ):
-    """CRITICAL A: watcher ต้อง stat ไฟล์ก่อนส่งเข้า analyze() แล้วส่ง (size, mtime) นั้น
-    ต่อให้ write_result -- ถ้าไม่ทำ ไฟล์ที่ถูกแทนที่ระหว่าง diarization (ใช้เวลานาน) จะถูก
-    write_result stat() ใหม่ตอนเขียนผล แล้วผูก embedding ของไบต์ชุดเก่าเข้ากับไฟล์ใหม่
-    เงียบ ๆ เพราะ record ที่เพิ่งเขียนกับไฟล์บนดิสก์ ณ ตอนนั้น "ตรง" กันเป๊ะ อ่านผ่าน
-    read_result ธรรมดาจึงจับบั๊กนี้ไม่ได้ -- ต้องอ่าน sidecar ดิบเพื่อตรวจให้แน่ใจ
+    """CRITICAL A + finding 4: watcher ต้อง stat ไฟล์ก่อนส่งเข้า analyze() แล้วส่ง
+    (size, mtime) นั้นต่อให้ write_result -- ถ้าไม่ทำ ไฟล์ที่ถูกแทนที่ระหว่าง diarization
+    (ใช้เวลานาน) จะถูก write_result stat() ใหม่ตอนเขียนผล แล้วผูก embedding ของไบต์ชุดเก่า
+    เข้ากับไฟล์ใหม่เงียบ ๆ เพราะ record ที่เพิ่งเขียนกับไฟล์บนดิสก์ ณ ตอนนั้น "ตรง" กันเป๊ะ
+
+    finding 4: จุดตันเดิมของการเขียน "rejected" ค้างไว้คือ audio_size/audio_mtime ที่บันทึก
+    จะผูกกับไฟล์ใหม่ (ถูกต้องสมบูรณ์ คนละคน) ที่ยังอยู่บนดิสก์จริง ทำให้ rejected นั้น
+    "ยืนยันได้" ตลอดกาลสำหรับไฟล์ใหม่ -- ต้องอ่าน sidecar ดิบเพื่อยืนยันว่าไม่มีทั้งคู่เหลือ
+    อยู่เลย (ไม่ใช่แค่ผ่าน read_result ซึ่งจะคืน None ทั้งสองกรณีอยู่ดี ไม่บอกว่าไฟล์ถูกล้าง
+    จริงหรือแค่ยัง "ตรง" กับไฟล์เดิมที่ไม่มีอยู่แล้ว)
     """
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
@@ -289,12 +295,45 @@ def test_process_enroll_requests_rejects_a_result_whose_file_was_replaced_mid_an
     with patch("src.watcher.enroll.analyze", side_effect=analyze_then_replace):
         watch_loop(config, single_pass=True)
 
-    raw = json.loads(
-        (tmp_path / "enroll" / "สมชาย.ogg.result.json").read_text(encoding="utf-8")
-    )
-    assert raw["status"] == "rejected"
-    assert raw["reason"] == "analysis_failed"
-    assert "embedding" not in raw
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.result.json").exists()
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.request.json").exists()
+    # การ์ดต้องกลับไป idle ให้วิเคราะห์ไฟล์ที่วางใหม่ได้เอง ไม่ใช่ทางตัน "ใช้ไม่ได้"
+    assert enroll.list_entries(tmp_path)[0]["state"] == "idle"
+
+
+def test_process_enroll_requests_skips_analysis_when_the_pre_stat_fails(tmp_path, monkeypatch):
+    """finding 1 (blocks merge): เดิมตรงนี้ pre_stat ที่ stat() ไม่สำเร็จถูกตั้งเป็น None
+    แล้ว "เดินหน้าวิเคราะห์ต่อ" อยู่ดี -- write_result.เดิมเช็คแค่ pre_analysis_stat is not
+    None ทำให้ None ข้ามการเปรียบเทียบไปเงียบ ๆ เท่ากับปิดการป้องกันทั้งหมดที่ CRITICAL A
+    เพิ่มเข้ามาพอดีตอนที่ต้องการมันที่สุด (PermissionError ชั่วคราวมักคลายล็อกเองไม่กี่ร้อย
+    ms ให้หลัง ทำให้ analyze() อ่านไฟล์สำเร็จตามปกติในสถานการณ์จริง)
+
+    ต้องไม่วิเคราะห์ไฟล์ที่ผูกกับไบต์อะไรไม่ได้ตั้งแต่ต้นแทน -- ทดสอบว่า analyze() ไม่ถูก
+    เรียกเลยเมื่อ pre-stat พัง, ไม่มีผลถูกเขียน, และใบสั่งงานยังอยู่ครบให้รอบ poll หน้าลองใหม่
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = make_enroll_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    real_stat = Path.stat
+
+    def flaky_stat(self, *args, **kwargs):
+        if self == audio_path:
+            raise PermissionError("locked by antivirus")
+        return real_stat(self, *args, **kwargs)
+
+    # pending_requests() เองก็เรียก scan_audio -> is_file() บนไฟล์เดียวกัน (finding 2/3) --
+    # mock มันตรงนี้ให้คืนรายการตรง ๆ เพื่อแยกให้ชัดว่าเทสต์นี้ทดสอบเฉพาะ pre-stat ของ
+    # watcher เอง (finding 1) ไม่ปนกับ guard อื่นที่ finding 2/3 เพิ่งเพิ่มเข้ามาในไฟล์เดียวกัน
+    with patch("src.watcher.enroll.pending_requests", return_value=["สมชาย.ogg"]):
+        monkeypatch.setattr(Path, "stat", flaky_stat)
+        with patch("src.watcher.enroll.analyze") as mock_analyze:
+            watch_loop(config, single_pass=True)
+
+    mock_analyze.assert_not_called()
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.result.json").exists()
+    # ใบสั่งงานต้องยังอยู่ครบ (ไม่ถูกแตะเลย) -- รอบ poll หน้าจะลองใหม่เองเมื่อล็อกคลาย
+    assert (tmp_path / "enroll" / "สมชาย.ogg.request.json").exists()
 
 
 def test_pending_requests_raising_does_not_stop_the_inbox_from_being_processed(tmp_path):

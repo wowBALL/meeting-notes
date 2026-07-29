@@ -561,11 +561,28 @@ def put_enroll_audio(base_dir, name="สมชาย.ogg"):
     (directory / name).write_bytes(b"fake audio")
 
 
+def write_ok_result(base_dir, audio_file, analyzed):
+    """เขียนผล status ok พร้อมผูกกับ stat ปัจจุบันของไฟล์เสียงเสมอ
+
+    หลัง finding 1 (defense in depth): write_result ที่ได้รับ status "ok" แต่ไม่มี
+    pre_analysis_stat มาเทียบ (None) จะถือว่ายืนยันไม่ได้แล้วล้างทั้งสอง sidecar ทิ้งทันที
+    (finding 4) -- เทสต์จำนวนมากในไฟล์นี้แค่ต้องการ fixture "วิเคราะห์เสร็จแล้วสถานะ ok"
+    ไม่ได้ตั้งใจทดสอบกลไกผูกไฟล์เอง จึงรวม stat ที่ต้องผูกไว้ที่นี่เรียกครั้งเดียว
+    """
+    stat = (base_dir / "enroll" / audio_file).stat()
+    return enroll.write_result(
+        base_dir,
+        audio_file,
+        analyzed,
+        pre_analysis_stat=(stat.st_size, stat.st_mtime),
+    )
+
+
 def test_get_enroll_lists_files_with_state_and_never_leaks_vectors(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
     enroll.write_request(tmp_path, "สมชาย.ogg")
-    enroll.write_result(
+    write_ok_result(
         tmp_path,
         "สมชาย.ogg",
         {"status": "ok", "embedding": [0.1, 0.2], "suggested_name": "สมชาย"},
@@ -627,7 +644,7 @@ def test_get_enroll_reports_the_best_registry_match_when_at_or_above_the_low_thr
     put_enroll_audio(tmp_path)
     # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.50) กับ HIGH (0.70) เกณฑ์
     # เริ่มต้นของ Config พอดี ไม่ถึงขั้นเสนอให้รวมชื่อ แต่ต้องเตือนให้เห็น
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.6, 0.8]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.6, 0.8]})
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
@@ -648,7 +665,7 @@ def test_get_enroll_flags_a_match_at_or_above_the_high_threshold(tmp_path):
         tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1")
     )
     put_enroll_audio(tmp_path)
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [1.0, 0.0]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [1.0, 0.0]})
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
@@ -667,7 +684,7 @@ def test_get_enroll_omits_match_below_the_low_threshold(tmp_path):
         tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1")
     )
     put_enroll_audio(tmp_path)
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.0, 1.0]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.0, 1.0]})
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
@@ -685,7 +702,7 @@ def test_get_enroll_never_leaks_the_embedding_even_when_a_match_is_found(tmp_pat
         tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1")
     )
     put_enroll_audio(tmp_path)
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [1.0, 0.0]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [1.0, 0.0]})
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
@@ -754,7 +771,7 @@ def test_post_analyze_rejects_a_filename_that_escapes_the_folder(tmp_path):
 def test_post_confirm_saves_the_embedding_and_archives_the_file(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    enroll.write_result(
+    write_ok_result(
         tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1, 0.2, 0.3]}
     )
     client = create_app(config).test_client()
@@ -778,7 +795,7 @@ def test_post_confirm_merges_into_an_existing_person_of_the_same_name(tmp_path):
         tmp_path, speakers.add_sample([], "สมชาย", [0.9], source="meeting-1")
     )
     put_enroll_audio(tmp_path)
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
     client = create_app(config).test_client()
 
     client.post("/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"})
@@ -812,7 +829,7 @@ def test_post_confirm_refuses_a_rejected_result(tmp_path):
 def test_post_confirm_refuses_a_zero_vector(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    enroll.write_result(
+    write_ok_result(
         tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.0, 0.0]}
     )
     client = create_app(config).test_client()
@@ -829,7 +846,7 @@ def test_post_confirm_refuses_a_zero_vector(tmp_path):
 def test_post_confirm_refuses_a_name_that_is_empty_after_cleaning(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
     client = create_app(config).test_client()
 
     response = client.post(
@@ -845,7 +862,7 @@ def test_post_confirm_refuses_a_name_that_is_empty_after_cleaning(tmp_path):
 def test_post_confirm_leaves_the_file_alone_when_saving_the_registry_fails(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
     client = create_app(config).test_client()
 
     with patch("src.speakers.save_registry", side_effect=OSError("disk full")):
@@ -864,7 +881,7 @@ def test_post_confirm_still_returns_200_when_archiving_the_file_fails(tmp_path):
     # การตอบ error ตรงนี้จะทำให้ผู้ใช้กดยืนยันซ้ำและได้ตัวอย่างซ้ำเข้าทะเบียนคนเดิม
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
     client = create_app(config).test_client()
 
     with patch("src.enroll.archive", side_effect=OSError("disk full")):
@@ -897,7 +914,7 @@ def test_post_confirm_survives_a_non_os_error_from_archive_after_the_registry_is
     """
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
     client = create_app(config).test_client()
 
     with patch("src.enroll.archive", side_effect=RuntimeError("unexpected")):
