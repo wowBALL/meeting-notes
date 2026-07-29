@@ -1,5 +1,7 @@
+import json
 from unittest.mock import patch
 
+from src import enroll
 from src.config import Config
 from src.watcher import is_file_stable, scan_inbox, watch_loop
 
@@ -123,12 +125,6 @@ def test_watch_loop_skips_unstable_files(tmp_path):
         watch_loop(config, single_pass=True)
 
     mock_process_file.assert_not_called()
-
-
-import json
-
-from src import enroll
-from src.watcher import process_enroll_requests
 
 
 def make_enroll_audio(tmp_path, name="สมชาย.ogg"):

@@ -1,7 +1,10 @@
+import json
+from datetime import datetime
 from pathlib import Path
 
 from src import enroll
 from src.diarize import DiarizationResult
+from src.speakers import MIN_SPEAKING_SECONDS
 
 
 def test_enroll_dir_and_done_dir_are_derived_from_base_dir(tmp_path):
@@ -31,6 +34,16 @@ def test_scan_audio_ignores_the_done_subfolder(tmp_path):
 
 def test_scan_audio_returns_empty_list_when_dir_missing(tmp_path):
     assert enroll.scan_audio(tmp_path) == []
+
+
+def test_scan_audio_accepts_an_uppercase_extension(tmp_path):
+    # ผู้ใช้ลากไฟล์จากมือถือ/กล้องมาบ่อย ๆ นามสกุลตัวใหญ่ทั้งดุ้นเจอได้ทั่วไป -- .lower()
+    # ต้องทำงานจริง ไม่ใช่แค่มีอยู่ในโค้ดเฉย ๆ
+    directory = tmp_path / "enroll"
+    directory.mkdir()
+    (directory / "A.WAV").write_bytes(b"x")
+
+    assert enroll.scan_audio(tmp_path) == [directory / "A.WAV"]
 
 
 def test_is_safe_filename_rejects_paths_that_escape_the_folder():
@@ -130,6 +143,23 @@ def test_analyze_rejects_a_long_file_holding_only_a_few_seconds_of_speech(
     assert "embedding" not in analyzed
 
 
+def test_analyze_accepts_speech_at_exactly_the_minimum_boundary(tmp_path, monkeypatch):
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    # เงื่อนไขจริงคือ speaking_seconds < MIN_SPEAKING_SECONDS -- เท่ากับพอดีต้องผ่าน
+    # ไม่ใช่ถูกปฏิเสธ จึงล็อกค่านี้ไว้แทนการฝัง 10.0 ตรง ๆ เผื่อค่าคงที่เปลี่ยนในอนาคต
+    result = DiarizationResult(
+        turns=[{"start": 0.0, "end": MIN_SPEAKING_SECONDS, "speaker": "SPEAKER_00"}],
+        embeddings={"SPEAKER_00": [0.1, 0.2]},
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+
+    analyzed = enroll.analyze(audio_path, pipeline=object())
+
+    assert analyzed["status"] == "ok"
+    assert analyzed["speaking_seconds"] == MIN_SPEAKING_SECONDS
+
+
 def test_analyze_rejects_a_file_with_no_speech_at_all(tmp_path, monkeypatch):
     audio_path = tmp_path / "silence.wav"
     audio_path.write_bytes(b"x")
@@ -215,10 +245,6 @@ def test_analyze_passes_the_pipeline_through_without_loading_one(tmp_path, monke
     enroll.analyze(audio_path, pipeline=sentinel)
 
     assert seen["pipeline"] is sentinel
-
-
-import json
-from datetime import datetime
 
 
 def make_audio(tmp_path, name="สมชาย.ogg"):

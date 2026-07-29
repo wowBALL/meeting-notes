@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from src import enroll, speakers
+from src.activity import append, tail
 from src.config import Config
 from src.pending import build_pending_speakers, pending_dir, write_pending
 from src.session_service import create_app
@@ -157,8 +158,6 @@ def test_a_recorder_that_crashes_returns_the_state_to_idle(config):
 
 
 def test_state_includes_the_activity_log(client, config):
-    from src.activity import append
-
     append(config.base_dir, "meet-1", "queued")
 
     body = client.get("/api/state").get_json()
@@ -167,8 +166,6 @@ def test_state_includes_the_activity_log(client, config):
 
 
 def test_recorder_events_land_in_the_activity_log(client, config):
-    from src.activity import tail
-
     client.post("/api/session", json={"model": "claude-opus-5", "name": "standup"})
     client.post("/api/session/stop")
     _wait_until(client, lambda b: b["recorder"] == "idle")
@@ -187,8 +184,6 @@ def test_the_index_page_is_served(client):
 
 
 def test_activity_text_is_rendered_in_the_requested_language(client, config):
-    from src.activity import append
-
     append(config.base_dir, "meet-1", "transcribe_started")
 
     thai = client.get("/api/state").get_json()["activity"][-1]["text"]
@@ -734,6 +729,25 @@ def test_post_confirm_leaves_the_file_alone_when_saving_the_registry_fails(tmp_p
     # บันทึกไม่สำเร็จแล้วย้ายไฟล์ = ผู้ใช้เสียทั้งชื่อที่พิมพ์และไฟล์ที่จะลองใหม่
     assert (tmp_path / "enroll" / "สมชาย.ogg").is_file()
     assert not (tmp_path / "enroll" / "done" / "สมชาย.ogg").exists()
+
+
+def test_post_confirm_still_returns_200_when_archiving_the_file_fails(tmp_path):
+    # ตรงข้ามกับเทสข้างบน: ทะเบียนบันทึกสำเร็จไปแล้วตอนที่ archive พัง เสียงถูกจำแล้วจริง
+    # การตอบ error ตรงนี้จะทำให้ผู้ใช้กดยืนยันซ้ำและได้ตัวอย่างซ้ำเข้าทะเบียนคนเดิม
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    client = create_app(config).test_client()
+
+    with patch("src.enroll.archive", side_effect=OSError("disk full")):
+        response = client.post(
+            "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"}
+        )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "name": "สมชาย"}
+    registry = speakers.load_registry(tmp_path)
+    assert registry[0]["name"] == "สมชาย"
 
 
 def test_post_confirm_returns_404_when_there_is_no_result_yet(tmp_path):
