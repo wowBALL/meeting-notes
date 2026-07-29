@@ -123,3 +123,108 @@ def test_watch_loop_skips_unstable_files(tmp_path):
         watch_loop(config, single_pass=True)
 
     mock_process_file.assert_not_called()
+
+
+import json
+
+from src import enroll
+from src.watcher import process_enroll_requests
+
+
+def make_enroll_audio(tmp_path, name="สมชาย.ogg"):
+    directory = tmp_path / "enroll"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(b"fake audio")
+    return path
+
+
+def test_watch_loop_analyzes_a_requested_enrollment_clip(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    make_enroll_audio(tmp_path)
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    sentinel_pipeline = object()
+
+    analyzed = {"status": "ok", "embedding": [0.5], "speaker_count": 1}
+    with patch("src.watcher.enroll.analyze", return_value=analyzed) as mock_analyze:
+        watch_loop(
+            config, single_pass=True, diarization_pipeline=sentinel_pipeline
+        )
+
+    assert mock_analyze.call_count == 1
+    assert mock_analyze.call_args.kwargs["pipeline"] is sentinel_pipeline
+    written = json.loads(
+        (tmp_path / "enroll" / "สมชาย.ogg.result.json").read_text(encoding="utf-8")
+    )
+    assert written["status"] == "ok"
+    assert written["audio_file"] == "สมชาย.ogg"
+
+
+def test_watch_loop_does_not_analyze_a_clip_nobody_requested(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    make_enroll_audio(tmp_path)
+
+    with patch("src.watcher.enroll.analyze") as mock_analyze:
+        watch_loop(config, single_pass=True)
+
+    mock_analyze.assert_not_called()
+
+
+def test_watch_loop_never_writes_the_speaker_registry(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    make_enroll_audio(tmp_path)
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+
+    with patch(
+        "src.watcher.enroll.analyze",
+        return_value={"status": "ok", "embedding": [0.5]},
+    ):
+        watch_loop(config, single_pass=True)
+
+    # ทะเบียนถูกเขียนโดย session_service เมื่อมีคนกดยืนยันเท่านั้น การจับคู่ที่ผิด
+    # ต้องไม่ฝังตัวอย่างเสียงผิดคนลงโปรไฟล์ถาวรโดยไม่มีมนุษย์เห็นเลยสักครั้ง
+    assert not (tmp_path / "speakers" / "registry.json").exists()
+
+
+def test_a_failing_enroll_job_does_not_stop_the_inbox_from_being_processed(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "meeting.ogg"
+    audio_path.write_bytes(b"fake audio data")
+    make_enroll_audio(tmp_path)
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+
+    with (
+        patch("src.watcher.is_file_stable", return_value=True),
+        patch("src.watcher.process_file") as mock_process_file,
+        patch("src.watcher.enroll.analyze", side_effect=OSError("disk on fire")),
+    ):
+        watch_loop(config, single_pass=True)
+
+    # ประชุมที่อัดซ้ำไม่ได้ต้องไม่โดนงาน enroll ที่ทำใหม่ได้เสมอทำให้พัง
+    mock_process_file.assert_called_once()
+
+
+def test_the_inbox_is_processed_before_any_enroll_work(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    (config.inbox_dir / "meeting.ogg").write_bytes(b"fake audio data")
+    make_enroll_audio(tmp_path)
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    order = []
+
+    with (
+        patch("src.watcher.is_file_stable", return_value=True),
+        patch("src.watcher.process_file", side_effect=lambda *a, **k: order.append("inbox")),
+        patch(
+            "src.watcher.enroll.analyze",
+            side_effect=lambda *a, **k: order.append("enroll") or {"status": "ok"},
+        ),
+    ):
+        watch_loop(config, single_pass=True)
+
+    # ลำดับนี้ load-bearing: การประชุมที่อัดซ้ำไม่ได้ต้องได้ GPU ก่อนงานที่ทำใหม่ได้
+    assert order == ["inbox", "enroll"]
