@@ -352,6 +352,11 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                 # หน้านี้สั่งงานให้ watcher ทำ ถ้า watcher ไม่ได้รัน ไฟล์จะค้างที่
                 # "กำลังวิเคราะห์" ตลอดไปโดยไม่มีอะไรบอกผู้ใช้ว่าทำไม
                 "worker": worker_ready(),
+                # ค่าเดียวกับที่ enroll.analyze ใช้ตัดสินสถานะ too_short ส่งมาให้หน้าเว็บ
+                # แสดงในข้อความ แทนที่จะฝังตัวเลขซ้ำไว้เป็นสตริงคงที่อีกชุดหนึ่งในสอง
+                # ภาษา (finding 5 ของรีวิวรอบสุดท้าย) -- ค่าคงที่มีแหล่งเดียวคือ
+                # src/speakers.py
+                "min_speaking_seconds": speakers.MIN_SPEAKING_SECONDS,
                 "speakers": [
                     {
                         "id": speaker["id"],
@@ -433,6 +438,15 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             enroll.archive(config.base_dir, audio_file)
         except OSError as e:
             logger.warning("ย้าย %s เข้า done/ ไม่ได้ แต่เสียงถูกจำแล้ว: %s", audio_file, e)
+            # archive() ปกติเรียก clear() เองหลังย้ายไฟล์สำเร็จ แต่พังก่อนถึงตรงนั้น --
+            # ถ้าปล่อย result.json เดิมไว้ การ์ดนี้จะยังโชว์สถานะ "พร้อมบันทึก" ในรอบหน้า
+            # กดซ้ำได้ตัวอย่างซ้ำเข้าทะเบียนคนเดิม (finding 2 ของรีวิวรอบสุดท้าย) ล้าง
+            # แบบ best-effort พอ -- ล้างไม่สำเร็จก็ไม่ใช่เรื่องที่ทำให้ request นี้ล้มเหลว
+            # เพราะทะเบียนถูกบันทึกไปแล้วจริง
+            enroll.clear(config.base_dir, audio_file)
+            return jsonify(
+                {"ok": True, "name": cleaned, "warning": "archive_failed"}
+            )
         return jsonify({"ok": True, "name": cleaned})
 
     @app.delete("/api/enroll/<path:audio_file>")

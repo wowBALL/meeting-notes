@@ -1,10 +1,22 @@
 import json
+import os
 from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from src import enroll
 from src.diarize import DiarizationResult
 from src.speakers import MIN_SPEAKING_SECONDS
+
+
+@pytest.fixture(autouse=True)
+def _stub_convert_to_wav(monkeypatch):
+    """analyze() ผ่าน convert_to_wav (ffmpeg จริง) เสมอตอนนี้ (finding 4) -- เทสต์ในไฟล์นี้
+    ต้องไม่พึ่ง ffmpeg ตัวจริงหรือไฟล์เสียงจริง จึง stub เป็นค่าเริ่มต้นของทุกเทสต์
+    เทสต์ที่ตั้งใจทดสอบ path การแปลงเองจะ monkeypatch ทับอีกทีในตัวเทสต์นั้น ๆ
+    """
+    monkeypatch.setattr("src.enroll.convert_to_wav", lambda src, dst: dst)
 
 
 def test_enroll_dir_and_done_dir_are_derived_from_base_dir(tmp_path):
@@ -247,6 +259,65 @@ def test_analyze_passes_the_pipeline_through_without_loading_one(tmp_path, monke
     assert seen["pipeline"] is sentinel
 
 
+def test_analyze_converts_to_wav_before_diarizing(tmp_path, monkeypatch):
+    """finding 4: enroll ต้อง normalize เสียงด้วย convert_to_wav แบบเดียวกับ
+    pipeline.process_file ก่อนส่งเข้า diarize_audio -- ไม่งั้น pyannote ได้ container ดิบ
+    ที่ decode ด้วย backend ที่เดาไม่ได้ (soundfile ถอด AAC ไม่ได้) แทนที่จะผ่าน ffmpeg
+    ซึ่งเป็นตัวถอดรหัสเดียวที่โปรเจกต์นี้รับประกัน
+    """
+    audio_path = tmp_path / "สมชาย.m4a"
+    audio_path.write_bytes(b"x")
+    seen = {}
+
+    def fake_convert(src, dst):
+        seen["src"] = src
+        seen["dst"] = dst
+        return dst
+
+    def fake_diarize(path, hf_token, pipeline):
+        seen["diarized_path"] = path
+        return DiarizationResult(
+            turns=[{"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"}],
+            embeddings={"SPEAKER_00": [0.1]},
+        )
+
+    monkeypatch.setattr("src.enroll.convert_to_wav", fake_convert)
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize)
+
+    enroll.analyze(audio_path, pipeline=object())
+
+    assert seen["src"] == audio_path
+    assert seen["dst"].suffix == ".wav"
+    # diarize ต้องได้ไฟล์ wav ที่แปลงแล้ว ไม่ใช่ไฟล์ .m4a ดิบตัวเดิม
+    assert seen["diarized_path"] == seen["dst"]
+
+
+def test_analyze_turns_a_conversion_failure_into_a_rejected_result(tmp_path, monkeypatch):
+    """finding 4: แปลงเป็น wav ไม่สำเร็จ (เช่น ffmpeg ถอดรหัส .m4a ไม่ได้) ต้องไม่ raise
+    ออกจาก analyze() -- ต้องได้ rejected/analysis_failed เหมือนตอน diarize ล้มเหลว
+    และ diarize ต้องไม่ถูกเรียกเลยเพราะไม่มีไฟล์ wav ให้ป้อน
+    """
+    audio_path = tmp_path / "broken.m4a"
+    audio_path.write_bytes(b"x")
+    diarize_calls = []
+
+    def fail_convert(src, dst):
+        raise RuntimeError("ffmpeg exited with code 1")
+
+    monkeypatch.setattr("src.enroll.convert_to_wav", fail_convert)
+    monkeypatch.setattr(
+        "src.enroll.diarize_audio", lambda *a, **k: diarize_calls.append(1)
+    )
+
+    analyzed = enroll.analyze(audio_path, pipeline=object())
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "analysis_failed"
+    assert "ffmpeg exited with code 1" in analyzed["detail"]
+    assert "embedding" not in analyzed
+    assert diarize_calls == []
+
+
 def make_audio(tmp_path, name="สมชาย.ogg"):
     directory = tmp_path / "enroll"
     directory.mkdir(exist_ok=True)
@@ -311,6 +382,111 @@ def test_write_result_stamps_the_file_and_keeps_the_embedding(tmp_path):
     assert payload["audio_file"] == "สมชาย.ogg"
     assert payload["analyzed"] == "2026-07-29T10:33:12"
     assert payload["embedding"] == [0.1, 0.2]
+
+
+def test_write_result_records_the_audio_files_size_and_mtime(tmp_path):
+    audio_path = make_audio(tmp_path)
+    stat = audio_path.stat()
+
+    path = enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["audio_size"] == stat.st_size
+    assert payload["audio_mtime"] == pytest.approx(stat.st_mtime)
+
+
+def test_read_result_returns_none_when_the_audio_file_was_replaced_after_analysis(tmp_path):
+    """finding 1 (critical): ผู้ใช้ลบไฟล์เดิมทิ้งแล้ววางไฟล์ใหม่ชื่อเดียวกัน (เนื้อหา/ขนาด
+    ต่างกัน) -- ผลวิเคราะห์เก่าต้องไม่ผูกเข้ากับไฟล์ใหม่ ไม่งั้นเวกเตอร์เสียงของคนเดิม
+    จะถูกเสนอให้ยืนยันภายใต้ชื่อคนใหม่ และหลุดเข้าทะเบียนถาวรถ้ากดบันทึก
+    """
+    audio_path = make_audio(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1, 0.2]})
+
+    audio_path.unlink()
+    audio_path.write_bytes(b"a completely different recording body, much longer than before")
+
+    assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
+    # ผลเก่าที่ผูกกับไฟล์เดิมต้องถูกล้างทิ้งไปด้วย ไม่งั้นการ์ดจะยังค้างสถานะ "done" ผิด ๆ
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.result.json").exists()
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.request.json").exists()
+
+
+def test_read_result_tolerates_the_small_mtime_drift_a_file_copy_produces(tmp_path):
+    """คัดลอกไฟล์ (เช่นย้ายด้วยเครื่องมือบางตัว) ขยับ mtime ได้เล็กน้อยโดยเนื้อหาเดิมทุก
+    ไบต์ -- เทียบแบบ exact equality จะปฏิเสธไฟล์ที่ไม่ได้เปลี่ยนอะไรเลยผิด ๆ
+    """
+    audio_path = make_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    stat = audio_path.stat()
+    os.utime(audio_path, (stat.st_atime, stat.st_mtime + 1.0))
+
+    assert enroll.read_result(tmp_path, "สมชาย.ogg") is not None
+
+
+def test_read_result_rejects_an_mtime_drift_beyond_the_tolerance(tmp_path):
+    audio_path = make_audio(tmp_path)
+    enroll.write_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    stat = audio_path.stat()
+    os.utime(audio_path, (stat.st_atime, stat.st_mtime + 30.0))
+
+    assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
+
+
+def test_list_entries_sweeps_orphaned_sidecars_whose_audio_is_gone(tmp_path):
+    """finding 1: sidecar ที่ไฟล์เสียงต้นทางหายไปแล้ว (ผู้ใช้ลบผ่าน Explorer) ต้องถูกกวาด
+    ทิ้งไม่ให้ค้างบนดิสก์ พร้อมสำหรับผูกผิดกับไฟล์ใหม่ชื่อเดียวกันที่วางเข้ามาทีหลัง
+    """
+    directory = tmp_path / "enroll"
+    directory.mkdir()
+    (directory / "หาย.ogg.request.json").write_text("{}", encoding="utf-8")
+    (directory / "หาย.ogg.result.json").write_text("{}", encoding="utf-8")
+
+    enroll.list_entries(tmp_path)
+
+    assert not (directory / "หาย.ogg.request.json").exists()
+    assert not (directory / "หาย.ogg.result.json").exists()
+
+
+def test_list_entries_orphan_sweep_does_not_raise_when_deletion_fails(tmp_path, monkeypatch):
+    directory = tmp_path / "enroll"
+    directory.mkdir()
+    (directory / "หาย.ogg.result.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        Path, "unlink", lambda self, *a, **k: (_ for _ in ()).throw(OSError("locked"))
+    )
+
+    enroll.list_entries(tmp_path)  # ต้องไม่ raise
+
+
+def test_list_entries_skips_a_row_whose_file_was_archived_mid_request(tmp_path):
+    """finding 5: path.stat() raise FileNotFoundError ได้ถ้าอีก request หนึ่ง archive
+    ไฟล์นี้ไปพอดีระหว่างที่กำลังแจกแจงรายการ -- ต้องข้ามแถวนั้น ไม่ใช่ 500 ทั้งหน้า
+    """
+    make_audio(tmp_path, "ok.ogg")
+    make_audio(tmp_path, "vanishes.ogg")
+    real_stat = Path.stat
+    calls = {"vanishes.ogg": 0}
+
+    def flaky_stat(self, *args, **kwargs):
+        # เรียกครั้งแรกคือตอน scan_audio กรองว่าเป็นไฟล์จริง (ยังอยู่) -- ต้อง
+        # สำเร็จ ไฟล์นี้ค่อย "หาย" (ถูก archive โดย request อื่น) ก่อนถึง .stat()
+        # รอบสองที่ list_entries เรียกเพื่อเอา size_bytes
+        if self.name == "vanishes.ogg":
+            calls["vanishes.ogg"] += 1
+            if calls["vanishes.ogg"] > 1:
+                raise FileNotFoundError(self)
+        return real_stat(self, *args, **kwargs)
+
+    import unittest.mock as mock
+
+    with mock.patch.object(Path, "stat", flaky_stat):
+        entries = enroll.list_entries(tmp_path)
+
+    names = [entry["audio_file"] for entry in entries]
+    assert names == ["ok.ogg"]
 
 
 def test_read_result_returns_none_for_a_corrupt_file(tmp_path):

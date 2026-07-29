@@ -204,6 +204,84 @@ def test_a_failing_enroll_job_does_not_stop_the_inbox_from_being_processed(tmp_p
     mock_process_file.assert_called_once()
 
 
+def test_a_failing_result_write_does_not_retry_the_same_clip_forever(tmp_path):
+    """finding 3: write_result ที่ raise ตลอด (ดิสก์เต็ม/ไฟล์ถูกล็อกค้าง) ต้องไม่ทำให้
+    ใบสั่งงานค้างอยู่ -- ไม่งั้น pending_requests จะยังเห็น "สั่งแล้วแต่ยังไม่มีผล" แล้ว
+    วิเคราะห์ซ้ำ (GPU เต็มรอบ) ทุก poll ไปเรื่อย ๆ ไม่มีที่สิ้นสุด
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    make_enroll_audio(tmp_path)
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+
+    with (
+        patch(
+            "src.watcher.enroll.analyze",
+            return_value={"status": "ok", "embedding": [0.5]},
+        ),
+        patch("src.watcher.enroll.write_result", side_effect=OSError("disk full")),
+    ):
+        watch_loop(config, single_pass=True)
+
+    assert enroll.pending_requests(tmp_path) == []
+
+
+def test_a_failing_result_write_falls_back_to_a_minimal_failure_result(tmp_path):
+    """finding 3: ถ้าเขียนผลจริงล้มเหลวแต่การเขียนผลล้มเหลวขั้นต่ำ (rejected) รอบสอง
+    สำเร็จ ผู้ใช้ควรเห็นข้อความว่าวิเคราะห์ไม่สำเร็จ แทนที่จะเห็น "กำลังวิเคราะห์" ค้าง
+    ตลอดไปหรือไฟล์เงียบหายกลับไปเป็น idle โดยไม่บอกอะไรเลย
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    make_enroll_audio(tmp_path)
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+
+    real_write_result = enroll.write_result
+    calls = []
+
+    def flaky_write_result(base_dir, audio_file, analyzed, now=None):
+        calls.append(analyzed)
+        if len(calls) == 1:
+            raise OSError("disk full")
+        return real_write_result(base_dir, audio_file, analyzed, now=now)
+
+    with (
+        patch(
+            "src.watcher.enroll.analyze",
+            return_value={"status": "ok", "embedding": [0.5]},
+        ),
+        patch("src.watcher.enroll.write_result", side_effect=flaky_write_result),
+    ):
+        watch_loop(config, single_pass=True)
+
+    result = enroll.read_result(tmp_path, "สมชาย.ogg")
+    assert result is not None
+    assert result["status"] == "rejected"
+    assert result["reason"] == "analysis_failed"
+
+
+def test_pending_requests_raising_does_not_stop_the_inbox_from_being_processed(tmp_path):
+    """finding 3: pending_requests() นั่งอยู่ใน for header ของ process_enroll_requests
+    นอก try ใด ๆ -- ถ้ามันพัง exception จะหลุดออกจาก watch_loop ทั้งก้อน ฆ่า watcher
+    ทิ้งพร้อมงานประมวลผลไฟล์ประชุมใน inbox/ ไปด้วย
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "meeting.ogg"
+    audio_path.write_bytes(b"fake audio data")
+
+    with (
+        patch("src.watcher.is_file_stable", return_value=True),
+        patch("src.watcher.process_file") as mock_process_file,
+        patch(
+            "src.watcher.enroll.pending_requests", side_effect=OSError("disk on fire")
+        ),
+    ):
+        watch_loop(config, single_pass=True)  # ต้องไม่ raise
+
+    mock_process_file.assert_called_once()
+
+
 def test_the_inbox_is_processed_before_any_enroll_work(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)

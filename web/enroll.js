@@ -29,6 +29,9 @@ const UI = {
     spoke: "พูดจริง {s} วินาที",
     found: "พบผู้พูด {n} คน",
     savedAs: "บันทึก {name} เข้าทะเบียนแล้ว",
+    savedButMoveManually:
+      "บันทึก {name} เข้าทะเบียนแล้ว แต่ย้ายไฟล์เข้า enroll\\done\\ ไม่สำเร็จ " +
+      "กรุณาย้ายไฟล์ด้วยตัวเอง",
     errName: "ชื่อนี้ใช้ไม่ได้ ลองใหม่",
     errSave: "บันทึกไม่สำเร็จ ไฟล์ยังอยู่ที่เดิม ลองใหม่ได้",
     errLoad: "โหลดรายการไฟล์ไม่สำเร็จ อาจเป็นเพราะเซิร์ฟเวอร์หยุดทำงานหรือการเชื่อมต่อขาด",
@@ -39,7 +42,7 @@ const UI = {
       "ไฟล์นี้มีมากกว่าหนึ่งคน ลงทะเบียนไม่ได้เพราะระบบไม่รู้ว่าคุณหมายถึงใคร — " +
       "ตัดเอาเฉพาะช่วงที่คนเดียวพูดแล้ววางใหม่",
     reason_too_short:
-      "เสียงพูดจริงสั้นเกินไป (ต่ำกว่า 10 วินาที) เวกเตอร์จากเสียงไม่กี่วินาที" +
+      "เสียงพูดจริงสั้นเกินไป (ต่ำกว่า {min} วินาที) เวกเตอร์จากเสียงไม่กี่วินาที" +
       "เทียบข้ามการประชุมไม่ได้ — อัดใหม่ให้ยาวขึ้น แนะนำเกิน 30 วินาที",
     reason_unusable_embedding:
       "ถอดเวกเตอร์เสียงจากไฟล์นี้ไม่ได้ ลองใช้ไฟล์ที่เสียงชัดกว่านี้",
@@ -73,6 +76,9 @@ const UI = {
     spoke: "{s} seconds of speech",
     found: "{n} speaker(s) found",
     savedAs: "Saved {name} to the registry",
+    savedButMoveManually:
+      "Saved {name} to the registry, but could not move the file into " +
+      "enroll\\done\\. Please move it by hand",
     errName: "That name cannot be used, try another",
     errSave: "Could not save. The file is untouched, you can try again",
     errLoad: "Could not load the file list. The server may be down or the connection dropped",
@@ -83,7 +89,7 @@ const UI = {
       "More than one person speaks in this file, so there is no way to tell who you mean — " +
       "trim it down to a stretch where only one person talks",
     reason_too_short:
-      "Too little actual speech (under 10 seconds). A vector from a few seconds cannot be " +
+      "Too little actual speech (under {min} seconds). A vector from a few seconds cannot be " +
       "compared across meetings — record a longer clip, over 30 seconds is best",
     reason_unusable_embedding:
       "No usable voice vector could be extracted. Try a cleaner recording",
@@ -101,6 +107,9 @@ let files = [];
 let speakers = [];
 let worker = false;
 let busy = false;
+// ค่าเดียวกับ src/speakers.py:MIN_SPEAKING_SECONDS มาจาก /api/enroll เสมอ (finding 5:
+// ห้ามฝังตัวเลขซ้ำเป็นสตริงคงที่) ค่าเริ่มต้นนี้ใช้แค่ก่อนโหลดครั้งแรกสำเร็จเท่านั้น
+let minSpeakingSeconds = 10;
 // notice เก็บทั้งข้อความและสถานะ (สำเร็จ/ล้มเหลว) ไว้ในก้อนเดียวกันเสมอ -- ห้ามมีตัวแปร
 // severity แยกต่างหาก เพราะจุดที่ set ข้อความมีหลายที่ (save/analyze/dismiss/remove)
 // ถ้าแยกกันจะมีจุดที่ set ข้อความแต่ลืม set severity ได้ง่าย ๆ
@@ -137,6 +146,8 @@ async function load() {
     files = body.files || [];
     speakers = body.speakers || [];
     worker = body.worker === true;
+    if (typeof body.min_speaking_seconds === "number")
+      minSpeakingSeconds = body.min_speaking_seconds;
     busy = files.some((file) => file.state === "queued");
     loadError = null;
   } catch (err) {
@@ -166,6 +177,26 @@ function chipFor(file) {
   return ["bad", t().stateBad];
 }
 
+function dismissButton(file) {
+  // ทุกสถานะต้องมีทางออกที่ไม่ใช่การไปลบไฟล์เองใน Explorer (finding 1 ของรีวิวรอบ
+  // สุดท้าย): ไฟล์ที่ลบผ่าน Explorer ทิ้ง sidecar กำพร้าไว้ ซึ่งพร้อมผูกผิดกับไฟล์ใหม่
+  // ชื่อเดียวกันที่วางเข้ามาทีหลัง -- ปุ่มนี้จึงต้องโผล่ในทุกการ์ด ไม่ใช่แค่ตอนถูกปฏิเสธ
+  // พฤติกรรมเดิมคงไว้ทั้งหมด: archive เข้า done/ ไม่แตะทะเบียน
+  const button = node("button", "plain", t().dismiss);
+  button.onclick = async () => {
+    try {
+      const response = await fetch(`/api/enroll/${encodeURIComponent(file.audio_file)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) setNotice(t().errAction, false);
+    } catch (err) {
+      setNotice(t().errAction, false);
+    }
+    load();
+  };
+  return button;
+}
+
 function renderFile(file) {
   const box = node("div", "file");
   const top = node("div", "top");
@@ -182,29 +213,25 @@ function renderFile(file) {
   if (!bits.length) bits.push(`${Math.round(file.size_bytes / 1024)} KB`);
   box.append(node("div", "meta", bits.join(" · ")));
 
-  if (file.state !== "done") return box;
+  if (file.state !== "done") {
+    box.append(dismissButton(file));
+    return box;
+  }
 
   if (file.status !== "ok") {
     const reasonKey = `reason_${file.reason}`;
     const knownReason = t()[reasonKey];
     // เหตุผลที่ไม่รู้จักต้องไม่โผล่เป็นโค้ดดิบให้ผู้ใช้เห็นตรง ๆ -- ถ้าไม่มีคำแปล
     // ให้ใช้ประโยคกลาง ๆ แทน แล้วค่อยโชว์โค้ดแยกไว้ต่างหากแบบไม่ปนกับข้อความ error
-    const why = node("div", "note warn", knownReason || t().reasonUnknown);
+    // fill() แทน {min} เฉพาะข้อความที่มีมัน (reason_too_short) -- ข้อความอื่นไม่มี
+    // placeholder นี้เลยไม่ถูกแตะ
+    const reasonText = knownReason
+      ? fill(knownReason, { min: minSpeakingSeconds })
+      : t().reasonUnknown;
+    const why = node("div", "note warn", reasonText);
     box.append(why);
     if (!knownReason) box.append(node("div", "meta", file.reason));
-    const dismiss = node("button", "plain", t().dismiss);
-    dismiss.onclick = async () => {
-      try {
-        const response = await fetch(`/api/enroll/${encodeURIComponent(file.audio_file)}`, {
-          method: "DELETE",
-        });
-        if (!response.ok) setNotice(t().errAction, false);
-      } catch (err) {
-        setNotice(t().errAction, false);
-      }
-      load();
-    };
-    box.append(dismiss);
+    box.append(dismissButton(file));
     return box;
   }
 
@@ -224,7 +251,14 @@ function renderFile(file) {
       });
       const body = await response.json().catch(() => ({}));
       if (response.ok) {
-        setNotice(fill(t().savedAs, { name: body.name }), true);
+        // archive_failed = ทะเบียนบันทึกสำเร็จแล้วจริง แต่ย้ายไฟล์เข้า done/ ไม่ได้
+        // (finding 2 ของรีวิวรอบสุดท้าย) -- ต้องบอกผู้ใช้ให้ย้ายเอง ไม่ใช่แกล้งโกหกว่า
+        // ทุกอย่างจบสมบูรณ์เหมือนตอน savedAs ปกติ
+        const text =
+          body.warning === "archive_failed"
+            ? fill(t().savedButMoveManually, { name: body.name })
+            : fill(t().savedAs, { name: body.name });
+        setNotice(text, body.warning !== "archive_failed");
       } else {
         setNotice(body.error === "bad_name" ? t().errName : t().errSave, false);
       }
@@ -238,6 +272,7 @@ function renderFile(file) {
   };
   row.append(input, save);
   box.append(row);
+  box.append(dismissButton(file));
   return box;
 }
 

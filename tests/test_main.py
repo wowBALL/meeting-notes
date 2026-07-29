@@ -19,6 +19,9 @@ def test_main_creates_required_directories_and_starts_watch_loop(tmp_path, monke
     assert (tmp_path / "inbox").is_dir()
     assert (tmp_path / "failed").is_dir()
     assert (tmp_path / "meetings").is_dir()
+    # finding 5: enroll\ ไม่เคยถูกสร้างมาก่อน -- โฟลเดอร์ที่ README บอกให้วางไฟล์ลงไป
+    # ไม่มีอยู่จริงบนเครื่องที่เพิ่ง checkout ใหม่
+    assert (tmp_path / "enroll").is_dir()
     mock_watch_loop.assert_called_once()
 
 

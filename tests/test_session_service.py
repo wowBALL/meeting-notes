@@ -578,6 +578,18 @@ def test_get_enroll_lists_files_with_state_and_never_leaks_vectors(tmp_path):
     assert "embedding" not in json.dumps(body)
 
 
+def test_get_enroll_reports_the_minimum_speaking_seconds_threshold(tmp_path):
+    """finding 5: MIN_SPEAKING_SECONDS ต้องมาจากแหล่งเดียว (src/speakers.py) หน้าเว็บ
+    ต้องอ่านค่ามาแสดง ไม่ใช่ฝังตัวเลข 10 ซ้ำไว้เป็นสตริงคงที่อีกชุดหนึ่ง
+    """
+    config = make_config(tmp_path)
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    assert body["min_speaking_seconds"] == speakers.MIN_SPEAKING_SECONDS
+
+
 def test_get_enroll_reports_whether_the_worker_is_running(tmp_path):
     config = make_config(tmp_path)
     client = create_app(config, worker_probe=lambda: False).test_client()
@@ -745,9 +757,15 @@ def test_post_confirm_still_returns_200_when_archiving_the_file_fails(tmp_path):
         )
 
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "name": "สมชาย"}
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["name"] == "สมชาย"
+    # finding 2: การ์ดต้องเลิกเสนอ Save ซ้ำ -- ไม่งั้นกดซ้ำได้ตัวอย่างซ้ำเข้าทะเบียนคนเดิม
+    # เสียโควตา 2 ใน 10 ช่องต่อคน
+    assert body["warning"] == "archive_failed"
     registry = speakers.load_registry(tmp_path)
     assert registry[0]["name"] == "สมชาย"
+    assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
 
 
 def test_post_confirm_returns_404_when_there_is_no_result_yet(tmp_path):

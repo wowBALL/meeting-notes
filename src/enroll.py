@@ -11,11 +11,13 @@
 import json
 import logging
 import shutil
+import tempfile
 from datetime import datetime
 from itertools import count
 from pathlib import Path
 from typing import Any
 
+from src.audio_convert import convert_to_wav
 from src.diarize import diarize_audio
 from src.speakers import MIN_SPEAKING_SECONDS, clean_name, is_usable_embedding
 from src.storage import replace_with_retry
@@ -24,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 ENROLL_DIRNAME = "enroll"
 DONE_DIRNAME = "done"
+
+# ความคลาดเคลื่อนของ mtime ที่ยอมรับได้ตอนผูกผลกับไฟล์เสียง (ดู read_result) -- การ
+# คัดลอกไฟล์ (แทนที่จะย้าย) ขยับ mtime ได้เป็นวินาที ไม่ใช่แค่ปัดเศษ nanosecond และ
+# FAT32/exFAT (การ์ด SD, USB drive ที่ผู้ใช้อาจก็อปไฟล์มาจาก) มีความละเอียดเวลาแค่ 2
+# วินาที ตั้งไว้ 2.0 วินาทีให้พอดีกับกรณีนั้นโดยไม่หลวมจนรับไฟล์ที่เนื้อหาเปลี่ยนจริง
+_MTIME_TOLERANCE_SECONDS = 2.0
 
 # ชุดเดียวกับ watcher.AUDIO_EXTENSIONS โดยตั้งใจ: ไฟล์ที่วางลง inbox/ ได้ ต้องวางลง
 # enroll/ ได้ด้วย ไม่งั้นผู้ใช้ต้องจำว่าโฟลเดอร์ไหนรับอะไร
@@ -98,14 +106,23 @@ def analyze(audio_path: Path, pipeline: Any) -> dict:
     ไม่ raise เลยไม่ว่าเกิดอะไรขึ้น -- ผู้เรียกต้องมีผลไปเขียนไฟล์เสมอ เพราะไฟล์ผลคือ
     สิ่งเดียวที่ทำให้หน้าเว็บเลิกแสดง "กำลังวิเคราะห์" ได้ ความล้มเหลวที่เงียบคือหน้าจอ
     ที่ค้างตลอดกาลโดยไม่มีอะไรบอกผู้ใช้ว่าต้องทำอะไรต่อ
+
+    แปลงเป็น wav ก่อนเสมอ (finding 4 ของรีวิวรอบสุดท้าย) แบบเดียวกับที่
+    pipeline.process_file ทำก่อนถอดเทปประชุม -- ไม่งั้น pyannote ได้ container ดิบ
+    (.mp3/.m4a/.ogg) ที่ decode ด้วย backend ที่เดาไม่ได้ (soundfile ในไฟล์ requirements
+    ถอดรหัส AAC ไม่ได้) แทนที่จะผ่าน ffmpeg ซึ่งเป็นตัวถอดรหัสเดียวที่โปรเจกต์นี้รับประกัน
+    และทำให้เวกเตอร์เสียงของการลงทะเบียนกับของการประชุมมาจากการปรับสภาพเสียงแบบเดียวกัน
     """
     suggested_name = suggested_name_from(audio_path.name)
     try:
-        # hf_token ไม่ถูกใช้เมื่อส่ง pipeline มาแล้ว (ดู diarize.diarize_audio) ส่ง ""
-        # ไปเพื่อไม่ให้โมดูลนี้ต้องรู้จัก token เลย
-        result = diarize_audio(audio_path, "", pipeline)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
+            convert_to_wav(audio_path, wav_path)
+            # hf_token ไม่ถูกใช้เมื่อส่ง pipeline มาแล้ว (ดู diarize.diarize_audio) ส่ง ""
+            # ไปเพื่อไม่ให้โมดูลนี้ต้องรู้จัก token เลย
+            result = diarize_audio(wav_path, "", pipeline)
     except Exception as e:
-        # กว้างโดยตั้งใจ: pyannote/torch/ffmpeg โยนอะไรออกมาก็ได้ และไม่ว่าตัวไหน
+        # กว้างโดยตั้งใจ: ffmpeg/pyannote/torch โยนอะไรออกมาก็ได้ และไม่ว่าตัวไหน
         # ผู้ใช้ต้องได้เห็นว่าไฟล์นี้วิเคราะห์ไม่ผ่านพร้อมเหตุผล
         logger.warning("วิเคราะห์เสียง %s ไม่สำเร็จ: %s", audio_path.name, e)
         return {
@@ -221,14 +238,30 @@ def pending_requests(base_dir: Path) -> list[str]:
 def write_result(
     base_dir: Path, audio_file: str, analyzed: dict, now: datetime | None = None
 ) -> Path | None:
+    """ผลวิเคราะห์ พร้อมผูกติดกับขนาด/mtime ของไฟล์เสียงที่วิเคราะห์จริง ณ ตอนนี้
+
+    ผูกไว้เพื่อให้ read_result จับได้ภายหลังว่าไฟล์เสียงถูกเปลี่ยนไปแล้วหรือยัง (finding 1
+    ของรีวิวรอบสุดท้าย: ผู้ใช้ลบไฟล์ผ่าน Explorer แล้ววางไฟล์ใหม่ชื่อเดียวกันทับ ผลเก่า
+    ต้องไม่ผูกกับไฟล์ใหม่) -- อ่าน stat ไม่สำเร็จ (ไฟล์หายไปแล้วตอนกำลังเขียนผล) ก็ยังต้อง
+    เขียนผลได้ตามปกติ แค่ไม่มีอะไรให้ผูก ผู้อ่านจะเห็นเป็น None ทั้งคู่แล้วข้ามการเช็คนี้ไป
+    """
     path = result_path(base_dir, audio_file)
     if path is None:
         return None
+    try:
+        stat = (enroll_dir(base_dir) / audio_file).stat()
+        audio_size: int | None = stat.st_size
+        audio_mtime: float | None = stat.st_mtime
+    except OSError:
+        audio_size = None
+        audio_mtime = None
     _write_json(
         path,
         {
             "audio_file": audio_file,
             "analyzed": (now or datetime.now()).isoformat(timespec="seconds"),
+            "audio_size": audio_size,
+            "audio_mtime": audio_mtime,
             **analyzed,
         },
     )
@@ -236,10 +269,15 @@ def write_result(
 
 
 def read_result(base_dir: Path, audio_file: str) -> dict | None:
-    """ผลวิเคราะห์ของไฟล์เดียว ไฟล์พัง/หาย = None ไม่ raise
+    """ผลวิเคราะห์ของไฟล์เดียว ไฟล์พัง/หาย/ไม่ตรงกับไฟล์เสียงบนดิสก์ = None ไม่ raise
 
     ผลที่อ่านไม่ออกต้องไม่ทำให้ไฟล์อื่นในรายการหายตามไปด้วย -- แบบเดียวกับ
     pending._read_pending_file
+
+    เช็คขนาด/mtime กับไฟล์เสียงตัวจริงก่อนคืนผลเสมอ (finding 1): ผลที่ไม่ตรงคือผลของ
+    ไฟล์เสียงคนละไฟล์ (ถูกลบแล้ววางไฟล์ใหม่ชื่อเดียวกันทับ) ปล่อยให้หลุดออกไปเท่ากับเอา
+    เวกเตอร์เสียงของคนเดิมไปเสนอให้ยืนยันภายใต้ชื่อไฟล์ใหม่ -- ต้องถือว่า "ไม่มีผล" และ
+    เก็บกวาด sidecar เก่าทิ้งไปเลย ไม่ปล่อยค้างให้ผูกผิดซ้ำได้อีก
     """
     path = result_path(base_dir, audio_file)
     if path is None or not path.is_file():
@@ -249,7 +287,30 @@ def read_result(base_dir: Path, audio_file: str) -> dict | None:
     except (OSError, ValueError) as e:
         logger.warning("ข้ามผลวิเคราะห์ที่อ่านไม่ได้ (%s): %s", path.name, e)
         return None
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+
+    try:
+        stat = (enroll_dir(base_dir) / audio_file).stat()
+    except OSError:
+        # ไฟล์เสียงหายไปแล้ว (ลบผ่าน Explorer) -- ผลนี้กำพร้า ไม่มีไฟล์ให้ผูกอีกต่อไป
+        clear(base_dir, audio_file)
+        return None
+
+    recorded_size = parsed.get("audio_size")
+    recorded_mtime = parsed.get("audio_mtime")
+    size_matches = recorded_size is None or recorded_size == stat.st_size
+    mtime_matches = recorded_mtime is None or (
+        abs(stat.st_mtime - recorded_mtime) <= _MTIME_TOLERANCE_SECONDS
+    )
+    if not (size_matches and mtime_matches):
+        logger.warning(
+            "ผลวิเคราะห์ของ %s ไม่ตรงกับไฟล์เสียงบนดิสก์แล้ว (ไฟล์ถูกแทนที่) ล้างทิ้ง",
+            audio_file,
+        )
+        clear(base_dir, audio_file)
+        return None
+    return parsed
 
 
 def clear(base_dir: Path, audio_file: str) -> None:
@@ -262,6 +323,37 @@ def clear(base_dir: Path, audio_file: str) -> None:
             pass
         except OSError as e:
             logger.warning("ลบไฟล์ประกอบของ %s ไม่ได้: %s", audio_file, e)
+
+
+def _sweep_orphan_sidecars(base_dir: Path) -> None:
+    """ลบ .request.json/.result.json ที่ไฟล์เสียงต้นทางหายไปแล้ว
+
+    list_entries กวาดเฉพาะไฟล์เสียง sidecar กำพร้า (เกิดจากผู้ใช้ลบไฟล์เสียงผ่าน Explorer
+    เพราะหน้าเว็บไม่เคยมีปุ่มเอาไฟล์ที่วิเคราะห์แล้วออกโดยไม่ลงทะเบียน -- ดู finding 1)
+    จึงมองไม่เห็นในรายการเลย แต่ยังนอนอยู่บนดิสก์พร้อมผูกเข้ากับไฟล์ใหม่ชื่อเดียวกันที่ถูก
+    วางเข้ามาทีหลัง ลบทิ้งที่นี่ตัดปัญหาตั้งแต่ต้น ไม่ต้องพึ่งการเช็ค size/mtime ใน
+    read_result เพียงอย่างเดียว
+    """
+    directory = enroll_dir(base_dir)
+    if not directory.is_dir():
+        return
+    for path in directory.iterdir():
+        # เช็คชื่อก่อน (ไม่มี I/O) แล้วค่อย is_file() เฉพาะไฟล์ที่ชื่อลงท้ายแบบ sidecar
+        # จริง ๆ -- กันไม่ให้ต้อง stat() ไฟล์เสียงทุกไฟล์ในโฟลเดอร์โดยไม่จำเป็น
+        for suffix in (REQUEST_SUFFIX, RESULT_SUFFIX):
+            if not path.name.endswith(suffix):
+                continue
+            if not path.is_file():
+                break
+            audio_file = path.name[: -len(suffix)]
+            if not (directory / audio_file).is_file():
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    logger.warning("ลบไฟล์ประกอบกำพร้า %s ไม่ได้: %s", path.name, e)
+            break
 
 
 def archive(base_dir: Path, audio_file: str) -> Path | None:
@@ -295,10 +387,21 @@ def list_entries(base_dir: Path) -> list[dict]:
 
     ตัด embedding ออกเสมอแบบเดียวกับ session_service._public_speaker -- หน้าเว็บไม่ได้ใช้
     และเวกเตอร์เสียงเป็นข้อมูล biometric ที่ไม่ควรมีสำเนาเพิ่มในที่ที่ไม่จำเป็น
+
+    กวาด sidecar กำพร้าทิ้งทุกครั้งที่เรียก (finding 1) เพราะจุดนี้กำลังแจกแจงโฟลเดอร์
+    enroll/ อยู่แล้ว และเป็นจุดที่หน้าเว็บ poll ถี่ที่สุด
     """
+    _sweep_orphan_sidecars(base_dir)
     entries = []
     for path in scan_audio(base_dir):
         audio_file = path.name
+        try:
+            # ไฟล์นี้ถูก archive ไปพอดีโดย request อื่นระหว่างที่กำลังแจกแจงรายการอยู่ได้
+            # (finding 5) -- ข้ามแถวนี้ไปเฉย ๆ ดีกว่าปล่อยให้ FileNotFoundError หลุดออกไป
+            # เป็น 500 ทั้งหน้า
+            size_bytes = path.stat().st_size
+        except FileNotFoundError:
+            continue
         request = request_path(base_dir, audio_file)
         result = read_result(base_dir, audio_file)
         if result is not None:
@@ -310,7 +413,7 @@ def list_entries(base_dir: Path) -> list[dict]:
         entry = {
             "audio_file": audio_file,
             "state": state,
-            "size_bytes": path.stat().st_size,
+            "size_bytes": size_bytes,
             "suggested_name": suggested_name_from(audio_file),
         }
         if result is not None:

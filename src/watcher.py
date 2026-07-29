@@ -35,18 +35,65 @@ def process_enroll_requests(config: Config, diarization_pipeline: Any = None) ->
 
     ไม่เคยเขียน registry.json -- เขียนแค่ผลวิเคราะห์ไว้ให้คนมากดยืนยันที่หน้าเว็บ
     """
-    for audio_file in enroll.pending_requests(config.base_dir):
+    try:
+        # pending_requests เองก็ raise ได้ (อ่านโฟลเดอร์ไม่ได้ ฯลฯ) และแต่เดิมมันอยู่ใน
+        # for header ตรง ๆ นอก try ใด ๆ เลย -- ถ้าพังตรงนี้ exception จะทะลุออกไปถึง
+        # watch_loop ซึ่งไม่ได้ห่อการเรียกฟังก์ชันนี้ไว้ ฆ่า watcher ทั้งตัวพร้อมงาน
+        # ประมวลผล inbox/ ที่ยังไม่ได้ทำในรอบถัดไปไปด้วย (finding 3 ของรีวิวรอบสุดท้าย)
+        pending = enroll.pending_requests(config.base_dir)
+    except Exception:
+        logger.exception("Failed to list pending enrollment requests")
+        return
+    for audio_file in pending:
         audio_path = enroll.enroll_dir(config.base_dir) / audio_file
         try:
             analyzed = enroll.analyze(audio_path, pipeline=diarization_pipeline)
+        except Exception:
+            # enroll.analyze ไม่ raise อยู่แล้วโดยสัญญาของมัน แต่กันไว้อีกชั้น: ไฟล์เดียว
+            # ที่พังต้องไม่ทำให้ไฟล์อื่นในคิวไม่ถูกทำ
+            logger.exception("Failed to analyze enrollment clip %s", audio_file)
+            continue
+        try:
             enroll.write_result(config.base_dir, audio_file, analyzed)
             logger.info(
                 "Analyzed enrollment clip %s -> %s", audio_file, analyzed.get("status")
             )
         except Exception:
-            # enroll.analyze ไม่ raise อยู่แล้ว ตัวนี้กันความล้มเหลวของ "การเขียนไฟล์ผล"
-            # โดยเฉพาะ -- ไฟล์เดียวที่เขียนไม่ได้ต้องไม่ทำให้ไฟล์อื่นในคิวไม่ถูกทำ
-            logger.exception("Failed to analyze enrollment clip %s", audio_file)
+            # เขียนผลไม่สำเร็จ (ดิสก์เต็ม/ไฟล์ถูกล็อกจน replace_with_retry หมดความ
+            # พยายาม) -- ถ้าปล่อยใบสั่งงานค้างไว้เฉย ๆ pending_requests จะยังเห็นว่า
+            # "สั่งแล้วแต่ยังไม่มีผล" แล้วสั่งวิเคราะห์ซ้ำ (ถอดเสียงเต็มรอบบน GPU) ทุก
+            # poll ไปเรื่อย ๆ ไม่มีที่สิ้นสุด ในขณะที่หน้าเว็บค้างที่ "กำลังวิเคราะห์"
+            # ตลอดกาล (finding 3) -- ลองเขียนผลล้มเหลวแบบย่อแทน ผู้ใช้จะได้เห็นเหตุผล
+            # และกดเอาไฟล์ออกจากรายการได้ แทนที่จะเห็นหน้าจอค้าง
+            logger.exception(
+                "Failed to write the result for enrollment clip %s", audio_file
+            )
+            try:
+                enroll.write_result(
+                    config.base_dir,
+                    audio_file,
+                    {
+                        "status": "rejected",
+                        "reason": "analysis_failed",
+                        "suggested_name": enroll.suggested_name_from(audio_file),
+                    },
+                )
+            except Exception:
+                # เขียนแม้แต่ผลล้มเหลวแบบย่อก็ยังไม่ได้ (ดิสก์เต็มจริง ๆ) -- ทางเดียวที่
+                # เหลือคือตัดใบสั่งงานทิ้งไม่ให้ค้างวนซ้ำไม่รู้จบ แม้ผู้ใช้จะไม่เห็นเหตุผล
+                # ที่ชัดเจนก็ตาม ดีกว่าไฟล์นี้กิน GPU ทุก poll ตลอดไป
+                logger.exception(
+                    "Failed to write even a minimal failure result for %s; "
+                    "dropping the stuck request",
+                    audio_file,
+                )
+                try:
+                    enroll.clear(config.base_dir, audio_file)
+                except Exception:
+                    logger.exception(
+                        "Failed to clear the stuck request for enrollment clip %s",
+                        audio_file,
+                    )
 
 
 def watch_loop(
