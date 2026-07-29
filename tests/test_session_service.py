@@ -264,19 +264,19 @@ def test_pending_speakers_endpoint_never_ships_the_voice_vectors(client, config)
 
 
 def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
-    registry = add_sample([], "พี่เอ็ม", [1.0, 0.0], source="m1")
-    registry = add_sample(registry, "พี่เอ็ม", [0.9, 0.1], source="m2")
+    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1")
+    registry = add_sample(registry, "สมหญิง็ม", [0.9, 0.1], source="m2")
     save_registry(config.base_dir, registry)
 
     body = client.get("/api/speakers").get_json()
 
     assert body["speakers"] == [
-        {"id": registry[0]["id"], "name": "พี่เอ็ม", "sample_count": 2}
+        {"id": registry[0]["id"], "name": "สมหญิง็ม", "sample_count": 2}
     ]
 
 
 def test_deleting_a_speaker_removes_them_from_the_registry(client, config):
-    registry = add_sample([], "พี่เอ็ม", [1.0, 0.0], source="m1")
+    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1")
     save_registry(config.base_dir, registry)
 
     response = client.delete(f"/api/speakers/{registry[0]['id']}")
@@ -307,17 +307,17 @@ def test_confirming_a_name_registers_the_voice_and_rewrites_the_transcript(clien
 
     response = client.post(
         "/api/speakers/confirm",
-        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "พี่เอ็ม"},
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "สมหญิง็ม"},
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "renamed": True, "name": "พี่เอ็ม"}
+    assert response.get_json() == {"ok": True, "renamed": True, "name": "สมหญิง็ม"}
     registry = load_registry(config.base_dir)
-    assert registry[0]["name"] == "พี่เอ็ม"
+    assert registry[0]["name"] == "สมหญิง็ม"
     assert registry[0]["samples"][0]["embedding"] == [0.0, 1.0]
     assert registry[0]["samples"][0]["source"] == meeting
     transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
-    assert "**พี่เอ็ม** [00:30]: ครับผม ผมเห็นด้วย" in transcript
+    assert "**สมหญิง็ม** [00:30]: ครับผม ผมเห็นด้วย" in transcript
     assert "**ผู้พูด 1** [00:00]" in transcript
 
 
@@ -327,7 +327,7 @@ def test_confirming_a_name_takes_that_speaker_out_of_the_queue(client, config):
 
     client.post(
         "/api/speakers/confirm",
-        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "พี่เอ็ม"},
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "สมหญิง็ม"},
     )
 
     body = client.get("/api/speakers/pending").get_json()
@@ -335,7 +335,7 @@ def test_confirming_a_name_takes_that_speaker_out_of_the_queue(client, config):
 
 
 def test_confirming_an_existing_person_by_id_adds_a_second_sample(client, config):
-    registry = add_sample([], "พี่เอ็ม", [0.9, 0.1], source="เมื่อวาน")
+    registry = add_sample([], "สมหญิง็ม", [0.9, 0.1], source="เมื่อวาน")
     save_registry(config.base_dir, registry)
     meeting = _queue_two_speakers(config)
     _saved_transcript_for(config, meeting)
@@ -373,11 +373,11 @@ def test_confirming_still_registers_the_voice_when_the_meeting_folder_is_gone(cl
 
     response = client.post(
         "/api/speakers/confirm",
-        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "พี่เอ็ม"},
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "สมหญิง็ม"},
     )
 
-    assert response.get_json() == {"ok": True, "renamed": False, "name": "พี่เอ็ม"}
-    assert load_registry(config.base_dir)[0]["name"] == "พี่เอ็ม"
+    assert response.get_json() == {"ok": True, "renamed": False, "name": "สมหญิง็ม"}
+    assert load_registry(config.base_dir)[0]["name"] == "สมหญิง็ม"
 
 
 def test_confirming_an_empty_name_is_rejected_and_keeps_the_queue_intact(client, config):
@@ -406,7 +406,7 @@ def test_confirming_is_a_400_when_the_queued_embedding_is_missing(client, config
 
     response = client.post(
         "/api/speakers/confirm",
-        json={"meeting": meeting, "label": "ผู้พูด 1", "name": "พี่เอ็ม"},
+        json={"meeting": meeting, "label": "ผู้พูด 1", "name": "สมหญิง็ม"},
     )
 
     assert response.status_code == 400
@@ -425,7 +425,7 @@ def test_confirming_is_a_400_when_the_queued_embedding_is_a_zero_vector(client, 
 
     response = client.post(
         "/api/speakers/confirm",
-        json={"meeting": meeting, "label": "ผู้พูด 1", "name": "พี่เอ็ม"},
+        json={"meeting": meeting, "label": "ผู้พูด 1", "name": "สมหญิง็ม"},
     )
 
     assert response.status_code == 400
@@ -459,12 +459,12 @@ def test_confirming_a_name_still_succeeds_when_the_dequeue_fails(client, config,
 
     response = client.post(
         "/api/speakers/confirm",
-        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "พี่เอ็ม"},
+        json={"meeting": meeting, "label": "ผู้พูด 2", "name": "สมหญิง็ม"},
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "renamed": True, "name": "พี่เอ็ม"}
-    assert load_registry(config.base_dir)[0]["name"] == "พี่เอ็ม"
+    assert response.get_json() == {"ok": True, "renamed": True, "name": "สมหญิง็ม"}
+    assert load_registry(config.base_dir)[0]["name"] == "สมหญิง็ม"
 
 
 def test_skipping_when_the_dequeue_fails_is_a_500_and_the_registry_stays_empty(

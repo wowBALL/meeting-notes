@@ -35,7 +35,7 @@ def test_build_pending_speakers_reports_everyone_unknown():
 
 
 def test_build_pending_speakers_skips_people_already_recognized():
-    matches = {"SPEAKER_00": Match("id-1", "พี่เอ็ม", 0.91, confident=True)}
+    matches = {"SPEAKER_00": Match("id-1", "สมหญิง็ม", 0.91, confident=True)}
 
     result = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, matches=matches)
 
@@ -43,13 +43,13 @@ def test_build_pending_speakers_skips_people_already_recognized():
 
 
 def test_build_pending_speakers_carries_a_mid_confidence_match_as_a_suggestion():
-    matches = {"SPEAKER_00": Match("id-1", "พี่เอ็ม", 0.612345, confident=False)}
+    matches = {"SPEAKER_00": Match("id-1", "สมหญิง็ม", 0.612345, confident=False)}
 
     result = build_pending_speakers(MERGED, LABELS, EMBEDDINGS, matches=matches)
 
     assert result[0]["suggested"] == {
         "speaker_id": "id-1",
-        "name": "พี่เอ็ม",
+        "name": "สมหญิง็ม",
         "score": 0.612,
     }
 
