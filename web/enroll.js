@@ -101,11 +101,18 @@ let files = [];
 let speakers = [];
 let worker = false;
 let busy = false;
-let notice = null;
+// notice เก็บทั้งข้อความและสถานะ (สำเร็จ/ล้มเหลว) ไว้ในก้อนเดียวกันเสมอ -- ห้ามมีตัวแปร
+// severity แยกต่างหาก เพราะจุดที่ set ข้อความมีหลายที่ (save/analyze/dismiss/remove)
+// ถ้าแยกกันจะมีจุดที่ set ข้อความแต่ลืม set severity ได้ง่าย ๆ
+let notice = null; // { text, ok } | null
 let loadError = null;
 // เก็บ handle ของ poll ที่ตั้งไว้ -- ยกเลิกของเก่าก่อนตั้งใหม่เสมอ กัน chain
 // ซ้อนกันหลายสายเวลา load() ถูกเรียกซ้ำจากปุ่มต่าง ๆ ระหว่างที่ยังมีคิวค้าง
 let pollHandle = null;
+
+function setNotice(text, ok) {
+  notice = { text, ok };
+}
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -140,7 +147,16 @@ async function load() {
   }
   render();
   // poll ต่อเฉพาะตอนที่มีงานค้างจริง หน้าที่นิ่งแล้วไม่ควรยิงทุกสองวินาทีตลอดไป
-  if (busy) pollHandle = setTimeout(load, 2000);
+  if (busy) {
+    // ล้าง timer เดิมอีกครั้งตรงจังหวะตั้งใหม่ ไม่ใช่แค่ตอนเข้าฟังก์ชันเท่านั้น --
+    // ถ้า load() สองสายแข่งกัน (เช่นผู้ใช้กดปุ่มพอดีกับที่ auto-poll ยิงครบสองวินาที)
+    // ทั้งคู่ผ่านจุดล้างตอนเข้าไปได้ก่อนที่ใครจะ await fetch เสร็จ เพราะตอนนั้น
+    // pollHandle ยังเป็น null อยู่ทั้งคู่ -- ถ้าล้างแค่ตอนเข้าอย่างเดียว การตั้ง
+    // timer ครั้งหลังจะเขียนทับ pollHandle ทิ้ง timer ของครั้งแรกไว้แบบไม่มีใคร
+    // อ้างถึงมันได้อีก (orphan) ทำให้ยัง poll ถี่เป็นสองเท่าต่อไปตลอดช่วง busy
+    if (pollHandle !== null) clearTimeout(pollHandle);
+    pollHandle = setTimeout(load, 2000);
+  }
 }
 
 function chipFor(file) {
@@ -182,9 +198,9 @@ function renderFile(file) {
         const response = await fetch(`/api/enroll/${encodeURIComponent(file.audio_file)}`, {
           method: "DELETE",
         });
-        if (!response.ok) notice = t().errAction;
+        if (!response.ok) setNotice(t().errAction, false);
       } catch (err) {
-        notice = t().errAction;
+        setNotice(t().errAction, false);
       }
       load();
     };
@@ -208,14 +224,14 @@ function renderFile(file) {
       });
       const body = await response.json().catch(() => ({}));
       if (response.ok) {
-        notice = fill(t().savedAs, { name: body.name });
+        setNotice(fill(t().savedAs, { name: body.name }), true);
       } else {
-        notice = body.error === "bad_name" ? t().errName : t().errSave;
+        setNotice(body.error === "bad_name" ? t().errName : t().errSave, false);
       }
     } catch (err) {
       // fetch เองพังก่อนถึง response ได้ (เน็ตหลุด/เซิร์ฟเวอร์ตาย) -- ต้องไม่ปล่อย
       // ปุ่มค้าง disabled อยู่แบบนั้นตลอดไปโดยไม่มีข้อความอะไรเลย
-      notice = t().errSave;
+      setNotice(t().errSave, false);
     }
     // load() เรียก render() เสมอไม่ว่าจะสำเร็จหรือพัง ปุ่มใหม่จึงไม่ disabled ค้าง
     load();
@@ -245,7 +261,10 @@ function render() {
   }
 
   if (notice) {
-    body.append(node("div", "note ok", notice));
+    // severity มากับ notice เอง (ตั้งผ่าน setNotice เท่านั้น) -- สำเร็จได้ note ok
+    // (เขียว) ล้มเหลวได้ note warn (เตือน) ห้ามใช้ note ok เป็นค่าเริ่มต้นเด็ดขาด
+    // เพราะข้อความ error หลายจุด (errSave/errName/errAction) มาลงที่ notice เดียวกัน
+    body.append(node("div", notice.ok ? "note ok" : "note warn", notice.text));
     notice = null;
   }
 
@@ -269,9 +288,9 @@ function render() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ files: ready.map((file) => file.audio_file) }),
         });
-        if (!response.ok) notice = t().errAction;
+        if (!response.ok) setNotice(t().errAction, false);
       } catch (err) {
-        notice = t().errAction;
+        setNotice(t().errAction, false);
       }
       load();
     };
@@ -298,9 +317,9 @@ function render() {
     remove.onclick = async () => {
       try {
         const response = await fetch(`/api/speakers/${speaker.id}`, { method: "DELETE" });
-        if (!response.ok) notice = t().errAction;
+        if (!response.ok) setNotice(t().errAction, false);
       } catch (err) {
-        notice = t().errAction;
+        setNotice(t().errAction, false);
       }
       load();
     };
