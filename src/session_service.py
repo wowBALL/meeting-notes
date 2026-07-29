@@ -33,6 +33,17 @@ ACTIVITY_LIMIT = 200
 # ผู้ใช้มีคนเดียวและเว็บนี้ bind 127.0.0.1 เท่านั้น -- ไม่ต้องถึงขั้นล็อกระดับไฟล์
 _registry_lock = threading.Lock()
 
+# วิดเจ็ต (COWORK Desktop ตั้งแต่ v1.8.7) เปิด service นี้ด้วย pythonw.exe เพื่อไม่ให้มี
+# หน้าต่างดำค้างอยู่ตลอด -- pythonw เป็น GUI subsystem จึงไม่มี console เลย ผลข้างเคียงคือ
+# ลูกที่เป็น console subsystem ทุกตัวต้องถูกสร้าง console ใหม่ให้ ซึ่งบน Windows 11 จะถูก
+# ส่งต่อให้ Windows Terminal -- probe ทุก 10 วินาทีจึงเด้งหน้าต่างใหม่ทุก 10 วินาที
+# หน้าต่างดำที่ค้างตัวเดียวกลายเป็นหน้าต่างที่กระพริบแทน
+#
+# CREATE_NO_WINDOW ใช้ได้ตรงนี้เพราะลูกตัวนี้ไม่ได้ detached -- ที่แพ้ให้ defterm ของ
+# Windows 11 คือกรณีที่รวมกับ DETACHED_PROCESS (เคสของฝั่งวิดเจ็ตที่ต้องแก้ด้วย pythonw.exe)
+# getattr ไว้เพราะค่านี้มีเฉพาะบน Windows -- เทสต์รันบนแพลตฟอร์มอื่นได้เหมือนเดิม
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # คำสั่งเดียวกับที่ start-meeting.bat:36 ใช้ตรวจว่า watcher รันอยู่หรือไม่
 _WORKER_PROBE_COMMAND = [
     "powershell",
@@ -54,7 +65,10 @@ def probe_worker() -> bool:
     try:
         return (
             subprocess.run(
-                _WORKER_PROBE_COMMAND, capture_output=True, timeout=10
+                _WORKER_PROBE_COMMAND,
+                capture_output=True,
+                timeout=10,
+                creationflags=_NO_WINDOW,
             ).returncode
             == 0
         )
