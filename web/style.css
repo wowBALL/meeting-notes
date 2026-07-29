@@ -144,3 +144,56 @@ button:disabled { opacity: .5; cursor: default; }
 .modal .row { display: flex; gap: 8px; justify-content: flex-end; }
 .modal .row button { width: auto; margin: 0; padding: 7px 14px; font-size: 13px; }
 .hide { display: none !important; }
+
+/* --- ที่เสนอเพิ่มใหม่สำหรับหน้า enroll --- */
+/* ปุ่มย้อนกลับในหัวการ์ด แทนที่ชื่อเรื่องเมื่ออยู่หน้า enroll */
+.back {
+  font: inherit; font-size: 13px; padding: 0; cursor: pointer;
+  border: none; background: transparent; color: var(--text-2);
+  display: flex; align-items: center; gap: 6px;
+}
+.back:hover { color: var(--text); }
+/* กล่องบอกว่าให้เอาไฟล์ไปวางที่ไหน */
+.drop {
+  border: 1px dashed var(--line-strong); border-radius: var(--radius);
+  background: var(--sunk); padding: 14px 12px; text-align: center;
+  font-size: 12.5px; color: var(--text-2); margin-bottom: 12px;
+}
+.drop code {
+  font-family: Consolas, "SF Mono", monospace; font-size: 12px;
+  color: var(--text); background: var(--card);
+  border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px;
+}
+.drop .why { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+/* แถวไฟล์หนึ่งไฟล์ */
+.file { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 11px; margin-bottom: 8px; }
+.file .top { display: flex; align-items: center; gap: 8px; }
+.file .fn {
+  font-family: Consolas, "SF Mono", monospace; font-size: 12px;
+  color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file .top .spacer { flex: 1; }
+.file .meta { font-size: 11.5px; color: var(--text-3); margin-top: 3px; }
+.file .row { display: flex; gap: 6px; margin-top: 8px; }
+.file .row input[type=text] { flex: 1; }
+.file .row button { width: auto; margin: 0; padding: 6px 11px; font-size: 12.5px; white-space: nowrap; }
+.chip {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--line-strong); color: var(--text-3);
+}
+.chip.wait { border-color: var(--line-strong); color: var(--text-3); }
+.chip.now { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.chip.ok { border-color: var(--ok); color: var(--ok); }
+.chip.bad { border-color: var(--danger); color: var(--danger); }
+/* คนที่อยู่ในทะเบียนแล้ว */
+.reg { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.reg:last-child { border-bottom: none; }
+.reg .spacer { flex: 1; }
+.reg .n { font-size: 11.5px; color: var(--text-3); }
+.reg .del {
+  font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  background: transparent; color: var(--text-3);
+}
+.reg .del:hover { border-color: var(--danger); color: var(--danger); }
+.sec { font-size: 12px; color: var(--text-2); margin: 16px 0 6px; font-weight: 600; }

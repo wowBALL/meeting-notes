@@ -1,13 +1,23 @@
 <!DOCTYPE html>
 <html lang="th">
 <head>
-  <meta charset="UTF-8" />
-  <title>Voice Enrollment</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ลงทะเบียนเสียงผู้พูด</title>
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- placeholder ชั่วคราวสำหรับ Task 5 (endpoint เท่านั้น) -- โครงหน้าจริงของ /enroll
-       สร้างที่ Task 7 (web/enroll.html + web/enroll.js) ไฟล์นี้มีไว้แค่ให้เส้นทาง
-       GET /enroll เสิร์ฟได้และเทสต์ test_get_enroll_page_is_served ผ่าน -->
-  <script src="enroll.js"></script>
+
+<div class="app">
+  <div class="head">
+    <span class="name" id="hTitle"></span>
+    <span class="spacer"></span>
+    <span class="worker"><span class="dot" id="wDot"></span><span id="wText"></span></span>
+    <button class="lang" id="langBtn"></button>
+  </div>
+  <div class="body" id="body"></div>
+</div>
+
+<script src="enroll.js"></script>
 </body>
 </html>

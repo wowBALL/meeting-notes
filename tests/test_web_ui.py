@@ -75,3 +75,51 @@ def test_the_colour_tokens_live_in_exactly_one_file():
 
     text = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     assert "--accent:" not in text, "index.html มีบล็อก token ซ้ำ"
+
+
+ENROLL_JS_PATH = WEB_DIR / "enroll.js"
+
+
+def test_enroll_ui_catalogs_have_the_same_keys_in_both_languages():
+    text = ENROLL_JS_PATH.read_text(encoding="utf-8")
+
+    th_keys = _top_level_keys(_extract_object_block(text, "th"))
+    en_keys = _top_level_keys(_extract_object_block(text, "en"))
+
+    assert th_keys, "ไม่พบคีย์ใดใน UI.th ของ enroll.js เลย"
+    assert en_keys, "ไม่พบคีย์ใดใน UI.en ของ enroll.js เลย"
+    assert th_keys == en_keys, (
+        f"คีย์ไม่ตรงกันระหว่าง th กับ en ใน enroll.js: "
+        f"th only={th_keys - en_keys} en only={en_keys - th_keys}"
+    )
+
+
+def test_enroll_page_shares_the_language_choice_with_the_main_page():
+    """สลับภาษาที่หน้าไหนแล้วอีกหน้าต้องจำตาม -- คนละคีย์คือสองหน้าที่ทะเลาะกัน"""
+    app_js = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    enroll_js = ENROLL_JS_PATH.read_text(encoding="utf-8")
+
+    assert "runnerLang" in app_js
+    assert "runnerLang" in enroll_js
+
+
+def test_enroll_html_reuses_the_shared_stylesheet():
+    """หน้า enroll ต้องไม่มีบล็อก token ของตัวเอง -- สองชุดคือสองชุดที่จะ drift"""
+    text = (WEB_DIR / "enroll.html").read_text(encoding="utf-8")
+
+    assert 'href="style.css"' in text
+    assert "<style>" not in text
+    assert "--accent:" not in text
+
+
+def test_enroll_page_explains_every_rejection_reason():
+    """เหตุผลที่ backend ส่งได้ทุกตัวต้องมีข้อความอธิบาย ไม่งั้นผู้ใช้เห็นช่องว่าง"""
+    text = ENROLL_JS_PATH.read_text(encoding="utf-8")
+
+    for reason in (
+        "multiple_speakers",
+        "too_short",
+        "unusable_embedding",
+        "analysis_failed",
+    ):
+        assert reason in text, f"enroll.js ไม่มีข้อความสำหรับเหตุผล {reason}"
