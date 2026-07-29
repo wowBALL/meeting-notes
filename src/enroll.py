@@ -138,9 +138,15 @@ def analyze(audio_path: Path, pipeline: Any) -> dict:
 
 
 def _sidecar_path(base_dir: Path, audio_file: str, suffix: str) -> Path | None:
+    """ชื่อไฟล์ประกอบ -- เก็บนามสกุลของไฟล์เสียงไว้เต็ม ๆ ไม่ตัดทิ้งเหมือน suggested_name_from
+
+    ถ้าตัดนามสกุลออก call.wav กับ call.mp3 จะได้ sidecar ชื่อเดียวกัน (call.request.json,
+    call.result.json) เขียนไฟล์หนึ่งจะทับอีกไฟล์แบบเงียบ ๆ แล้ว list_entries จะเอาผลของ
+    ไฟล์หนึ่งไปแปะให้อีกไฟล์ -- เวกเตอร์เสียงของคนผิดหลุดไปให้กดยืนยันภายใต้ชื่อคนอื่น
+    """
     if not is_safe_filename(audio_file):
         return None
-    return enroll_dir(base_dir) / (Path(audio_file).stem + suffix)
+    return enroll_dir(base_dir) / (audio_file + suffix)
 
 
 def request_path(base_dir: Path, audio_file: str) -> Path | None:

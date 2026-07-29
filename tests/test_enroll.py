@@ -236,7 +236,7 @@ def test_write_request_creates_a_sidecar_next_to_the_audio(tmp_path):
         tmp_path, "สมชาย.ogg", now=datetime(2026, 7, 29, 10, 31, 0)
     )
 
-    assert path == tmp_path / "enroll" / "สมชาย.request.json"
+    assert path == tmp_path / "enroll" / "สมชาย.ogg.request.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["audio_file"] == "สมชาย.ogg"
     assert payload["requested"] == "2026-07-29T10:31:00"
@@ -290,7 +290,7 @@ def test_write_result_stamps_the_file_and_keeps_the_embedding(tmp_path):
 def test_read_result_returns_none_for_a_corrupt_file(tmp_path):
     directory = tmp_path / "enroll"
     directory.mkdir()
-    (directory / "สมชาย.result.json").write_text("{ not json", encoding="utf-8")
+    (directory / "สมชาย.ogg.result.json").write_text("{ not json", encoding="utf-8")
 
     assert enroll.read_result(tmp_path, "สมชาย.ogg") is None
 
@@ -308,8 +308,8 @@ def test_clear_removes_both_sidecars_and_leaves_the_audio(tmp_path):
 
     enroll.clear(tmp_path, "สมชาย.ogg")
 
-    assert not (tmp_path / "enroll" / "สมชาย.request.json").exists()
-    assert not (tmp_path / "enroll" / "สมชาย.result.json").exists()
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.request.json").exists()
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.result.json").exists()
     assert audio_path.exists()
 
 
@@ -329,7 +329,7 @@ def test_archive_moves_the_audio_into_done_and_clears_sidecars(tmp_path):
     assert destination == tmp_path / "enroll" / "done" / "สมชาย.ogg"
     assert destination.is_file()
     assert not (tmp_path / "enroll" / "สมชาย.ogg").exists()
-    assert not (tmp_path / "enroll" / "สมชาย.request.json").exists()
+    assert not (tmp_path / "enroll" / "สมชาย.ogg.request.json").exists()
     assert enroll.scan_audio(tmp_path) == []
 
 
@@ -388,3 +388,38 @@ def test_list_entries_suggests_a_name_even_before_analysis(tmp_path):
 
     assert entry["suggested_name"] == "สมหญิง"
     assert entry["size_bytes"] == len(b"fake audio")
+
+
+def test_sidecars_stay_independent_for_files_sharing_a_stem(tmp_path):
+    # call.wav กับ call.mp3 มี stem เดียวกัน ถ้า sidecar ตัดนามสกุลทิ้ง ทั้งคู่จะชน
+    # กันที่ call.request.json / call.result.json แล้วผลของไฟล์หนึ่งจะไปทับอีกไฟล์
+    # -- คนหน้าเว็บจะเห็นเสียงของคนผิดถูกเสนอให้ยืนยันภายใต้ชื่อไฟล์อื่น
+    make_audio(tmp_path, "call.wav")
+    make_audio(tmp_path, "call.mp3")
+
+    enroll.write_request(tmp_path, "call.wav")
+    enroll.write_request(tmp_path, "call.mp3")
+    enroll.write_result(
+        tmp_path,
+        "call.wav",
+        {"status": "ok", "speaker_count": 1, "suggested_name": "call-wav-person"},
+    )
+    enroll.write_result(
+        tmp_path,
+        "call.mp3",
+        {"status": "ok", "speaker_count": 2, "suggested_name": "call-mp3-person"},
+    )
+
+    wav_result = enroll.read_result(tmp_path, "call.wav")
+    mp3_result = enroll.read_result(tmp_path, "call.mp3")
+
+    assert wav_result["speaker_count"] == 1
+    assert wav_result["suggested_name"] == "call-wav-person"
+    assert mp3_result["speaker_count"] == 2
+    assert mp3_result["suggested_name"] == "call-mp3-person"
+
+    entries = {entry["audio_file"]: entry for entry in enroll.list_entries(tmp_path)}
+    assert entries["call.wav"]["speaker_count"] == 1
+    assert entries["call.wav"]["suggested_name"] == "call-wav-person"
+    assert entries["call.mp3"]["speaker_count"] == 2
+    assert entries["call.mp3"]["suggested_name"] == "call-mp3-person"
