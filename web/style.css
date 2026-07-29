@@ -192,4 +192,8 @@ button.mic-toggle.muted { border-color: var(--warn); color: var(--warn); backgro
   background: transparent; color: var(--text-3);
 }
 .reg .del:hover { border-color: var(--danger); color: var(--danger); }
+/* ช่องแก้ชื่อในทะเบียน -- กินพื้นที่ที่เหลือของแถวแทน .spacer ที่หายไปในโหมดนี้ */
+.reg .renameInput { flex: 1; min-width: 0; margin: 0; }
+.reg .renameInput + button { width: auto; margin: 0; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+.reg .renameInput ~ button { width: auto; margin: 0; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
 .sec { font-size: 12px; color: var(--text-2); margin: 16px 0 6px; font-weight: 600; }

@@ -263,6 +263,37 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             }
         )
 
+    @app.patch("/api/speakers/<speaker_id>")
+    def rename_speaker(speaker_id):
+        """แก้ชื่อคนในทะเบียน -- ไม่แตะตัวอย่างเสียงเลย
+
+        มีไว้เพราะชื่อครั้งแรกมาจากชื่อไฟล์ที่วางใน enroll/ ซึ่งมักติดส่วนเกินมาด้วย
+        ก่อนหน้านี้ทางแก้เดียวคือลบทิ้งแล้วอัดใหม่ ซึ่งทำลายตัวอย่างเสียงที่สะสมไว้
+        ทั้งหมดเพียงเพราะสะกดชื่อผิด
+
+        อยู่ในล็อกเดียวกับ confirm/delete: อ่าน -> แก้ -> เขียนทับ ถ้าไม่คุมช่วงนี้
+        การแก้ชื่อที่ชนกับการ enroll พร้อมกันจะทำให้ฝ่ายหนึ่งหายไปทั้งที่ได้ ok กลับไป
+        """
+        payload = request.get_json(silent=True) or {}
+        name = payload.get("name")
+        if not isinstance(name, str):
+            return jsonify({"error": "bad_name"}), 400
+        with _registry_lock:
+            registry = speakers.load_registry(config.base_dir)
+            try:
+                updated = speakers.rename_speaker(registry, speaker_id, name)
+            except speakers.DuplicateNameError:
+                # ต้องมาก่อน ValueError เพราะสืบทอดมาจากมัน -- สลับลำดับเมื่อไหร่
+                # ผู้ใช้จะได้ "ชื่อว่าง" ทั้งที่พิมพ์ชื่อที่ซ้ำกับคนอื่น
+                return jsonify({"error": "duplicate_name"}), 409
+            except ValueError:
+                return jsonify({"error": "bad_name"}), 400
+            if updated is None:
+                return jsonify({"error": "not_found"}), 404
+            speakers.save_registry(config.base_dir, updated)
+            renamed = next(s for s in updated if s["id"] == speaker_id)
+        return jsonify({"ok": True, "speaker": _speaker_summary(renamed)})
+
     @app.delete("/api/speakers/<speaker_id>")
     def delete_speaker(speaker_id):
         with _registry_lock:

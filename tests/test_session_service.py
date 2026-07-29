@@ -358,6 +358,67 @@ def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
     ]
 
 
+def test_renaming_a_speaker_keeps_their_samples(client, config):
+    """ชื่อครั้งแรกมาจากชื่อไฟล์ใน enroll/ ซึ่งมักติดส่วนเกินมา (เช่น วงเล็บชื่อเล่น) -- ก่อนมี endpoint นี้
+    ทางแก้เดียวคือลบทิ้งแล้วอัดใหม่ ซึ่งทำลายตัวอย่างเสียงที่สะสมไว้เพราะสะกดผิด
+    """
+    registry = add_sample([], "สมชาย ( ชาย )", [1.0, 0.0], source="m1", model=MODEL)
+    registry = add_sample(registry, "สมชาย ( ชาย )", [0.9, 0.1], source="m2", model=MODEL)
+    save_registry(config.base_dir, registry)
+
+    response = client.patch(
+        f"/api/speakers/{registry[0]['id']}", json={"name": "  ชาย  "}
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["speaker"]["name"] == "ชาย"
+    updated = load_registry(config.base_dir)
+    assert len(updated) == 1
+    assert updated[0]["name"] == "ชาย"
+    assert updated[0]["id"] == registry[0]["id"]
+    assert len(updated[0]["samples"]) == 2
+    # เวกเตอร์เสียงต้องไม่ออกไปกับ response -- ข้อมูล biometric
+    assert "embedding" not in json.dumps(response.get_json())
+
+
+def test_renaming_to_a_name_someone_else_already_has_is_refused(client, config):
+    registry = add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+    registry = add_sample(registry, "สมหญิง", [0.0, 1.0], source="m2", model=MODEL)
+    save_registry(config.base_dir, registry)
+    target = next(s for s in registry if s["name"] == "สมหญิง")
+
+    response = client.patch(f"/api/speakers/{target['id']}", json={"name": "สมชาย"})
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "duplicate_name"
+    # ทะเบียนต้องไม่ถูกแตะเลยเมื่อถูกปฏิเสธ
+    after = load_registry(config.base_dir)
+    assert sorted(s["name"] for s in after) == ["สมชาย", "สมหญิง"]
+
+
+def test_renaming_with_an_empty_or_non_string_name_is_a_400(client, config):
+    registry = add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+    save_registry(config.base_dir, registry)
+
+    for payload in ({"name": "  **  "}, {"name": ""}, {"name": 42}, {}):
+        response = client.patch(f"/api/speakers/{registry[0]['id']}", json=payload)
+        assert response.status_code == 400, payload
+        assert response.get_json()["error"] == "bad_name"
+
+    assert load_registry(config.base_dir)[0]["name"] == "สมชาย"
+
+
+def test_renaming_an_unknown_speaker_is_a_404(client, config):
+    save_registry(
+        config.base_dir, add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+    )
+
+    response = client.patch("/api/speakers/ไม่มีจริง", json={"name": "ชื่อใหม่"})
+
+    assert response.status_code == 404
+    assert load_registry(config.base_dir)[0]["name"] == "สมชาย"
+
+
 def test_deleting_a_speaker_removes_them_from_the_registry(client, config):
     registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL)
     save_registry(config.base_dir, registry)

@@ -16,6 +16,12 @@ const UI = {
     registryEmpty: "ยังไม่มีใครในทะเบียน",
     samples: "ตัวอย่าง",
     remove: "ลบ",
+    rename: "แก้ชื่อ",
+    renameSave: "บันทึก",
+    renameCancel: "ยกเลิก",
+    renamed: 'เปลี่ยนชื่อเป็น "{name}" แล้ว',
+    errDuplicateName: 'มี "{name}" อยู่ในทะเบียนแล้ว ใช้ชื่อซ้ำกันไม่ได้',
+    errBadName: "ชื่อนี้ใช้ไม่ได้ ลองใหม่อีกที",
     stateIdle: "รอวิเคราะห์",
     stateBusy: "กำลังวิเคราะห์",
     stateReady: "พร้อมบันทึก",
@@ -82,6 +88,12 @@ const UI = {
     registryEmpty: "Nobody enrolled yet",
     samples: "samples",
     remove: "Remove",
+    rename: "Rename",
+    renameSave: "Save",
+    renameCancel: "Cancel",
+    renamed: 'Renamed to "{name}"',
+    errDuplicateName: '"{name}" is already in the registry — names must be unique',
+    errBadName: "That name cannot be used, try another",
     stateIdle: "Not analyzed",
     stateBusy: "Analyzing",
     stateReady: "Ready to save",
@@ -153,6 +165,9 @@ let pollHandle = null;
 // ลบจริง เพราะปุ่มนี้ล้างตัวอย่างเสียงสะสมได้ถึง 10 ตัวอย่างในคลิกเดียว และอยู่ติดกับ
 // การ์ดไฟล์ที่ผู้ใช้ไล่กดอยู่แล้ว | { id, name, sampleCount } | null
 let pendingDelete = null;
+// คนที่กำลังแก้ชื่ออยู่ -- เก็บแค่ id ไม่เก็บข้อความที่พิมพ์ค้าง เพราะ render() วาด
+// แถวใหม่ทุกครั้ง ค่าที่พิมพ์อยู่จึงอ่านจาก input ตอนกดบันทึกเท่านั้น | id | null
+let editingId = null;
 
 function setNotice(text, ok) {
   notice = { text, ok };
@@ -412,11 +427,52 @@ function render() {
   if (!speakers.length) body.append(node("div", "meta", t().registryEmpty));
   speakers.forEach((speaker) => {
     const row = node("div", "reg");
+    if (editingId === speaker.id) {
+      // โหมดแก้ชื่อ: แทนที่ทั้งแถวด้วยช่องกรอก ไม่ใช่แถบยืนยันแยกแบบตอนลบ -- การลบ
+      // ต้องถามซ้ำเพราะกู้ไม่ได้ ส่วนการแก้ชื่อพิมพ์ผิดก็แก้ใหม่ได้ ไม่ต้องมีขั้นถาม
+      const input = node("input", "renameInput");
+      // node() ไม่ตั้ง type ให้ และ CSS ของหน้านี้ใช้ selector input[type=text]
+      // ทั้งหมด -- ไม่ตั้งตรงนี้ ช่องกรอกจะโผล่มาแบบไม่มีสไตล์เลย
+      input.type = "text";
+      input.value = speaker.name;
+      input.setAttribute("aria-label", t().rename);
+      const save = node("button", "plain", t().renameSave);
+      const cancel = node("button", "del", t().renameCancel);
+      save.onclick = () => submitRename(speaker, input.value);
+      cancel.onclick = () => {
+        editingId = null;
+        render();
+      };
+      input.onkeydown = (event) => {
+        if (event.key === "Enter") submitRename(speaker, input.value);
+        if (event.key === "Escape") {
+          editingId = null;
+          render();
+        }
+      };
+      row.append(input, save, cancel);
+      body.append(row);
+      // วาดเสร็จแล้วค่อยโฟกัส ไม่งั้นโฟกัสไปตกที่ node ที่ยังไม่ได้อยู่ในหน้า
+      setTimeout(() => {
+        input.focus();
+        input.select();
+      }, 0);
+      return;
+    }
     row.append(
       node("span", null, speaker.name),
       node("span", "spacer"),
       node("span", "n", `${speaker.sample_count} ${t().samples}`)
     );
+    const rename = node("button", "del", t().rename);
+    rename.onclick = () => {
+      editingId = speaker.id;
+      // ปิดแถบยืนยันลบที่อาจค้างอยู่ ไม่งั้นผู้ใช้เห็นคำถาม "ลบใช่ไหม" ค้างอยู่
+      // ข้างบนพร้อมกับช่องแก้ชื่อของอีกคน ซึ่งอ่านแล้วเข้าใจผิดได้ง่าย
+      pendingDelete = null;
+      render();
+    };
+    row.append(rename);
     const remove = node("button", "del", t().remove);
     // ไม่ยิง DELETE ทันที (finding A) -- แค่เปิดแถบยืนยัน ตัวจริงอยู่ที่ el("cfYes")
     // ข้างล่าง ซึ่งอ่าน pendingDelete ตอนกดยืนยันเท่านั้น
@@ -431,6 +487,40 @@ function render() {
     row.append(remove);
     body.append(row);
   });
+}
+
+async function submitRename(speaker, value) {
+  const next = String(value || "").trim();
+  // ชื่อเดิมเป๊ะ ๆ = ไม่ได้แก้อะไร ปิดโหมดแก้ไปเฉย ๆ ดีกว่ายิง request ที่ไม่ทำอะไร
+  // แล้วขึ้นข้อความ "เปลี่ยนชื่อแล้ว" ทั้งที่ไม่มีอะไรเปลี่ยน
+  if (!next || next === speaker.name) {
+    editingId = null;
+    render();
+    return;
+  }
+  editingId = null;
+  try {
+    const response = await fetch(`/api/speakers/${encodeURIComponent(speaker.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: next }),
+    });
+    if (response.ok) {
+      const body = await response.json();
+      // ใช้ชื่อที่เซิร์ฟเวอร์คืนมา ไม่ใช่ที่ผู้ใช้พิมพ์ -- clean_name ฝั่งนั้นตัด
+      // อักขระที่ทำให้ markdown เสียรูปออก ผู้ใช้ต้องเห็นชื่อที่ถูกบันทึกจริง
+      setNotice(fill(t().renamed, { name: (body.speaker || {}).name || next }), true);
+    } else if (response.status === 409) {
+      setNotice(fill(t().errDuplicateName, { name: next }), false);
+    } else if (response.status === 400) {
+      setNotice(t().errBadName, false);
+    } else {
+      setNotice(t().errAction, false);
+    }
+  } catch (err) {
+    setNotice(t().errAction, false);
+  }
+  load();
 }
 
 el("langBtn").onclick = () => {

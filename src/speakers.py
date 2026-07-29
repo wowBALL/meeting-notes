@@ -251,5 +251,42 @@ def add_sample(
     return updated
 
 
+class DuplicateNameError(ValueError):
+    """เปลี่ยนชื่อไปชนกับคนที่มีอยู่แล้วในทะเบียน
+
+    สืบทอดจาก ValueError เพื่อให้ผู้เรียกที่ดักแบบกว้าง ๆ ยังทำงานเหมือนเดิม แต่แยก
+    ชนิดไว้เพราะปลายทาง (HTTP) ต้องบอกผู้ใช้คนละเรื่องกับ "ชื่อว่าง"
+    """
+
+
+def rename_speaker(speakers: list[dict], speaker_id: str, name: str) -> list[dict] | None:
+    """ทะเบียนชุดใหม่ที่คนคนนี้เปลี่ยนชื่อแล้ว คืน None เมื่อไม่มี id นี้ในทะเบียน
+
+    ชื่อผ่าน clean_name เหมือนตอน add_sample -- ชื่อที่แก้ทีหลังต้องปลอดภัยกับ
+    transcript.md เท่ากับชื่อที่ตั้งครั้งแรก ไม่ใช่ช่องทางอ้อมให้ markdown เสียรูป
+
+    ชื่อซ้ำกับคนอื่นถูกปฏิเสธ ไม่ใช่ยุบรวมให้เอง ทั้งที่ add_sample ถือว่า "ชื่อซ้ำ =
+    คนเดิม": ตรงนั้นผู้ใช้กำลังบอกว่าเสียงนี้เป็นของคนที่มีอยู่แล้ว แต่ตรงนี้เขากำลัง
+    แก้ตัวสะกด การยุบสองคนเข้าด้วยกันเพราะพิมพ์ชื่อผิดจะเอาตัวอย่างเสียงของคนละคนมา
+    กองรวมกันถาวรโดยกู้ไม่ได้ -- ปฏิเสธแล้วให้เขาตัดสินใจเองเสียหายน้อยกว่ามาก
+
+    คืนรายการชุดใหม่แทนการแก้ของเดิมในที่ แบบเดียวกับ add_sample/remove_speaker
+    """
+    cleaned = clean_name(name)
+    if not cleaned:
+        raise ValueError("ชื่อผู้พูดว่างเปล่าหลังตัดอักขระที่ใช้ไม่ได้ออก")
+    if not any(speaker.get("id") == speaker_id for speaker in speakers):
+        return None
+    if any(
+        speaker.get("name") == cleaned and speaker.get("id") != speaker_id
+        for speaker in speakers
+    ):
+        raise DuplicateNameError(f'มี "{cleaned}" อยู่ในทะเบียนแล้ว')
+    return [
+        dict(speaker, name=cleaned) if speaker.get("id") == speaker_id else speaker
+        for speaker in speakers
+    ]
+
+
 def remove_speaker(speakers: list[dict], speaker_id: str) -> list[dict]:
     return [speaker for speaker in speakers if speaker.get("id") != speaker_id]

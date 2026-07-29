@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from src.speakers import (
+    DuplicateNameError,
     Match,
     add_sample,
     clean_name,
@@ -14,6 +15,7 @@ from src.speakers import (
     match_known,
     registry_path,
     remove_speaker,
+    rename_speaker,
     save_registry,
 )
 
@@ -240,6 +242,76 @@ def test_match_known_breaks_a_tie_in_favour_of_whoever_is_first_in_the_registry(
 
     assert matches["SPEAKER_00"].speaker_id == "id-1"
     assert matches["SPEAKER_00"].name == "สมหญิง็ม"
+
+
+def test_rename_speaker_changes_the_name_and_keeps_every_sample():
+    registry = [_person("ตั้งชื่อผิด", [[1.0, 0.0], [0.9, 0.1]], speaker_id="id-1")]
+
+    updated = rename_speaker(registry, "id-1", "  สมหญิง็ม  ")
+
+    assert updated[0]["name"] == "สมหญิง็ม"
+    assert updated[0]["id"] == "id-1"
+    # เหตุผลทั้งหมดที่ทำปุ่มนี้: ไม่ต้องลบทิ้งแล้วอัดใหม่เพียงเพราะสะกดผิด
+    assert updated[0]["samples"] == registry[0]["samples"]
+
+
+def test_rename_speaker_cleans_the_name_like_enrolling_does():
+    """ชื่อที่แก้ทีหลังต้องปลอดภัยกับ transcript.md เท่ากับชื่อที่ตั้งครั้งแรก"""
+    registry = [_person("เดิม", [[1.0, 0.0]], speaker_id="id-1")]
+
+    updated = rename_speaker(registry, "id-1", "**สมหญิง**\nเอ็ม")
+
+    assert updated[0]["name"] == "สมหญิง เอ็ม"
+
+
+def test_rename_speaker_does_not_mutate_the_list_it_was_given():
+    registry = [_person("เดิม", [[1.0, 0.0]], speaker_id="id-1")]
+
+    rename_speaker(registry, "id-1", "ใหม่")
+
+    assert registry[0]["name"] == "เดิม"
+
+
+def test_rename_speaker_returns_none_for_an_unknown_id():
+    registry = [_person("สมหญิง็ม", [[1.0, 0.0]], speaker_id="id-1")]
+
+    assert rename_speaker(registry, "ไม่มีจริง", "ชื่อใหม่") is None
+
+
+def test_rename_speaker_rejects_a_name_that_cleans_down_to_nothing():
+    registry = [_person("สมหญิง็ม", [[1.0, 0.0]], speaker_id="id-1")]
+
+    with pytest.raises(ValueError):
+        rename_speaker(registry, "id-1", "  **  ")
+
+
+def test_rename_speaker_refuses_to_collide_with_someone_else():
+    """add_sample ถือว่าชื่อซ้ำ = คนเดิม การรีเนมจึงยุบสองคนเข้าด้วยกันได้ถ้าไม่กัน
+
+    ตรงนั้นผู้ใช้ตั้งใจบอกว่าเป็นคนเดิม ส่วนตรงนี้เขากำลังแก้ตัวสะกด -- การยุบตัวอย่าง
+    เสียงของคนละคนเข้าด้วยกันเพราะพิมพ์ผิดกู้กลับไม่ได้
+    """
+    registry = [
+        _person("สมหญิง็ม", [[1.0, 0.0]], speaker_id="id-1"),
+        _person("พี่บี", [[0.0, 1.0]], speaker_id="id-2"),
+    ]
+
+    with pytest.raises(DuplicateNameError):
+        rename_speaker(registry, "id-2", "สมหญิง็ม")
+
+
+def test_rename_speaker_allows_renaming_to_the_same_name_after_cleaning():
+    """แก้แค่ช่องว่าง/อักขระที่ถูกตัดออก ต้องไม่ถูกมองว่าชนกับตัวเอง"""
+    registry = [_person("สมหญิง็ม", [[1.0, 0.0]], speaker_id="id-1")]
+
+    updated = rename_speaker(registry, "id-1", "  สมหญิง็ม  ")
+
+    assert updated[0]["name"] == "สมหญิง็ม"
+
+
+def test_duplicate_name_error_is_a_value_error():
+    """ผู้เรียกที่ดัก ValueError แบบกว้าง ๆ อยู่แล้วต้องไม่พังเพราะชนิดใหม่นี้"""
+    assert issubclass(DuplicateNameError, ValueError)
 
 
 def test_match_known_ignores_samples_recorded_under_a_different_model():
