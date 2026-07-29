@@ -3,6 +3,7 @@
 const UI = {
   th: {
     title: "ลงทะเบียนเสียงผู้พูด",
+    homeLink: "กลับหน้าหลัก",
     lang: "EN",
     workerOn: "ตัวประมวลผลพร้อม",
     workerOff: "ตัวประมวลผลไม่ได้รัน",
@@ -68,6 +69,7 @@ const UI = {
   },
   en: {
     title: "Enroll speaker voices",
+    homeLink: "Back to main",
     lang: "ไทย",
     workerOn: "Worker ready",
     workerOff: "Worker not running",
@@ -331,6 +333,7 @@ function renderFile(file) {
 
 function render() {
   el("hTitle").textContent = t().title;
+  el("homeLink").textContent = t().homeLink;
   el("langBtn").textContent = t().lang;
   document.title = t().title;
   el("wText").textContent = worker ? t().workerOn : t().workerOff;
