@@ -216,6 +216,17 @@ def extract_voiceprints(audio_path, turns: list[dict], embed) -> dict[str, Voice
     repo นี้คือความล้มเหลวของ "การจำเสียง" ต้องไม่ทำลาย "การแยกผู้พูด" -- ฟังก์ชันนี้จึง
     กลืนทุกอย่างไว้ที่ตัวเอง เหมือนที่ diarize._speaker_embeddings เคยทำก่อนถูกลบ
 
+    การกลืนความล้มเหลวมีสองชั้น แยกกันโดยเจตนา:
+    - ระดับท่อน: `embed` คืน None ให้ท่อนไหนก็ตัดแค่ท่อนนั้นทิ้ง (ผ่าน is_usable_embedding)
+    - ระดับคน: `embed` โยน exception ให้คนไหนก็ตัดแค่คนนั้นทิ้ง (try ต่อคนด้านล่าง) --
+      ไม่ใช่ทั้งฟังก์ชันทิ้งทุกคนเป็น {} เพราะคนหนึ่งพัง
+    ท่อนเดียวที่พังต้องไม่ทำให้คนทั้งคนหาย และคนคนเดียวที่พังต้องไม่ทำให้คนอื่นในที่ประชุม
+    เดียวกันหายไปด้วย -- กฎเดียวกัน ขยับขึ้นมาอีกชั้น
+
+    try ชั้นนอก (ครอบ load_waveform/select_intervals) มีไว้สำหรับปัญหาระดับทั้งไฟล์เท่านั้น
+    ไฟล์อ่านไม่ได้หรือ turns ผิดรูปทำให้ทุกคนเสีย voiceprint พร้อมกันอยู่แล้วโดยธรรมชาติ
+    ของมัน จึงไม่ต้องแยกราย
+
     clamp ช่วงให้อยู่ในความยาวไฟล์ก่อนส่งเข้าโมเดลเสมอ: ขอบท่อนของ pyannote เกินความยาว
     ไฟล์ได้จากการ pad ของ segmentation และ Inference.crop โยน ValueError ทันทีเมื่อเจอ
     (วัดจริง 2026-07-30: end time 25.053s บนไฟล์ยาว 20.053s) ถ้าไม่ clamp ผู้พูดคนสุดท้าย
@@ -239,7 +250,26 @@ def extract_voiceprints(audio_path, turns: list[dict], embed) -> dict[str, Voice
                     clamped.append((start, end))
             if not clamped:
                 continue
-            vectors = embed(waveform, clamped)
+            # try ต่อคน ไม่ใช่ try ครอบทั้งลูป: embed คือการเรียกโมเดลจริงหนึ่งครั้งต่อคน
+            # และมันพังเป็นราย ๆ ได้ (OOM, crop เพี้ยน) ถ้าจับที่ชั้นนอกชั้นเดียว คนที่
+            # คำนวณสำเร็จไปแล้วก่อนหน้าจะหายไปด้วยทั้งที่เสียงของเขาไม่มีอะไรผิด --
+            # เป็นกฎเดียวกับ "ท่อนเดียวที่พังต้องไม่ทำให้คนทั้งคนหาย" ขยับขึ้นมาอีกชั้น
+            try:
+                vectors = embed(waveform, clamped)
+            except Exception as e:
+                logger.warning(
+                    "คำนวณเวกเตอร์ของ %s ไม่สำเร็จ ข้ามคนนี้ไป (คนอื่นไม่กระทบ): %s", label, e
+                )
+                continue
+            if len(vectors) != len(clamped):
+                # สัญญาของ embed คือคืนลิสต์ยาวเท่าอินพุต -- ผิดสัญญาแล้ว zip จะตัดท้ายทิ้ง
+                # เงียบ ๆ (ไม่ได้ผูกผิดช่วง แต่หายไปโดยไม่มีร่องรอย) ต้องมีบรรทัดเดียวใน log
+                logger.warning(
+                    "embed คืนเวกเตอร์ %d ตัวสำหรับ %d ช่วงของ %s -- ส่วนเกินถูกตัดทิ้ง",
+                    len(vectors),
+                    len(clamped),
+                    label,
+                )
             kept = [
                 (span, vector)
                 for span, vector in zip(clamped, vectors)
@@ -255,7 +285,8 @@ def extract_voiceprints(audio_path, turns: list[dict], embed) -> dict[str, Voice
             )
         return prints
     except Exception as e:
-        # กว้างโดยตั้งใจ: soundfile/torch/pyannote โยนอะไรออกมาก็ได้ และ exception ที่หลุด
-        # ออกไปจะไปโดน except กว้างของ pipeline ซึ่งทิ้ง speaker_turns ทั้งชุด
+        # กว้างโดยตั้งใจ: soundfile/torch/pyannote โยนอะไรออกมาก็ได้จาก load_waveform หรือ
+        # select_intervals -- ปัญหาระดับไฟล์ทั้งไฟล์ ไม่ใช่รายคน exception ที่หลุดออกไปจะไป
+        # โดน except กว้างของ pipeline ซึ่งทิ้ง speaker_turns ทั้งชุด
         logger.warning("สร้าง voiceprint ไม่ได้ ไปต่อโดยไม่จำเสียง: %s", e)
         return {}

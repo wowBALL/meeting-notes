@@ -319,6 +319,27 @@ def test_extract_voiceprints_never_raises_when_the_embedder_explodes(tmp_path):
     assert extract_voiceprints(audio, turns, _RecordingEmbedder(raises=True)) == {}
 
 
+def test_extract_voiceprints_survives_one_failed_speaker(tmp_path):
+    # คนหนึ่งพังไม่ใช่เหตุที่คนอื่นต้องเสีย voiceprint ไปด้วย -- ก่อนแก้ ทั้งลูปต่อผู้พูดอยู่
+    # ใต้ try/except เดียว ถ้า B พังหลังจาก A คำนวณสำเร็จไปแล้ว ผลลัพธ์ทั้งชุดจะถูกทิ้งเป็น
+    # {} ทั้งที่เสียงของ A ไม่มีอะไรผิดเลย -- นี่คือกฎเดียวกับที่
+    # test_extract_voiceprints_survives_one_failed_segment ทดสอบไว้ระดับท่อน ขยับขึ้นมา
+    # ระดับคน
+    audio = _write_wav(tmp_path / "a.wav", 60.0)
+    turns = [_turn(0.0, 12.0, "A"), _turn(20.0, 32.0, "B")]
+
+    def embed(waveform, intervals):
+        if intervals[0][0] == 20.0:  # ท่อนของ B เท่านั้นที่พัง
+            raise RuntimeError("boom")
+        return [[end - start, 1.0] for start, end in intervals]
+
+    result = extract_voiceprints(audio, turns, embed)
+
+    assert "A" in result
+    assert isinstance(result["A"], Voiceprint)
+    assert "B" not in result
+
+
 def test_extract_voiceprints_never_raises_when_the_audio_cannot_be_read(tmp_path):
     broken = tmp_path / "broken.wav"
     broken.write_bytes(b"fake audio data")
