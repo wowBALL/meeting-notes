@@ -116,25 +116,62 @@ class RecorderState:
             }
 
 
+def _public_sample(sample) -> dict | None:
+    if not isinstance(sample, dict):
+        return None
+    return {
+        "text": sample.get("text"),
+        "start": sample.get("start"),
+        "end": sample.get("end"),
+    }
+
+
+def _public_guess(guess) -> dict | None:
+    if not isinstance(guess, dict):
+        return None
+    return {"name": guess.get("name"), "evidence": guess.get("evidence")}
+
+
+def _public_suggested(suggested) -> dict | None:
+    if not isinstance(suggested, dict):
+        return None
+    # web/app.js อ่านแค่ suggested.name (ดู pendingHtml) -- speaker_id/score ที่
+    # pending.build_pending_speakers ติดมาด้วยเป็นของฝั่งเซิร์ฟเวอร์ล้วน (ใช้ match_known
+    # ตอนสร้างคิวเท่านั้น) จึงไม่มีเหตุผลต้องออกไปเลย ต่างจาก _public_guess ตรงนี้ที่ guess
+    # ยังมี evidence ให้ผู้ใช้อ่านจริง
+    return {"name": suggested.get("name")}
+
+
 def _public_speaker(speaker: dict) -> dict:
     """ผู้พูดหนึ่งคนในรูปที่ส่งออกหน้าเว็บได้
 
-    allowlist ไม่ใช่ denylist: เดิมตัดแค่คีย์ "embedding" ทิ้ง (denylist ตัวเดียว) ซึ่งเป็น
-    รูรั่วเมื่อไฟล์คิว (แก้มือได้ตามดีไซน์ของโปรเจกต์นี้ ดู pending.py) มีเวกเตอร์แอบอยู่ใต้
-    ชื่อคีย์อื่น (เช่น "raw_embedding") -- คีย์นั้นจะหลุดผ่าน denylist ไปเงียบ ๆ รายการข้างล่าง
-    คือทุกคีย์ที่ web/app.js อ่านจริงจากผู้พูดหนึ่งคน (ดู pendingHtml/speakerAt ใน app.js):
-    label, guess{name,evidence}, samples[]{text,start,end}, suggested{name}, speaking_seconds
-    คีย์อื่นทั้งหมด (diarization_id, model, embedding_model, embedding_seconds, segment_count,
-    embedding หรือเวกเตอร์ใต้ชื่อไหนก็ตาม) เป็นของฝั่งเซิร์ฟเวอร์ล้วน ไม่มีเหตุผลต้องออกไปเลย
-    ใช้ .get() แทนการเข้าถึงตรง ๆ เพราะไฟล์คิวที่แก้มือหรือมาจากเวอร์ชันเก่ากว่านี้อาจไม่มี
-    คีย์พวกนี้ครบ -- หน้าเว็บรับค่า None ของทุกคีย์เหล่านี้ได้อยู่แล้ว (guess ? ... : "",
-    samples || [], suggested ? ... : "")
+    allowlist ของ *ชื่อคีย์* อย่างเดียวไม่พอ (finding 1 ของรีวิวรอบที่สี่): เวอร์ชันก่อนหน้า
+    เลือกคีย์ guess/samples/suggested ถูกแล้ว แต่คืน "ค่า" ของสามคีย์นั้นตรง ๆ โดยไม่กรอง
+    อะไรเลย -- ไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้ (ดู pending.py) ใครใส่เวกเตอร์ไว้ใต้
+    ชื่อคีย์ที่ไม่มีคำว่า "embedding" เลย (เช่น "voiceprint") ใน guess/samples[]/suggested
+    จะหลุดออก endpoint ไปเงียบ ๆ เหมือนที่ระดับการประชุมเคยหลุดมาก่อนหน้านี้ (ดู
+    _public_pending_meeting) ตอนนี้ทั้งสามจุดเป็น allowlist ของค่าจริง ๆ ผ่าน
+    _public_guess/_public_sample/_public_suggested ข้างบน ตรงกับที่ web/app.js อ่านจริง
+    (ดู pendingHtml/speakerAt ใน app.js): label, guess{name,evidence},
+    samples[]{text,start,end}, suggested{name}, speaking_seconds -- คีย์อื่นทั้งหมด
+    (diarization_id, model, embedding_model, embedding_seconds, segment_count, suggested.
+    speaker_id/score, embedding หรือเวกเตอร์ใต้ชื่อไหนก็ตาม) เป็นของฝั่งเซิร์ฟเวอร์ล้วน
+    ไม่มีเหตุผลต้องออกไปเลย ใช้ .get() และเช็ค isinstance ทุกชั้นเพราะไฟล์คิวที่แก้มือหรือ
+    มาจากเวอร์ชันเก่ากว่านี้อาจไม่มีคีย์พวกนี้ครบ หรือมีแต่ผิดชนิด -- หน้าเว็บรับค่า None/[]
+    ของทุกคีย์เหล่านี้ได้อยู่แล้ว (guess ? ... : "", samples || [], suggested ? ... : "")
     """
+    samples = speaker.get("samples")
     return {
         "label": speaker.get("label"),
-        "guess": speaker.get("guess"),
-        "samples": speaker.get("samples"),
-        "suggested": speaker.get("suggested"),
+        "guess": _public_guess(speaker.get("guess")),
+        "samples": [
+            public_sample
+            for public_sample in (
+                _public_sample(item) for item in (samples if isinstance(samples, list) else [])
+            )
+            if public_sample is not None
+        ],
+        "suggested": _public_suggested(speaker.get("suggested")),
         "speaking_seconds": speaker.get("speaking_seconds"),
     }
 
@@ -208,8 +245,20 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             {**w, "text": render(w["code"], w.get("params"), lang)}
             for w in body["warnings"]
         ]
+        # allowlist ไม่ใช่ {**e, ...}: finding 2 ของรีวิวรอบที่สี่ -- entry มาจาก
+        # state/activity.jsonl ตรง ๆ (activity.tail) ซึ่งแก้มือได้ตามดีไซน์เดียวกับไฟล์คิว
+        # (ดู activity.append) การสเปรดทั้ง entry (ts, job, code, level, params) เดิมปล่อย
+        # ให้เวกเตอร์ที่แอบอยู่ใน params ของแถวที่ถูกแก้มือหลุดออก endpoint ไปเงียบ ๆ --
+        # web/app.js (renderLog) อ่านแค่ e.ts, e.level, e.text, e.code เท่านั้น ไม่เคยอ่าน
+        # e.job หรือ e.params เลย ทั้งสองจึงไม่มีเหตุผลต้องออกไป (params ถูกใช้แค่ฝั่ง
+        # เซิร์ฟเวอร์เพื่อ render ข้อความแล้วทิ้ง)
         body["activity"] = [
-            {**e, "text": render(e.get("code", ""), e.get("params"), lang)}
+            {
+                "ts": e.get("ts"),
+                "code": e.get("code"),
+                "level": e.get("level"),
+                "text": render(e.get("code", ""), e.get("params"), lang),
+            }
             for e in activity.tail(config.base_dir, ACTIVITY_LIMIT)
         ]
         return jsonify(body)

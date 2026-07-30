@@ -46,11 +46,51 @@ def _assert_no_embedding_vector_leaks(body):
     ไว้ใต้ชื่ออื่น (เช่น "embedding_backup" หรือ "raw_embedding") จะหลุดผ่าน denylist ทั้งสอง
     ชั้นไปเงียบ ๆ จับที่ "รูปทรง" ของค่าแทน (array ต่อท้ายคีย์ที่มีคำว่า embedding) ไม่ใช่
     ชื่อคีย์ตายตัว -- ยังยอม embedding_model ผ่านได้ตามปกติเพราะค่าของมันเป็นสตริง ไม่ใช่ array
+
+    ยังจับได้แค่คีย์ที่ *ชื่อ* มีคำว่า "embedding" อยู่ดี -- ดู
+    _assert_no_numeric_vector_leaks ด้านล่างสำหรับการ์ดที่ไม่สนใจชื่อคีย์เลย (ตัวที่ควร
+    ใช้กับ endpoint ใหม่ ๆ จากนี้ไป)
     """
     dumped = json.dumps(body)
     leak = re.search(r'"(\w*embedding\w*)":\s*\[', dumped)
     if leak:
         pytest.fail(f'พบเวกเตอร์รั่วใต้คีย์ "{leak.group(1)}": {dumped}')
+
+
+def _assert_no_numeric_vector_leaks(body):
+    """เวกเตอร์เสียงต้องไม่รั่วไม่ว่าจะซ่อนอยู่ใต้คีย์ชื่ออะไรหรือลึกแค่ไหน (finding 3 ของ
+    รีวิวรอบที่สี่)
+
+    _assert_no_embedding_vector_leaks ข้างบนจับคีย์ที่ *ชื่อ* มีคำว่า "embedding" -- รอบ
+    รีวิวที่ 3 และ 4 ของบั๊กนี้ทั้งคู่หลุดผ่านการ์ดแบบนั้นเพราะเวกเตอร์ถูกวางไว้ใต้คีย์ที่ไม่มี
+    คำว่า embedding เลย (guess.voiceprint, samples[].voiceprint, suggested.voiceprint,
+    ระดับบนสุดของ record ก็เคยเป็น "voiceprint" มาก่อน) -- การกันด้วยชื่อคีย์แพ้ได้เสมอแค่
+    เปลี่ยนชื่อคีย์ ตัวนี้จึงเดินทั้งโครงสร้าง response แทน แล้วเช็คที่ "รูปทรง" ของค่าแทน
+    ชื่อคีย์: list ที่ไม่ว่างและทุกสมาชิกเป็นตัวเลข (int/float, ไม่นับ bool ซึ่งเป็น subclass
+    ของ int ใน Python) คือเวกเตอร์เสมอไม่ว่าจะอยู่ใต้คีย์ไหนหรือซ้อนลึกแค่ไหน
+
+    ตรวจแล้วว่าไม่มี endpoint ไหนในไฟล์นี้ที่ควรส่ง numeric array ออกไปจริง ๆ:
+    samples[].start/end, speaking_seconds, elapsed_seconds, sample_count, score ฯลฯ ล้วน
+    เป็นตัวเลขเดี่ยว ไม่ใช่ array เลยสักตัว -- ถ้าอนาคตมี numeric array ที่ชอบธรรมจริง ๆ
+    ให้เพิ่ม path เจาะจงไว้เป็นข้อยกเว้นในฟังก์ชันนี้ ไม่ใช่ผ่อนกฎทั้งหมดให้หลวมลง
+    """
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            if node and all(
+                isinstance(item, (int, float)) and not isinstance(item, bool)
+                for item in node
+            ):
+                pytest.fail(
+                    f'พบ numeric array ที่ {path} (รูปทรงของเวกเตอร์เสียงที่รั่ว): {node}'
+                )
+            for index, item in enumerate(node):
+                walk(item, f"{path}[{index}]")
+
+    walk(body, "$")
 
 
 def make_config(tmp_path):
@@ -485,6 +525,66 @@ def test_pending_speakers_endpoint_never_ships_the_voice_vectors(client, config)
     # เป็นสตริงชื่อโมเดล ไม่ใช่ข้อมูล biometric เหมือนตัวเวกเตอร์เอง จึงไม่ใช่สิ่งที่การ์ดนี้
     # มีไว้กัน) เช็คแบบ substring ธรรมดาจะชนกับ "embedding_model" เข้าเองอย่างผิด ๆ
     _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+
+
+def test_pending_speakers_endpoint_never_ships_vectors_nested_in_guess_samples_or_suggested(
+    client, config
+):
+    """finding 1 ของรีวิวรอบที่สี่: _public_speaker allowlist *ชื่อคีย์* ของ guess/
+    samples/suggested ถูกแล้ว แต่คืนค่าที่อยู่ใต้คีย์เหล่านั้นตรง ๆ โดยไม่กรองอะไรเลย --
+    ไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้ (ดู docstring ของ _write_queue) ใครใส่เวกเตอร์
+    ไว้ใต้คีย์ที่ชื่อไม่มีคำว่า "embedding" เลย (เช่น "voiceprint") ในสามจุดนี้จะหลุดออก
+    endpoint ไปเงียบ ๆ เหมือนที่รอบ 3 เคยปล่อยให้ "voiceprint" หลุดออกจากระดับการประชุมมา
+    แล้วครั้งหนึ่ง -- ทดสอบทั้งสามจุดพร้อมกันเพราะเป็นบั๊กเดียวกันซ้ำสามที่ในฟังก์ชันเดียว
+    """
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["speakers"][0]["guess"] = {"name": "สมชาย", "voiceprint": [1.0, 0.0]}
+    record["speakers"][0]["samples"][0]["voiceprint"] = [0.0, 1.0]
+    record["speakers"][0]["suggested"] = {
+        "name": "สมหญิง",
+        "speaker_id": "sp-1",
+        "score": 0.9,
+        "voiceprint": [0.5, 0.5],
+    }
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    speaker = body["meetings"][0]["speakers"][0]
+    assert "voiceprint" not in speaker["guess"]
+    assert "voiceprint" not in speaker["samples"][0]
+    assert "voiceprint" not in speaker["suggested"]
+    # suggested ไม่ใช่แค่ต้องไม่มีเวกเตอร์ -- ต้องไม่มี speaker_id/score เลยด้วย เพราะ
+    # web/app.js อ่านแค่ suggested.name (ดู pendingHtml ใน app.js) คีย์ทั้งสองไม่มีเหตุผล
+    # ต้องออกไปเลย
+    assert speaker["suggested"] == {"name": "สมหญิง"}
+    assert speaker["guess"] == {"name": "สมชาย", "evidence": None}
+    _assert_no_numeric_vector_leaks(body)
+
+
+def test_state_activity_never_ships_a_vector_hidden_in_params(client, config):
+    """finding 2 ของรีวิวรอบที่สี่: get_state ประกอบ {**e, "text": ...} จาก entry ที่อ่าน
+    ตรงจาก state/activity.jsonl (ดู activity.tail) -- ไฟล์นี้แก้มือได้ตามดีไซน์เดียวกับ
+    ไฟล์คิว (ดู activity.append) วันนี้ยังไม่มี production call ไหนส่ง params ที่เป็นเวกเตอร์
+    จริง (latent ไม่ใช่ live) แต่โครงสร้างเหมือนสามจุดที่แก้ไปแล้วทุกประการ -- web/app.js
+    (renderLog) อ่านแค่ e.ts, e.level, e.text, e.code เท่านั้น ไม่เคยอ่าน e.params เลย
+    """
+    append(
+        config.base_dir,
+        "meet-1",
+        "queued",
+        params={"voiceprint": [1.0, 0.0]},
+    )
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    assert "params" not in entry
+    assert "voiceprint" not in json.dumps(entry)
+    _assert_no_numeric_vector_leaks(body)
 
 
 def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
@@ -497,6 +597,7 @@ def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
     assert body["speakers"] == [
         {"id": registry[0]["id"], "name": "สมหญิง็ม", "sample_count": 2}
     ]
+    _assert_no_numeric_vector_leaks(body)
 
 
 def test_renaming_a_speaker_keeps_their_samples(client, config):
@@ -520,6 +621,7 @@ def test_renaming_a_speaker_keeps_their_samples(client, config):
     assert len(updated[0]["samples"]) == 2
     # เวกเตอร์เสียงต้องไม่ออกไปกับ response -- ข้อมูล biometric
     assert "embedding" not in json.dumps(response.get_json())
+    _assert_no_numeric_vector_leaks(response.get_json())
 
 
 def test_renaming_to_a_name_someone_else_already_has_is_refused(client, config):
@@ -957,6 +1059,7 @@ def test_get_enroll_lists_files_with_state_and_never_leaks_vectors(tmp_path):
     assert body["files"][0]["audio_file"] == "สมชาย.ogg"
     assert body["files"][0]["state"] == "done"
     assert "embedding" not in json.dumps(body)
+    _assert_no_numeric_vector_leaks(body)
 
 
 def test_get_enroll_surfaces_the_changed_during_analysis_flag_once(tmp_path):
@@ -1020,6 +1123,7 @@ def test_get_enroll_also_returns_the_current_registry(tmp_path):
     assert body["speakers"][0]["name"] == "สมหญิง"
     assert body["speakers"][0]["sample_count"] == 1
     assert "embedding" not in json.dumps(body)
+    _assert_no_numeric_vector_leaks(body)
 
 
 def test_get_enroll_reports_the_best_registry_match_when_at_or_above_the_low_threshold(
@@ -1133,6 +1237,7 @@ def test_get_enroll_never_leaks_the_embedding_even_when_a_match_is_found(tmp_pat
     # ไม่ใช่ข้อมูล biometric เหมือนตัวเวกเตอร์เอง) เช็คแบบ substring ธรรมดาจะชนกับ
     # "embedding_model" เข้าเองอย่างผิด ๆ
     _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
 
 
 def test_enroll_similarity_uses_the_stamp_recorded_in_the_result_not_the_current_config(
