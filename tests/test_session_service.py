@@ -12,9 +12,26 @@ from src.config import Config
 from src.pending import build_pending_speakers, pending_dir, write_pending
 from src.session_service import create_app, probe_worker
 from src.speakers import add_sample, load_registry, save_registry
+from src.voiceprint import Voiceprint
 
 MODEL = "pyannote/speaker-diarization-community-1"
 OTHER_MODEL = "pyannote/speaker-diarization-3.1"
+# ป้ายพื้นที่เวกเตอร์ (ตัวที่ match_known ใช้กรองจริง) -- คนละตัวกับ MODEL/OTHER_MODEL
+# ข้างบนซึ่งเป็นโมเดลแยกผู้พูด (diarization) ที่ตอนนี้เป็นแค่ provenance เสริม ค่าเดียวกับ
+# ที่ tests/test_speakers.py และ tests/test_pending.py ใช้ (ตรงกับ DEFAULT_EMBEDDING_MODEL)
+EMBED = "pyannote/wespeaker-voxceleb-resnet34-LM"
+OTHER_EMBED = "speechbrain/spkrec-ecapa-voxceleb"
+
+
+def _sample(embedding, embedding_model=EMBED, **extra):
+    """payload dict สำหรับ add_sample -- ก่อน Task 12 add_sample รับเวกเตอร์เป็น list
+    เดี่ยว ๆ (บวก keyword model=) แต่ตอนนี้ต้องเป็น dict ที่มี embedding_model บังคับเสมอ
+    (ดู speakers.add_sample) ทุกเทสต์ในไฟล์นี้ที่ไม่ได้ตั้งใจทดสอบ "ไม่มีป้าย" โดยเฉพาะ
+    เรียกผ่าน helper นี้แทนการประกอบ dict เองซ้ำทุกจุด
+    """
+    payload = {"embedding": list(embedding), "embedding_model": embedding_model}
+    payload.update(extra)
+    return payload
 
 
 def make_config(tmp_path):
@@ -351,13 +368,42 @@ _PENDING_LABELS = {"SPEAKER_00": "ผู้พูด 1", "SPEAKER_01": "ผู�
 _PENDING_EMBEDDINGS = {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]}
 
 
+def _voiceprints(embeddings, seconds=21.4, segments=7):
+    """dict[label -> Voiceprint] จากเวกเตอร์ดิบ -- build_pending_speakers ต้องการ
+    Voiceprint จริง (มี .embedding/.seconds/.segment_count) ไม่ใช่ list เปล่า ๆ อีกต่อไป
+    (ดู src/voiceprint.py และ tests/test_pending.py ซึ่งใช้ pattern เดียวกันนี้)
+    """
+    return {
+        label: Voiceprint(embedding=list(vector), seconds=seconds, segment_count=segments)
+        for label, vector in embeddings.items()
+    }
+
+
 def _queue_two_speakers(config, meeting="2026-07-28_10-30-standup"):
     write_pending(
         config.base_dir,
         meeting,
         "standup.ogg",
-        build_pending_speakers(_PENDING_MERGED, _PENDING_LABELS, _PENDING_EMBEDDINGS, MODEL),
+        build_pending_speakers(
+            _PENDING_MERGED,
+            _PENDING_LABELS,
+            _voiceprints(_PENDING_EMBEDDINGS),
+            MODEL,
+            EMBED,
+        ),
     )
+    return meeting
+
+
+def _write_queue(base_dir, entry, meeting="m", audio_file="a.ogg"):
+    """เขียนไฟล์คิวหนึ่งผู้พูดตรง ๆ โดยไม่ผ่าน build_pending_speakers -- ใช้จำลองไฟล์คิว
+    ที่ถูกแก้มือหรือมาจากเวอร์ชันเก่ากว่านี้ (เช่นไม่มีคีย์ embedding_model เลย) ซึ่งเป็น
+    รูปทรงที่ build_pending_speakers ของวันนี้ไม่มีทางสร้างออกมาได้เองแล้ว (มันติดป้าย
+    embedding_model ให้ทุกคนในคิวเสมอ) `entry` ทับค่า default ด้านล่างได้ทุกคีย์
+    """
+    base_entry = {"label": "SPEAKER_00", "diarization_id": "SPEAKER_00"}
+    base_entry.update(entry)
+    write_pending(base_dir, meeting, audio_file, [base_entry])
     return meeting
 
 
@@ -388,13 +434,17 @@ def test_pending_speakers_endpoint_never_ships_the_voice_vectors(client, config)
 
     for speaker in body["meetings"][0]["speakers"]:
         assert "embedding" not in speaker
-    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้
-    assert "embedding" not in json.dumps(body)
+    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้ -- เช็คคีย์ JSON
+    # ตรง ๆ ("embedding": ไม่ใช่แค่สตริง "embedding") เพราะทุกคนในคิววันนี้มีคีย์
+    # embedding_model ติดมาด้วยโดยตั้งใจ (ป้ายพื้นที่เวกเตอร์เป็นสตริงชื่อโมเดล ไม่ใช่ข้อมูล
+    # biometric เหมือนตัวเวกเตอร์เอง จึงไม่ใช่สิ่งที่การ์ดนี้มีไว้กัน) เช็คแบบ substring
+    # ธรรมดาจะชนกับ "embedding_model" เข้าเองอย่างผิด ๆ
+    assert '"embedding":' not in json.dumps(body)
 
 
 def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
-    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL)
-    registry = add_sample(registry, "สมหญิง็ม", [0.9, 0.1], source="m2", model=MODEL)
+    registry = add_sample([], "สมหญิง็ม", _sample([1.0, 0.0]), source="m1")
+    registry = add_sample(registry, "สมหญิง็ม", _sample([0.9, 0.1]), source="m2")
     save_registry(config.base_dir, registry)
 
     body = client.get("/api/speakers").get_json()
@@ -408,8 +458,8 @@ def test_renaming_a_speaker_keeps_their_samples(client, config):
     """ชื่อครั้งแรกมาจากชื่อไฟล์ใน enroll/ ซึ่งมักติดส่วนเกินมา (เช่น วงเล็บชื่อเล่น) -- ก่อนมี endpoint นี้
     ทางแก้เดียวคือลบทิ้งแล้วอัดใหม่ ซึ่งทำลายตัวอย่างเสียงที่สะสมไว้เพราะสะกดผิด
     """
-    registry = add_sample([], "สมชาย ( ชาย )", [1.0, 0.0], source="m1", model=MODEL)
-    registry = add_sample(registry, "สมชาย ( ชาย )", [0.9, 0.1], source="m2", model=MODEL)
+    registry = add_sample([], "สมชาย ( ชาย )", _sample([1.0, 0.0]), source="m1")
+    registry = add_sample(registry, "สมชาย ( ชาย )", _sample([0.9, 0.1]), source="m2")
     save_registry(config.base_dir, registry)
 
     response = client.patch(
@@ -428,8 +478,8 @@ def test_renaming_a_speaker_keeps_their_samples(client, config):
 
 
 def test_renaming_to_a_name_someone_else_already_has_is_refused(client, config):
-    registry = add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
-    registry = add_sample(registry, "สมหญิง", [0.0, 1.0], source="m2", model=MODEL)
+    registry = add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
+    registry = add_sample(registry, "สมหญิง", _sample([0.0, 1.0]), source="m2")
     save_registry(config.base_dir, registry)
     target = next(s for s in registry if s["name"] == "สมหญิง")
 
@@ -443,7 +493,7 @@ def test_renaming_to_a_name_someone_else_already_has_is_refused(client, config):
 
 
 def test_renaming_with_an_empty_or_non_string_name_is_a_400(client, config):
-    registry = add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+    registry = add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     save_registry(config.base_dir, registry)
 
     for payload in ({"name": "  **  "}, {"name": ""}, {"name": 42}, {}):
@@ -456,7 +506,7 @@ def test_renaming_with_an_empty_or_non_string_name_is_a_400(client, config):
 
 def test_renaming_an_unknown_speaker_is_a_404(client, config):
     save_registry(
-        config.base_dir, add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        config.base_dir, add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
 
     response = client.patch("/api/speakers/ไม่มีจริง", json={"name": "ชื่อใหม่"})
@@ -466,7 +516,7 @@ def test_renaming_an_unknown_speaker_is_a_404(client, config):
 
 
 def test_deleting_a_speaker_removes_them_from_the_registry(client, config):
-    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL)
+    registry = add_sample([], "สมหญิง็ม", _sample([1.0, 0.0]), source="m1")
     save_registry(config.base_dir, registry)
 
     response = client.delete(f"/api/speakers/{registry[0]['id']}")
@@ -536,7 +586,11 @@ def test_confirming_records_the_model_the_queue_was_built_with_not_the_current_o
         "2026-07-28_10-30-standup",
         "standup.ogg",
         build_pending_speakers(
-            _PENDING_MERGED, _PENDING_LABELS, _PENDING_EMBEDDINGS, OTHER_MODEL
+            _PENDING_MERGED,
+            _PENDING_LABELS,
+            _voiceprints(_PENDING_EMBEDDINGS),
+            OTHER_MODEL,
+            EMBED,
         ),
     )
     _saved_transcript_for(config, "2026-07-28_10-30-standup")
@@ -556,7 +610,7 @@ def test_confirming_records_the_model_the_queue_was_built_with_not_the_current_o
 
 
 def test_confirming_an_existing_person_by_id_adds_a_second_sample(client, config):
-    registry = add_sample([], "สมหญิง็ม", [0.9, 0.1], source="เมื่อวาน", model=MODEL)
+    registry = add_sample([], "สมหญิง็ม", _sample([0.9, 0.1]), source="เมื่อวาน")
     save_registry(config.base_dir, registry)
     meeting = _queue_two_speakers(config)
     _saved_transcript_for(config, meeting)
@@ -652,6 +706,47 @@ def test_confirming_is_a_400_when_the_queued_embedding_is_a_zero_vector(client, 
     assert response.status_code == 400
     assert response.get_json()["error"] == "bad_embedding"
     assert load_registry(config.base_dir) == []
+
+
+def test_confirm_speaker_refuses_a_queue_entry_with_no_embedding_model(client, tmp_path):
+    # คิวที่สร้างไว้ก่อนอัปเกรด (หรือถูกแก้มือ) ต้องถูกปฏิเสธพร้อมเหตุผลของตัวเอง ไม่ใช่
+    # 500 ที่ไม่มีใครอธิบาย และไม่ใช่ผ่านไปเก็บ sample ที่ match_known จะข้ามตลอดกาล --
+    # เวกเตอร์ตัวนี้ใช้ได้ (is_usable_embedding ผ่าน) ปัญหาคือไม่มีคีย์ embedding_model เลย
+    meeting = _write_queue(tmp_path, entry={"embedding": [1.0, 0.0]})
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "SPEAKER_00", "name": "satit"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "missing_embedding_model"
+    assert load_registry(tmp_path) == []
+
+
+def test_confirm_speaker_stores_the_stamp_from_the_queue_not_from_config(client, tmp_path):
+    # คิวอยู่ข้ามวันได้ ผู้ใช้แก้ EMBEDDING_MODEL ระหว่างนั้นได้ -- ป้ายที่ถูกคือของคิว
+    meeting = _write_queue(
+        tmp_path,
+        entry={
+            "embedding": [1.0, 0.0],
+            "embedding_model": EMBED,
+            "embedding_seconds": 21.4,
+            "segment_count": 7,
+            "model": MODEL,
+        },
+    )
+
+    client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "SPEAKER_00", "name": "satit"},
+    )
+
+    sample = load_registry(tmp_path)[0]["samples"][0]
+    assert sample["embedding_model"] == EMBED
+    assert sample["embedding_seconds"] == 21.4
+    assert sample["segment_count"] == 7
+    assert sample["model"] == MODEL
 
 
 def test_confirming_an_unknown_meeting_or_label_is_a_404(client, config):
@@ -871,7 +966,7 @@ def test_get_enroll_reports_whether_the_worker_is_running(tmp_path):
 def test_get_enroll_also_returns_the_current_registry(tmp_path):
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมหญิง", [0.1, 0.2], source="enroll:x.ogg", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมหญิง", _sample([0.1, 0.2]), source="enroll:x.ogg")
     )
     client = create_app(config).test_client()
 
@@ -891,13 +986,16 @@ def test_get_enroll_reports_the_best_registry_match_when_at_or_above_the_low_thr
     """
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
     # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.50) กับ HIGH (0.80) เกณฑ์
-    # เริ่มต้นของ Config พอดี ไม่ถึงขั้นเสนอให้รวมชื่อ แต่ต้องเตือนให้เห็น
+    # เริ่มต้นของ Config พอดี ไม่ถึงขั้นเสนอให้รวมชื่อ แต่ต้องเตือนให้เห็น -- embedding_model
+    # ต้องตรงกับป้ายในทะเบียนไม่งั้น match_known ข้ามตัวอย่างนี้ไปเงียบ ๆ (คนละพื้นที่เวกเตอร์)
     write_ok_result(
-        tmp_path, "สมชาย.ogg", {"status": "ok", "model": MODEL, "embedding": [0.6, 0.8]}
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "model": MODEL, "embedding_model": EMBED, "embedding": [0.6, 0.8]},
     )
     client = create_app(config).test_client()
 
@@ -916,12 +1014,14 @@ def test_get_enroll_flags_a_match_at_or_above_the_high_threshold(tmp_path):
     """
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
     write_ok_result(
-            tmp_path, "สมชาย.ogg", {"status": "ok", "model": MODEL, "embedding": [1.0, 0.0]}
-        )
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "model": MODEL, "embedding_model": EMBED, "embedding": [1.0, 0.0]},
+    )
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
@@ -937,10 +1037,14 @@ def test_get_enroll_omits_match_below_the_low_threshold(tmp_path):
     """
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.0, 1.0]})
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding_model": EMBED, "embedding": [0.0, 1.0]},
+    )
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
@@ -955,18 +1059,47 @@ def test_get_enroll_never_leaks_the_embedding_even_when_a_match_is_found(tmp_pat
     """
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
     write_ok_result(
-            tmp_path, "สมชาย.ogg", {"status": "ok", "model": MODEL, "embedding": [1.0, 0.0]}
-        )
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "model": MODEL, "embedding_model": EMBED, "embedding": [1.0, 0.0]},
+    )
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
 
     assert "match" in body["files"][0]
-    assert "embedding" not in json.dumps(body)
+    # เช็คคีย์ JSON ตรง ๆ ไม่ใช่แค่สตริง "embedding" ธรรมดา -- ผลลัพธ์ทุกไฟล์วันนี้มีคีย์
+    # embedding_model ติดมาด้วยโดยตั้งใจ (สตริงชื่อโมเดล ไม่ใช่ข้อมูล biometric เหมือน
+    # ตัวเวกเตอร์เอง) เช็คแบบ substring ธรรมดาจะชนกับ "embedding_model" เข้าเองอย่างผิด ๆ
+    assert '"embedding":' not in json.dumps(body)
+
+
+def test_enroll_similarity_uses_the_stamp_recorded_in_the_result_not_the_current_config(
+    tmp_path,
+):
+    """เวกเตอร์ใน result.json วิเคราะห์ไว้ตอนไหนก็ได้ (ผู้ใช้สลับ EMBEDDING_MODEL ได้
+    ระหว่างที่ยังไม่กดยืนยัน) ต้องเทียบกับทะเบียนในพื้นที่ของ *มัน* เอง ไม่ใช่ของโมเดลที่
+    ตั้งอยู่ตอนนี้ -- ตัวเลขเหมือนกันเป๊ะ (cosine 1.0) แต่คนละพื้นที่เวกเตอร์ต้องไม่ match กัน
+    """
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0], embedding_model=EMBED), source="m1")
+    )
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "model": MODEL, "embedding_model": OTHER_EMBED, "embedding": [1.0, 0.0]},
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    assert "match" not in body["files"][0]
 
 
 def test_list_speakers_and_list_enroll_share_the_projection_helper():
@@ -994,7 +1127,7 @@ def test_speakers_and_enroll_endpoints_report_the_same_projection_for_a_speaker(
     """พฤติกรรมที่สังเกตได้จากภายนอกต้องไม่เปลี่ยนหลังรวม helper -- shape ของทั้งสอง
     endpoint ต้องยังตรงกันทุกฟิลด์เป๊ะเหมือนก่อนแก้
     """
-    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL)
+    registry = add_sample([], "สมหญิง็ม", _sample([1.0, 0.0]), source="m1")
     save_registry(config.base_dir, registry)
 
     speakers_body = client.get("/api/speakers").get_json()
@@ -1047,7 +1180,9 @@ def test_post_confirm_saves_the_embedding_and_archives_the_file(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
     write_ok_result(
-        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1, 0.2, 0.3]}
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding_model": EMBED, "embedding": [0.1, 0.2, 0.3]},
     )
     client = create_app(config).test_client()
 
@@ -1067,10 +1202,12 @@ def test_post_confirm_saves_the_embedding_and_archives_the_file(tmp_path):
 def test_post_confirm_merges_into_an_existing_person_of_the_same_name(tmp_path):
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [0.9], source="meeting-1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([0.9]), source="meeting-1")
     )
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     client.post("/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"})
@@ -1142,7 +1279,9 @@ def test_post_confirm_refuses_a_huge_vector_with_a_400_not_a_500(tmp_path):
 def test_post_confirm_refuses_a_name_that_is_empty_after_cleaning(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     response = client.post(
@@ -1158,7 +1297,9 @@ def test_post_confirm_refuses_a_name_that_is_empty_after_cleaning(tmp_path):
 def test_post_confirm_leaves_the_file_alone_when_saving_the_registry_fails(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     with patch("src.speakers.save_registry", side_effect=OSError("disk full")):
@@ -1177,7 +1318,9 @@ def test_post_confirm_still_returns_200_when_archiving_the_file_fails(tmp_path):
     # การตอบ error ตรงนี้จะทำให้ผู้ใช้กดยืนยันซ้ำและได้ตัวอย่างซ้ำเข้าทะเบียนคนเดิม
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     with patch("src.enroll.archive", side_effect=OSError("disk full")):
@@ -1210,7 +1353,9 @@ def test_post_confirm_survives_a_non_os_error_from_archive_after_the_registry_is
     """
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     with patch("src.enroll.archive", side_effect=RuntimeError("unexpected")):

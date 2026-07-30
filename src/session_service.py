@@ -365,6 +365,14 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         if not speakers.is_usable_embedding(entry.get("embedding")):
             return jsonify({"error": "bad_embedding"}), 400
 
+        # ป้ายพื้นที่เวกเตอร์เป็นเงื่อนไขก่อนแตะทะเบียน ไม่ใช่หลังจากนั้น: sample ที่ไม่มีป้าย
+        # จะถูก match_known ข้ามตลอดกาล ผู้ใช้จะเห็นเป็น "กดยืนยันแล้วแต่ระบบไม่จำ" ซึ่งไม่มี
+        # อะไรอธิบายได้เลย -- ปฏิเสธตรงนี้พร้อมเหตุผลเสียหายน้อยกว่ามาก ต้องเป็นรหัสของตัวเอง
+        # ไม่ใช่ bad_embedding ข้างบน: เวกเตอร์ตัวนี้ใช้ได้ (ผ่านด่านนั้นมาแล้ว) ปัญหาคือไม่รู้ว่า
+        # มันอยู่พื้นที่ไหน ซึ่งเป็นคนละเหตุผลกันโดยสิ้นเชิงและต้องบอกผู้ใช้คนละเรื่อง
+        if speakers.sample_embedding_model(entry) is None:
+            return jsonify({"error": "missing_embedding_model"}), 400
+
         name = payload.get("name")
         speaker_id = payload.get("speaker_id")
         # ล็อกคุมช่วง อ่านทะเบียน -> แก้ -> เขียนทับ เท่านั้น: service รันด้วย
@@ -386,13 +394,21 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                 speakers.add_sample(
                     registry,
                     cleaned,
-                    entry["embedding"],
+                    {
+                        "embedding": entry["embedding"],
+                        # ป้ายจากคิว ไม่ใช่ config.embedding_model ตอนนี้ -- คิวอยู่ข้ามวันได้
+                        # ผู้ใช้สลับ EMBEDDING_MODEL ระหว่างนั้นได้ ป้ายที่ติดตอนสร้างคิวคือ
+                        # ป้ายเดียวที่บอกความจริงเรื่องพื้นที่เวกเตอร์ (ผ่านด่านข้างบนมาแล้ว
+                        # ว่าไม่ใช่ None)
+                        "embedding_model": speakers.sample_embedding_model(entry),
+                        "embedding_seconds": entry.get("embedding_seconds"),
+                        "segment_count": entry.get("segment_count"),
+                        # โมเดลแยกผู้พูด (diarization) ที่ติดมากับคิว -- เป็น provenance
+                        # เสริมเท่านั้นตอนนี้ (ดู speakers.add_sample) ไม่ใช่ป้ายที่
+                        # match_known ใช้กรองอีกต่อไป นั่นคือ embedding_model ด้านบน
+                        "model": entry.get("model"),
+                    },
                     source=meeting,
-                    # โมเดลที่ติดมากับคิว ไม่ใช่ config.diarization_model ตอนนี้ --
-                    # คิวอยู่ข้ามวันได้ ผู้ใช้สลับโมเดลระหว่างนั้นแล้วเวกเตอร์ตัวนี้
-                    # ยังเป็นของพื้นที่เดิมอยู่ดี คิวเก่าที่ไม่มีป้ายตกไปที่ 3.1 ตาม
-                    # speakers.sample_model ซึ่งเป็นความจริงของ repo นี้ก่อนมีป้าย
-                    model=speakers.sample_model(entry),
                 ),
             )
 
@@ -469,14 +485,22 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             embedding = result.get("embedding") if result else None
             if not speakers.is_usable_embedding(embedding):
                 continue
+            # ผลที่ไม่มีป้ายพื้นที่เวกเตอร์ (มาจากก่อนฟีเจอร์นี้ หรือถูกแก้มือ) ต้องถูกข้าม
+            # ไปเงียบ ๆ ตรงนี้ ไม่ใช่ raise เหมือน confirm_speaker/confirm_enroll -- endpoint
+            # นี้แค่โชว์คะแนนความคล้ายให้ดูเฉย ๆ ไม่ได้เขียนอะไรลงทะเบียนเลย ไฟล์ที่ยืนยันพื้นที่
+            # ไม่ได้ก็แค่ไม่มีคะแนนให้โชว์ ไม่ใช่เหตุผลที่ทำให้ทั้งหน้าพัง
+            stamp = speakers.sample_embedding_model(result)
+            if stamp is None:
+                continue
             matches = speakers.match_known(
                 {entry["audio_file"]: embedding},
                 registry,
                 config.speaker_match_high,
                 config.speaker_match_low,
                 # เวกเตอร์นี้มาจาก result.json ที่วิเคราะห์ไว้ตอนไหนก็ได้ -- เทียบกับ
-                # ทะเบียนในพื้นที่ของ *มัน* ไม่ใช่ของโมเดลที่ตั้งอยู่ตอนนี้
-                model=speakers.sample_model(result),
+                # ทะเบียนในพื้นที่ของ *มัน* ไม่ใช่ของโมเดลที่ตั้งอยู่ตอนนี้ ป้ายมาจาก
+                # ผลลัพธ์เอง (เช็คผ่านด่านข้างบนแล้วว่าไม่ใช่ None) ไม่ใช่ config.embedding_model
+                embedding_model=stamp,
             )
             match = matches.get(entry["audio_file"])
             if match is not None:
@@ -542,6 +566,13 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         if not speakers.is_usable_embedding(result.get("embedding")):
             return jsonify({"error": "bad_embedding"}), 400
 
+        # เหมือนกับ confirm_speaker ทุกประการ (ดูคอมเมนต์ที่นั่น): ผลที่ไม่มีป้ายพื้นที่
+        # เวกเตอร์เลยต้องถูกปฏิเสธก่อนแตะทะเบียน ไม่ใช่หลังจากนั้น -- ไม่งั้นจะได้ sample ที่
+        # match_known ข้ามตลอดกาลอย่างเงียบ ๆ ต้องเป็นรหัสของตัวเอง ไม่ใช่ bad_embedding
+        # (เวกเตอร์ใช้ได้ ปัญหาคือไม่รู้ว่ามันอยู่พื้นที่ไหน)
+        if speakers.sample_embedding_model(result) is None:
+            return jsonify({"error": "missing_embedding_model"}), 400
+
         name = payload.get("name")
         if not isinstance(name, str) or not speakers.clean_name(name):
             return jsonify({"error": "bad_name"}), 400
@@ -555,11 +586,19 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                     speakers.add_sample(
                         registry,
                         cleaned,
-                        result["embedding"],
+                        {
+                            "embedding": result["embedding"],
+                            # ป้ายพื้นที่เวกเตอร์จริงที่ enroll.analyze บันทึกไว้ (ผ่านด่าน
+                            # ข้างบนแล้วว่าไม่ใช่ None) ไม่ใช่ค่าใน config ตอนกดยืนยัน --
+                            # ผลค้างข้ามการสลับ EMBEDDING_MODEL ได้
+                            "embedding_model": speakers.sample_embedding_model(result),
+                            "embedding_seconds": result.get("embedding_seconds"),
+                            "segment_count": result.get("segment_count"),
+                            # โมเดลแยกผู้พูดที่วิเคราะห์ไฟล์นี้จริง ๆ -- provenance เสริม
+                            # เท่านั้น ไม่ใช่ป้ายที่ match_known ใช้กรองอีกต่อไป
+                            "model": result.get("model"),
+                        },
                         source=f"enroll:{audio_file}",
-                        # โมเดลที่วิเคราะห์ไฟล์นี้จริง ๆ (enroll.analyze บันทึกไว้)
-                        # ไม่ใช่ค่าใน config ตอนกดยืนยัน -- ผลค้างข้ามการสลับโมเดลได้
-                        model=speakers.sample_model(result),
                     ),
                 )
             except OSError as e:
