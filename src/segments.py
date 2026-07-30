@@ -33,6 +33,18 @@ OPUS_BITRATE = "48k"
 CLEANUP_ATTEMPTS = 4
 CLEANUP_BASE_DELAY = 0.5
 
+# finish_session ถูกเรียกจากเธรดของ session_service ซึ่งวิดเจ็ต (COWORK Desktop ตั้งแต่
+# v1.8.7) เปิดด้วย pythonw.exe -- GUI subsystem จึงไม่มี console เลย ผลข้างเคียงคือลูกที่
+# เป็น console subsystem ทุกตัวต้องถูกสร้าง console ใหม่ให้ ซึ่งบน Windows 11 จะถูกส่งต่อ
+# ให้ Windows Terminal: ffmpeg จึงเปิดหน้าต่างดำค้างไว้ทั้งช่วง encode ทุกครั้งที่ปิดห้อง
+#
+# ตั้งใจไม่ import ค่านี้จาก session_service (และมันก็ไม่ควร import จากที่นี่) -- segments
+# ต้องใช้ได้จาก watcher ที่ไม่รู้จัก service เลย สองที่จึงประกาศเองและมีเทสต์ของตัวเอง
+# กันไว้คนละตัว การหายไปของธงฝั่งใดฝั่งหนึ่งจึงมีเทสต์จับได้เสมอ
+#
+# getattr ไว้เพราะค่านี้มีเฉพาะบน Windows -- เทสต์รันบนแพลตฟอร์มอื่นได้เหมือนเดิม
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # A libsndfile WAV header is well under this; anything larger holds real samples.
 # A part left behind by a killed process still has its audio on disk even though
 # its RIFF header claims zero length -- ffmpeg reads such a file to EOF.
@@ -222,6 +234,7 @@ def finish_session(
         ffmpeg_concat_command(concat_list_path, encoded_path, bitrate),
         check=True,
         capture_output=True,
+        creationflags=_NO_WINDOW,
     )
 
     # BEFORE the audio is published, not after: os.replace below is the moment the
