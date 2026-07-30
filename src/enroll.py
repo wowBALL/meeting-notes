@@ -19,7 +19,7 @@ from typing import Any
 
 from src.audio_convert import convert_to_wav
 from src.diarize import diarize_audio
-from src.speakers import MIN_SPEAKING_SECONDS, clean_name
+from src.speakers import MIN_SPEAKING_SECONDS, clean_name, drop_numeric_vectors
 from src.storage import replace_with_retry
 from src.voiceprint import clean_intervals, extract_voiceprints, select_intervals
 
@@ -839,6 +839,12 @@ def list_entries(base_dir: Path) -> list[dict]:
     หน้าเว็บไม่ได้ใช้เวกเตอร์เสียง และมันเป็นข้อมูล biometric ที่ไม่ควรมีสำเนาเพิ่มในที่ที่
     ไม่จำเป็น เดิมใช้ denylist (ตัดแค่คีย์ "embedding" ทิ้ง) ซึ่งกันได้แค่คีย์ชื่อนั้นเป๊ะ ๆ
 
+    finding 1 ของรีวิวรอบที่ห้า: allowlist ชื่อคีย์อย่างเดียวยังไม่พอ เพราะมันกรอง "ชื่อ" แล้ว
+    คืน "ค่า" ดิบ ๆ -- เวกเตอร์ที่ถูกวางเป็นค่าของ speaking_seconds/speaker_count/
+    suggested_name หรือเป็นซับทรีทั้งก้อนใต้ reason จึงหลุดออกไปได้ทั้งที่ allowlist ทำงาน
+    ถูกทุกประการ ตอนนี้ทุกอย่างผ่าน speakers.drop_numeric_vectors ซึ่งกรองด้วยรูปทรงของค่า
+    ไม่ใช่ชื่อคีย์ (ดู docstring ของมันสำหรับประวัติสี่รอบก่อนหน้า)
+
     กวาด sidecar กำพร้าทิ้งทุกครั้งที่เรียก (finding 1) เพราะจุดนี้กำลังแจกแจงโฟลเดอร์
     enroll/ อยู่แล้ว และเป็นจุดที่หน้าเว็บ poll ถี่ที่สุด
 
@@ -879,6 +885,12 @@ def list_entries(base_dir: Path) -> list[dict]:
             request_queued = False
         result = read_result(base_dir, audio_file)
         if result is not None:
+            # finding 1 ของรีวิวรอบที่ห้า: กรองด้วยรูปทรงตั้งแต่ตรงนี้ ก่อน allowlist ชื่อคีย์
+            # ด้านล่าง ไม่ใช่หลัง -- ทำหลังจะได้ผลเหมือนกันเรื่องเวกเตอร์ แต่จะทิ้ง
+            # suggested_name ที่ถูกต้อง (มาจากชื่อไฟล์ ดู entry ด้านล่าง) ให้กลายเป็นช่องว่าง
+            # เมื่อ result.json ที่ถูกแก้มือเอาเวกเตอร์มาทับคีย์เดียวกัน กรองก่อนแล้ว update
+            # จึงไม่มีอะไรมาทับ ค่าที่เซิร์ฟเวอร์คำนวณเองรอด
+            result = drop_numeric_vectors(result)
             state = "done"
         elif request_queued:
             state = "queued"
@@ -896,5 +908,8 @@ def list_entries(base_dir: Path) -> list[dict]:
             entry.update(
                 {key: value for key, value in result.items() if key in _RESULT_ALLOWED_KEYS}
             )
-        entries.append(entry)
+        # ตาข่ายชั้นล่างอีกครั้งบน entry ทั้งก้อน ไม่ใช่แค่ result: คีย์ที่ใครเพิ่มเข้า
+        # _RESULT_ALLOWED_KEYS ทีหลัง (หรือคีย์ใหม่ที่ประกอบขึ้นตรงนี้) ต้องปลอดภัยเองตั้งแต่
+        # ต้น ไม่ต้องรอให้มีคนมาเขียนชั้นของมันเป็นรีวิวรอบที่หก
+        entries.append(drop_numeric_vectors(entry))
     return entries

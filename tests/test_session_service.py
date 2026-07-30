@@ -565,12 +565,45 @@ def test_pending_speakers_endpoint_never_ships_vectors_nested_in_guess_samples_o
     _assert_no_numeric_vector_leaks(body)
 
 
+def test_pending_speakers_endpoint_drops_vectors_planted_as_values_of_allowlisted_keys(
+    client, config
+):
+    """finding 1 ของรีวิวรอบที่ห้า: allowlist กรอง "ชื่อคีย์" แล้วคืน "ค่า" ของคีย์นั้นดิบ ๆ
+
+    สี่รอบที่ผ่านมาแก้แบบเดียวกันหมด คือแจกแจงชื่อคีย์เพิ่มอีกหนึ่งชั้น แล้วรอบถัดไปก็เจอ
+    รูรั่วที่ลึกลงไปอีกหนึ่งชั้นทุกครั้ง -- รอบนี้เวกเตอร์ไม่ได้อยู่ใต้ "คีย์ใหม่" ที่ allowlist
+    ไม่รู้จักอีกแล้ว แต่เป็น *ค่า* ของคีย์ที่อยู่ใน allowlist เองทุกตัว (meeting_dir, label,
+    speaking_seconds, guess.evidence, samples[].start, suggested.name) การไล่แจกแจงชื่อคีย์
+    อีกชั้นจึงกันกรณีนี้ไม่ได้เลยไม่ว่าจะไล่ไปกี่ชั้น ต้องกรองด้วย "รูปทรง" ของค่าแทน
+    (ดู speakers.drop_numeric_vectors) -- หกจุดนี้ทำซ้ำได้จริงบน endpoint ที่รันอยู่
+    """
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["meeting_dir"] = [0.11, 0.12]
+    speaker = record["speakers"][0]
+    speaker["label"] = [0.21, 0.22]
+    speaker["speaking_seconds"] = [0.31, 0.32]
+    speaker["guess"] = {"name": "สมชาย", "evidence": [0.41, 0.42]}
+    speaker["samples"][0]["start"] = [0.51, 0.52]
+    speaker["suggested"] = {"name": [0.61, 0.62]}
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+
+
 def test_state_activity_never_ships_a_vector_hidden_in_params(client, config):
     """finding 2 ของรีวิวรอบที่สี่: get_state ประกอบ {**e, "text": ...} จาก entry ที่อ่าน
     ตรงจาก state/activity.jsonl (ดู activity.tail) -- ไฟล์นี้แก้มือได้ตามดีไซน์เดียวกับ
     ไฟล์คิว (ดู activity.append) วันนี้ยังไม่มี production call ไหนส่ง params ที่เป็นเวกเตอร์
-    จริง (latent ไม่ใช่ live) แต่โครงสร้างเหมือนสามจุดที่แก้ไปแล้วทุกประการ -- web/app.js
-    (renderLog) อ่านแค่ e.ts, e.level, e.text, e.code เท่านั้น ไม่เคยอ่าน e.params เลย
+    จริง (latent ไม่ใช่ live) แต่โครงสร้างเหมือนสามจุดที่แก้ไปแล้วทุกประการ
+
+    รอบที่ห้าแก้วิธีกัน: รอบที่สี่ "ตัด params ทิ้งทั้งก้อน" ซึ่งพังของจริง (ดู
+    test_state_activity_still_serves_job_and_params_path ด้านล่าง) -- params ต้องออกไป
+    ตามปกติ แต่ถูกกรองด้วยรูปทรงจนไม่มีเวกเตอร์เหลือ
     """
     append(
         config.base_dir,
@@ -582,9 +615,41 @@ def test_state_activity_never_ships_a_vector_hidden_in_params(client, config):
     body = client.get("/api/state").get_json()
 
     entry = body["activity"][-1]
-    assert "params" not in entry
+    assert "voiceprint" not in entry["params"]
     assert "voiceprint" not in json.dumps(entry)
     _assert_no_numeric_vector_leaks(body)
+
+
+def test_state_activity_still_serves_job_and_params_path(client, config):
+    """finding 2 ของรีวิวรอบที่ห้า -- regression จริง ไม่ใช่รูรั่วที่ยังไม่ถูกใช้
+
+    รอบที่สี่ตัด job/params ออกจาก /api/state โดยอ้าง grep ของ renderLog ตัวเดียว ซึ่งเป็น
+    grep ที่ไม่ครบ: e.job ถูกอ่านอีกสามที่ -- web/app.js jobProgress() (แถบความคืบหน้าหลัง
+    ปิดห้อง) web/app.js poll() (สัญญาณ speakers_pending ที่ทำให้คิวตั้งชื่อโผล่มา) และ
+    D:\\COWORK\\COWORK Desktop\\meetingrun.js progressOf()/finishedMeetingId() (ซึ่งอ่าน
+    e.params.path ด้วย) ผลจริงคือหน้าจอค้างที่ "กำลังประมวลผล" ขั้นที่ 1 ตลอดกาล viewDone
+    ไปไม่ถึง และเพราะ viewProcessing ไม่ได้ render pendingHtml() คิวตั้งชื่อ -- ซึ่งเป็น
+    เหตุผลทั้งหมดที่ฟีเจอร์นี้มีอยู่ -- จึงเข้าไม่ถึงจากหน้าเว็บเลย
+
+    job เป็นสตริงชื่องาน การตัดมันทิ้งจึงไม่เคยกันเวกเตอร์อะไรได้ตั้งแต่แรก
+    """
+    append(
+        config.base_dir,
+        "2026-07-30_10-00-standup",
+        "meeting_done",
+        params={"path": "meetings/2026-07-30_10-00-standup"},
+    )
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    assert entry["job"] == "2026-07-30_10-00-standup"
+    assert entry["params"]["path"] == "meetings/2026-07-30_10-00-standup"
+    # ฟิลด์ที่ renderLog/logHtml อ่านต้องยังอยู่ครบเหมือนเดิมด้วย
+    assert entry["code"] == "meeting_done"
+    assert entry["level"] == "info"
+    assert entry["ts"]
+    assert entry["text"]
 
 
 def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
@@ -1238,6 +1303,40 @@ def test_get_enroll_never_leaks_the_embedding_even_when_a_match_is_found(tmp_pat
     # "embedding_model" เข้าเองอย่างผิด ๆ
     _assert_no_embedding_vector_leaks(body)
     _assert_no_numeric_vector_leaks(body)
+
+
+def test_get_enroll_drops_vectors_planted_as_values_of_allowlisted_keys(tmp_path):
+    """finding 1 ของรีวิวรอบที่ห้า ฝั่ง /api/enroll -- คู่แฝดของเทสต์ชื่อเดียวกันฝั่งคิว
+
+    _RESULT_ALLOWED_KEYS กรอง "ชื่อคีย์" แล้ว entry.update() เอา "ค่า" ของคีย์เหล่านั้นมา
+    ตรง ๆ -- result.json แก้มือได้ตามดีไซน์ของโปรเจกต์นี้ เวกเตอร์ที่วางเป็นค่าของ
+    speaking_seconds/speaker_count/suggested_name จึงหลุดออกไปได้ทั้งที่ allowlist ทำงาน
+    ถูกต้องทุกประการ และ reason ที่เป็น dict ทั้งก้อนพิสูจน์ว่าความลึกไม่มีขอบ: ซับทรี
+    อะไรก็ได้ที่ห้อยอยู่ใต้คีย์ใน allowlist จะออกไปทั้งดุ้น
+    """
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {
+            "status": "rejected",
+            "speaking_seconds": [0.11, 0.12],
+            "speaker_count": [0.21, 0.22],
+            "suggested_name": [0.31, 0.32],
+            "reason": {"voiceprint": [0.41, 0.42]},
+        },
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+    # ค่าที่เซิร์ฟเวอร์คำนวณเองต้องไม่หายไปด้วย: suggested_name ที่ถูกต้องมาจากชื่อไฟล์
+    # (suggested_name_from) และถูกทับด้วยของปลอมจาก result.json -- ตัดของปลอมทิ้งแล้ว
+    # ของจริงต้องยังอยู่ ไม่ใช่กลายเป็นช่องว่าง
+    assert body["files"][0]["suggested_name"] == "สมชาย"
 
 
 def test_enroll_similarity_uses_the_stamp_recorded_in_the_result_not_the_current_config(

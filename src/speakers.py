@@ -38,6 +38,77 @@ MAX_NAME_LENGTH = 60
 MIN_SPEAKING_SECONDS = 10.0
 
 
+def _is_numeric_vector(value) -> bool:
+    """ค่านี้มี "รูปทรง" ของเวกเตอร์เสียงบนสายหรือไม่
+
+    bool ไม่นับเป็นตัวเลขแม้จะเป็น subclass ของ int ใน Python -- [true, false] คือธง
+    ไม่ใช่เวกเตอร์ และ list ว่างก็ไม่นับ เพราะ [] คือ "ไม่มีตัวอย่างเสียง/ไม่มีคำเตือน"
+    ที่หน้าเว็บต้องได้เห็นตามปกติ (samples || [], warnings || []) ไม่ใช่ข้อมูล biometric
+    """
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(
+            isinstance(item, (int, float)) and not isinstance(item, bool)
+            for item in value
+        )
+    )
+
+
+def drop_numeric_vectors(value):
+    """ตัดเวกเตอร์เสียงออกจากสิ่งที่กำลังจะถูกส่งออกทาง HTTP -- กรองด้วย "รูปทรง" ไม่ใช่ชื่อคีย์
+
+    ทำไมไม่กรองด้วยชื่อคีย์อีกต่อไป: บั๊กเดียวกันนี้ถูกแก้มาแล้วสี่รอบ และทั้งสี่รอบแก้ด้วย
+    วิธีเดียวกันหมด คือ "แจกแจงชื่อคีย์เพิ่มอีกหนึ่งชั้น" แล้วรีวิวรอบถัดไปก็เจอรูรั่วที่ลึกลง
+    ไปอีกหนึ่งชั้นทุกครั้ง:
+
+      รอบ 1 -- ตัดคีย์ชื่อ "embedding" ทิ้ง (denylist หนึ่งชื่อ)
+               แพ้ให้เวกเตอร์ที่วางไว้ใต้ชื่ออื่น เช่น embedding_backup / voiceprint
+      รอบ 2 -- allowlist ชื่อคีย์ระดับผู้พูด (_public_speaker) และระดับไฟล์ (list_entries)
+               แพ้ให้ระดับการประชุมซึ่งอยู่เหนือขึ้นไปอีกหนึ่งชั้น ({**meeting, ...})
+      รอบ 3 -- allowlist ชื่อคีย์ระดับการประชุม (_public_pending_meeting)
+               แพ้ให้ค่าที่ซ้อนอยู่ใต้ guess / samples[] / suggested ซึ่งลึกลงไปอีกหนึ่งชั้น
+      รอบ 4 -- allowlist ชื่อคีย์ของ guess/samples[]/suggested และตัด params ของ activity
+               แพ้ให้เวกเตอร์ที่เป็น "ค่า" ของคีย์ที่อยู่ใน allowlist เองอยู่แล้ว
+               (meeting_dir, label, speaking_seconds, guess.evidence, samples[].start,
+               suggested.name, speaker_count, suggested_name, reason.<ซับทรีทั้งก้อน>)
+
+    การไล่ชื่อคีย์แพ้เสมอเพราะไฟล์ต้นทางทุกไฟล์ (speakers/pending/*.json,
+    enroll/*.result.json, state/activity.jsonl) แก้มือได้ตามดีไซน์ของโปรเจกต์นี้เอง คนแก้
+    จึงเลือก *ชื่อคีย์* และ *ความลึก* ได้อิสระไม่มีขอบ -- รอบที่ห้าพิสูจน์ด้วย reason ที่เป็น
+    dict ทั้งก้อนว่าซับทรีอะไรก็ได้ที่ห้อยใต้คีย์ใน allowlist ออกไปได้ทั้งดุ้น สิ่งเดียวที่คน
+    วางเวกเตอร์เลือกไม่ได้คือรูปทรงของเวกเตอร์เอง: บนสายมันคือ list ที่ไม่ว่างและสมาชิกเป็น
+    ตัวเลขล้วนเสมอ ตัวนี้จึงเดินทั้งโครงสร้างแล้วตัดทุก list แบบนั้นทิ้ง ไม่ว่าจะอยู่ใต้ชื่อ
+    คีย์อะไรหรือลึกแค่ไหน -- กฎเดียวกันเป๊ะกับการ์ดฝั่งเทสต์ (_assert_no_numeric_vector_leaks
+    ใน tests/test_session_service.py) ซึ่งเดินทั้ง response body อยู่แล้ว
+
+    ไม่ได้มาแทน allowlist ชื่อคีย์ที่มีอยู่ -- สองอย่างนี้ทำคนละหน้าที่กัน allowlist กันไม่ให้
+    ส่งฟิลด์ที่หน้าเว็บไม่ได้ใช้ออกไปเปล่า ๆ ส่วนตัวนี้เป็นตาข่ายชั้นล่างที่ทำให้ endpoint ใหม่
+    หรือคีย์ใหม่ที่ถูกเพิ่มเข้า allowlist ทีหลัง ปลอดภัยตั้งแต่ต้นโดยไม่ต้องมีใครมานั่งเขียน
+    ชั้นของมันเองเพิ่มเป็นรอบที่หก
+
+    ตรวจแล้วว่าไม่มี endpoint ไหนในโปรเจกต์นี้ที่ต้องส่ง numeric array ที่ชอบธรรมออกไปเลย
+    (samples[].start/end, speaking_seconds, elapsed_seconds, sample_count, match.score
+    ล้วนเป็นตัวเลขเดี่ยว ไม่ใช่ array) ถ้าวันหนึ่งมีจริง ให้เพิ่มข้อยกเว้นเจาะจงเป็นราย path
+    ไม่ใช่ผ่อนกฎนี้ให้หลวมลงทั้งหมด
+    """
+    if _is_numeric_vector(value):
+        return None
+    if isinstance(value, dict):
+        return {
+            key: drop_numeric_vectors(item)
+            for key, item in value.items()
+            if not _is_numeric_vector(item)
+        }
+    if isinstance(value, list):
+        return [
+            drop_numeric_vectors(item)
+            for item in value
+            if not _is_numeric_vector(item)
+        ]
+    return value
+
+
 def registry_path(base_dir: Path) -> Path:
     return Path(base_dir) / REGISTRY_DIRNAME / REGISTRY_FILENAME
 

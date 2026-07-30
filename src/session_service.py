@@ -159,21 +159,31 @@ def _public_speaker(speaker: dict) -> dict:
     ไม่มีเหตุผลต้องออกไปเลย ใช้ .get() และเช็ค isinstance ทุกชั้นเพราะไฟล์คิวที่แก้มือหรือ
     มาจากเวอร์ชันเก่ากว่านี้อาจไม่มีคีย์พวกนี้ครบ หรือมีแต่ผิดชนิด -- หน้าเว็บรับค่า None/[]
     ของทุกคีย์เหล่านี้ได้อยู่แล้ว (guess ? ... : "", samples || [], suggested ? ... : "")
+
+    finding 1 ของรีวิวรอบที่ห้า: allowlist ข้างบนยังอยู่ต่อทั้งหมด แต่ผลลัพธ์ผ่าน
+    speakers.drop_numeric_vectors อีกชั้น เพราะ allowlist กรอง "ชื่อคีย์" แล้วคืน "ค่า" ของ
+    คีย์นั้นดิบ ๆ -- เวกเตอร์ที่ถูกวางเป็นค่าของ label / speaking_seconds / guess.evidence /
+    samples[].start / suggested.name (ห้าจุดที่ทำซ้ำได้จริงบน endpoint ที่รันอยู่) หลุดออกไป
+    ได้ทั้งที่ทุกคีย์อยู่ใน allowlist ถูกต้องแล้ว การแจกแจงชื่อคีย์เพิ่มอีกชั้นกันกรณีนี้ไม่ได้
+    ไม่ว่าจะไล่ไปกี่ชั้น (ดู docstring ของ drop_numeric_vectors)
     """
     samples = speaker.get("samples")
-    return {
-        "label": speaker.get("label"),
-        "guess": _public_guess(speaker.get("guess")),
-        "samples": [
-            public_sample
-            for public_sample in (
-                _public_sample(item) for item in (samples if isinstance(samples, list) else [])
-            )
-            if public_sample is not None
-        ],
-        "suggested": _public_suggested(speaker.get("suggested")),
-        "speaking_seconds": speaker.get("speaking_seconds"),
-    }
+    return speakers.drop_numeric_vectors(
+        {
+            "label": speaker.get("label"),
+            "guess": _public_guess(speaker.get("guess")),
+            "samples": [
+                public_sample
+                for public_sample in (
+                    _public_sample(item)
+                    for item in (samples if isinstance(samples, list) else [])
+                )
+                if public_sample is not None
+            ],
+            "suggested": _public_suggested(speaker.get("suggested")),
+            "speaking_seconds": speaker.get("speaking_seconds"),
+        }
+    )
 
 
 def _public_pending_meeting(meeting: dict) -> dict:
@@ -190,10 +200,66 @@ def _public_pending_meeting(meeting: dict) -> dict:
     รายการข้างล่างคือทุกคีย์ระดับการประชุมที่ web/app.js อ่านจริง (ดู pendingHtml/speakerAt
     ใน app.js: meeting.meeting_dir, meeting.speakers) คีย์อื่น (audio_file, created) เป็น
     ของฝั่งเซิร์ฟเวอร์ล้วน ไม่มีเหตุผลต้องออกไปเลย
+
+    finding 1 ของรีวิวรอบที่ห้า: allowlist ชื่อคีย์ยังอยู่ต่อ (มันกันฟิลด์ที่ UI ไม่ได้ใช้)
+    แต่ตอนนี้ผลลัพธ์ผ่าน speakers.drop_numeric_vectors อีกชั้น -- เวกเตอร์ที่วางเป็น *ค่า*
+    ของ meeting_dir เอง (ซึ่งอยู่ใน allowlist) ไม่มีทางถูกกันด้วยการแจกแจงชื่อคีย์เพิ่มอีกกี่
+    ชั้นก็ตาม ดู docstring ของ drop_numeric_vectors สำหรับประวัติสี่รอบที่ผ่านมา
     """
+    queued = meeting.get("speakers")
+    return speakers.drop_numeric_vectors(
+        {
+            "meeting_dir": meeting.get("meeting_dir"),
+            "speakers": [
+                _public_speaker(s)
+                for s in (queued if isinstance(queued, list) else [])
+                if isinstance(s, dict)
+            ],
+        }
+    )
+
+
+def _public_activity(entry: dict, lang: str) -> dict:
+    """หนึ่งบรรทัดของ state/activity.jsonl ในรูปที่ส่งออกหน้าเว็บได้
+
+    finding 2 ของรีวิวรอบที่ห้า -- รอบที่สี่ "ตัด job/params ทิ้ง" เพื่อกันเวกเตอร์ที่อาจแอบ
+    อยู่ใน params ของบรรทัดที่ถูกแก้มือ โดยอ้าง grep ของ renderLog ตัวเดียวว่าไม่มีใครอ่าน
+    สองคีย์นี้ grep นั้นไม่ครบ และการตัดทิ้งเป็น regression จริงที่ผู้ใช้เจอ ไม่ใช่รูรั่วเฉย ๆ:
+
+      web/app.js jobProgress()                     อ่าน e.job  (แถบความคืบหน้าหลังปิดห้อง)
+      web/app.js poll()                            อ่าน e.job  (สัญญาณ speakers_pending)
+      COWORK Desktop/meetingrun.js progressOf()    อ่าน e.job
+      COWORK Desktop/meetingrun.js finishedMeetingId()  อ่าน e.job และ e.params.path
+
+    ผลจริงเมื่อ job หายไป: หน้าจอค้างที่ "กำลังประมวลผล" ขั้นที่ 1 ตลอดกาล viewDone ไปไม่ถึง
+    และเพราะ viewProcessing ไม่ได้ render pendingHtml() คิวตั้งชื่อผู้พูด -- เหตุผลทั้งหมดที่
+    ฟีเจอร์นี้มีอยู่ -- จึงเข้าไม่ถึงจากหน้าเว็บเลย ฝั่งวิดเจ็ตแถบความคืบหน้าไม่ขยับ และปุ่ม
+    "เปิดโฟลเดอร์ประชุม" คืน null (tests/meetingrun.test.js ยึดฟิลด์พวกนี้ไว้เป็นสัญญา)
+
+    ทั้งคู่จึงกลับมา แล้วให้ speakers.drop_numeric_vectors เป็นตัวทำให้ปลอดภัยแทนการตัดทิ้ง
+    -- อนึ่ง job เป็นสตริงชื่องาน การตัดมันทิ้งจึงไม่เคยกันเวกเตอร์อะไรได้ตั้งแต่แรก
+
+    กรองก่อน render ไม่ใช่หลัง: render() เอาค่าใน params ไปเติมลงเทมเพลตข้อความ ("เสร็จแล้ว:
+    {path}") ถ้าส่ง params ดิบเข้าไป เวกเตอร์ที่วางไว้ใต้ {path} จะออกไปเป็น *สตริง* ในคีย์
+    text ซึ่งการ์ดรูปทรงจับไม่ได้เพราะไม่ใช่ array อีกต่อไป
+
+    coercion ที่เหลือเป็นของถูก ๆ ที่ป้องกัน 500 ตรง ๆ: code ที่ไม่ใช่สตริงทำให้
+    catalog.get(code) โยน TypeError (unhashable) และ params ที่ไม่ใช่ dict ทำให้
+    format(**params) โยน TypeError ทั้งสองตัวหลุดออกไปเป็น 500 ทั้งหน้าจากบรรทัดเดียวที่ถูก
+    แก้มือ ทั้งที่ฟังก์ชันนี้อ่านไฟล์ที่ "แก้มือได้ตามดีไซน์" อยู่แล้ว
+    """
+    safe = speakers.drop_numeric_vectors(entry)
+    code = safe.get("code")
+    code = code if isinstance(code, str) else ""
+    params = safe.get("params")
+    params = params if isinstance(params, dict) else {}
     return {
-        "meeting_dir": meeting.get("meeting_dir"),
-        "speakers": [_public_speaker(s) for s in meeting.get("speakers", [])],
+        "ts": safe.get("ts"),
+        "job": safe.get("job"),
+        "code": code,
+        "level": safe.get("level"),
+        "params": params,
+        "text": render(code, params, lang),
     }
 
 
@@ -201,17 +267,21 @@ def _speaker_summary(speaker: dict) -> dict:
     """คนหนึ่งคนในทะเบียน ในรูปสรุปที่ /api/speakers และ /api/enroll ใช้ร่วมกัน (finding C
     ของรีวิวรอบสุดท้าย -- คนละรอบกับ finding 1-6 ที่แก้ไปก่อนหน้านี้)
 
-    ไม่ใช้ _public_speaker ตรง ๆ เพราะ shape ต่างกัน: _public_speaker เก็บทุกคีย์ยกเว้น
-    embedding ซึ่งใช้ได้กับผู้พูดที่รอตั้งชื่อ (embedding อยู่ระดับบนสุด) แต่ entry ใน
-    ทะเบียนไม่มี embedding ระดับบนสุดเลย -- มันซ้อนอยู่ใน samples[].embedding ถ้าเอา
-    _public_speaker มาใช้ตรงนี้ "samples" ทั้งก้อน (พร้อมเวกเตอร์เสียงทุกตัวข้างใน) จะ
-    หลุดออกไปทั้งดุ้นแทนที่จะเหลือแค่ sample_count
+    ไม่ใช้ _public_speaker ตรง ๆ เพราะคนละ shape กันคนละเรื่อง (finding 3 ของรีวิวรอบที่ห้า
+    -- ข้อความเดิมตรงนี้บอกว่า _public_speaker "เก็บทุกคีย์ยกเว้น embedding" ซึ่งเลิกจริง
+    มาตั้งแต่รีวิวรอบที่สองแล้ว: มันเป็น allowlist ของ label/guess/samples/suggested/
+    speaking_seconds มาสองรอบ ไม่ใช่ denylist ของ embedding อีกต่อไป) ที่ใช้แทนกันไม่ได้คือ
+    รูปของข้อมูล: ผู้พูดที่รอตั้งชื่อมีตัวอย่างเสียงเป็น samples[]{text,start,end} ที่ผู้ใช้
+    ต้องอ่าน ส่วน entry ในทะเบียนมี samples[] เป็นเวกเตอร์เสียงล้วน (samples[].embedding)
+    ซึ่งไม่มีอะไรให้ผู้ใช้อ่านเลยและเป็นข้อมูล biometric ทั้งก้อน -- ที่นี่จึงเหลือแค่จำนวน
     """
-    return {
-        "id": speaker["id"],
-        "name": speaker["name"],
-        "sample_count": len(speaker.get("samples", [])),
-    }
+    return speakers.drop_numeric_vectors(
+        {
+            "id": speaker["id"],
+            "name": speaker["name"],
+            "sample_count": len(speaker.get("samples", [])),
+        }
+    )
 
 
 def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Flask:
@@ -245,20 +315,11 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             {**w, "text": render(w["code"], w.get("params"), lang)}
             for w in body["warnings"]
         ]
-        # allowlist ไม่ใช่ {**e, ...}: finding 2 ของรีวิวรอบที่สี่ -- entry มาจาก
-        # state/activity.jsonl ตรง ๆ (activity.tail) ซึ่งแก้มือได้ตามดีไซน์เดียวกับไฟล์คิว
-        # (ดู activity.append) การสเปรดทั้ง entry (ts, job, code, level, params) เดิมปล่อย
-        # ให้เวกเตอร์ที่แอบอยู่ใน params ของแถวที่ถูกแก้มือหลุดออก endpoint ไปเงียบ ๆ --
-        # web/app.js (renderLog) อ่านแค่ e.ts, e.level, e.text, e.code เท่านั้น ไม่เคยอ่าน
-        # e.job หรือ e.params เลย ทั้งสองจึงไม่มีเหตุผลต้องออกไป (params ถูกใช้แค่ฝั่ง
-        # เซิร์ฟเวอร์เพื่อ render ข้อความแล้วทิ้ง)
+        # allowlist ไม่ใช่ {**e, ...}: entry มาจาก state/activity.jsonl ตรง ๆ (activity.tail)
+        # ซึ่งแก้มือได้ตามดีไซน์เดียวกับไฟล์คิว (ดู activity.append) -- ฟิลด์ที่ออกไปกับ
+        # เหตุผลที่ job/params ต้องอยู่ต่อ ดูที่ _public_activity ด้านบน
         body["activity"] = [
-            {
-                "ts": e.get("ts"),
-                "code": e.get("code"),
-                "level": e.get("level"),
-                "text": render(e.get("code", ""), e.get("params"), lang),
-            }
+            _public_activity(e, lang)
             for e in activity.tail(config.base_dir, ACTIVITY_LIMIT)
         ]
         return jsonify(body)
