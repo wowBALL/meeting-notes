@@ -30,15 +30,14 @@ from src.voiceprint import Voiceprint
 MODEL = "pyannote/speaker-diarization-community-1"
 
 
-def _diarization(turns=None, embeddings=None) -> DiarizationResult:
+def _diarization(turns=None) -> DiarizationResult:
     """ผลแยกผู้พูดปลอมในรูปที่ diarize_audio ของจริงคืนมา
 
-    `embeddings` ยังรับไว้เพื่อความเข้ากันได้กับ DiarizationResult ของจริง (ดู
-    src/diarize.py) แต่ pipeline.py ไม่อ่านมันแล้วตั้งแต่ Task 11 -- centroid ของ
+    DiarizationResult ไม่มี field `embeddings` แล้ว (ดู src/diarize.py) -- centroid ของ
     diarization ถูกแทนที่ด้วย voiceprint จาก extract_voiceprints ทั้งหมด (ดู
     _stub_voiceprints ด้านล่างสำหรับเทสต์ที่ต้องปลอมเวกเตอร์การจับคู่)
     """
-    return DiarizationResult(turns=turns or [], embeddings=embeddings or {})
+    return DiarizationResult(turns=turns or [])
 
 
 class _FakeEmbedder:
@@ -2001,16 +2000,21 @@ def test_process_file_finishes_the_meeting_when_writing_the_queue_fails(tmp_path
         patch(
             "src.pipeline.diarize_audio",
             return_value=_diarization(
-                [{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}],
-                {"SPEAKER_00": [1.0, 0.0]},
+                [{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}]
             ),
         ),
-        patch("src.pipeline.write_pending", side_effect=OSError("ดิสก์เต็ม")),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
+        patch(
+            "src.pipeline.write_pending", side_effect=OSError("ดิสก์เต็ม")
+        ) as mock_write_pending,
         patch("src.pipeline.guess_speaker_names", return_value={}),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
         meeting_dir = process_file(audio_path, config)
 
+    # ถ้าไม่มีใครเข้าคิว write_pending จะไม่ถูกเรียกเลย เทสต์จะผ่านโดยไม่ได้วัดอะไร --
+    # ยืนยันว่าความล้มเหลวที่เราตั้งใจให้เกิด เกิดขึ้นจริง
+    mock_write_pending.assert_called_once()
     assert (meeting_dir / "transcript.md").exists()
     assert (meeting_dir / "summary.md").exists()
 
