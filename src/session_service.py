@@ -277,6 +277,37 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             }
         )
 
+    @app.patch("/api/speakers/<speaker_id>")
+    def rename_speaker(speaker_id):
+        """แก้ชื่อคนในทะเบียน -- ไม่แตะตัวอย่างเสียงเลย
+
+        มีไว้เพราะชื่อครั้งแรกมาจากชื่อไฟล์ที่วางใน enroll/ ซึ่งมักติดส่วนเกินมาด้วย
+        ก่อนหน้านี้ทางแก้เดียวคือลบทิ้งแล้วอัดใหม่ ซึ่งทำลายตัวอย่างเสียงที่สะสมไว้
+        ทั้งหมดเพียงเพราะสะกดชื่อผิด
+
+        อยู่ในล็อกเดียวกับ confirm/delete: อ่าน -> แก้ -> เขียนทับ ถ้าไม่คุมช่วงนี้
+        การแก้ชื่อที่ชนกับการ enroll พร้อมกันจะทำให้ฝ่ายหนึ่งหายไปทั้งที่ได้ ok กลับไป
+        """
+        payload = request.get_json(silent=True) or {}
+        name = payload.get("name")
+        if not isinstance(name, str):
+            return jsonify({"error": "bad_name"}), 400
+        with _registry_lock:
+            registry = speakers.load_registry(config.base_dir)
+            try:
+                updated = speakers.rename_speaker(registry, speaker_id, name)
+            except speakers.DuplicateNameError:
+                # ต้องมาก่อน ValueError เพราะสืบทอดมาจากมัน -- สลับลำดับเมื่อไหร่
+                # ผู้ใช้จะได้ "ชื่อว่าง" ทั้งที่พิมพ์ชื่อที่ซ้ำกับคนอื่น
+                return jsonify({"error": "duplicate_name"}), 409
+            except ValueError:
+                return jsonify({"error": "bad_name"}), 400
+            if updated is None:
+                return jsonify({"error": "not_found"}), 404
+            speakers.save_registry(config.base_dir, updated)
+            renamed = next(s for s in updated if s["id"] == speaker_id)
+        return jsonify({"ok": True, "speaker": _speaker_summary(renamed)})
+
     @app.delete("/api/speakers/<speaker_id>")
     def delete_speaker(speaker_id):
         with _registry_lock:
@@ -341,7 +372,17 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
 
             speakers.save_registry(
                 config.base_dir,
-                speakers.add_sample(registry, cleaned, entry["embedding"], source=meeting),
+                speakers.add_sample(
+                    registry,
+                    cleaned,
+                    entry["embedding"],
+                    source=meeting,
+                    # โมเดลที่ติดมากับคิว ไม่ใช่ config.diarization_model ตอนนี้ --
+                    # คิวอยู่ข้ามวันได้ ผู้ใช้สลับโมเดลระหว่างนั้นแล้วเวกเตอร์ตัวนี้
+                    # ยังเป็นของพื้นที่เดิมอยู่ดี คิวเก่าที่ไม่มีป้ายตกไปที่ 3.1 ตาม
+                    # speakers.sample_model ซึ่งเป็นความจริงของ repo นี้ก่อนมีป้าย
+                    model=speakers.sample_model(entry),
+                ),
             )
 
         # การแก้ไฟล์เก่าเป็นของแถม ทะเบียนคือของจริงเพราะมันไปออกดอกที่การประชุม
@@ -422,6 +463,9 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                 registry,
                 config.speaker_match_high,
                 config.speaker_match_low,
+                # เวกเตอร์นี้มาจาก result.json ที่วิเคราะห์ไว้ตอนไหนก็ได้ -- เทียบกับ
+                # ทะเบียนในพื้นที่ของ *มัน* ไม่ใช่ของโมเดลที่ตั้งอยู่ตอนนี้
+                model=speakers.sample_model(result),
             )
             match = matches.get(entry["audio_file"])
             if match is not None:
@@ -502,6 +546,9 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                         cleaned,
                         result["embedding"],
                         source=f"enroll:{audio_file}",
+                        # โมเดลที่วิเคราะห์ไฟล์นี้จริง ๆ (enroll.analyze บันทึกไว้)
+                        # ไม่ใช่ค่าใน config ตอนกดยืนยัน -- ผลค้างข้ามการสลับโมเดลได้
+                        model=speakers.sample_model(result),
                     ),
                 )
             except OSError as e:

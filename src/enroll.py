@@ -125,8 +125,13 @@ def _seconds_by_speaker(turns: list[dict]) -> dict[str, float]:
     return seconds
 
 
-def analyze(audio_path: Path, pipeline: Any) -> dict:
+def analyze(audio_path: Path, pipeline: Any, model: str) -> dict:
     """ไฟล์เสียงหนึ่งไฟล์ -> ผลที่พร้อมเขียนลง <ชื่อ>.result.json
+
+    `model` คือชื่อ checkpoint ที่ `pipeline` ถูกโหลดมา -- ถูกบันทึกไปกับผลเพื่อให้
+    ตัวอย่างที่ถูกเก็บเข้าทะเบียนทีหลังติดป้ายโมเดลที่สร้างมันจริง ๆ ไม่ใช่โมเดลที่
+    ตั้งอยู่ ณ ตอนที่ผู้ใช้กดยืนยัน (ดู speakers.add_sample) ผลที่วิเคราะห์ค้างไว้ข้าม
+    การสลับโมเดลจึงยังผูกกับพื้นที่เวกเตอร์ที่ถูกต้องเสมอ
 
     รับ pipeline เข้ามาไม่โหลดเอง: ผู้เรียกคือ watcher ซึ่งโหลด pyannote ค้างไว้แล้ว
     และการโหลดซ้ำต่อไฟล์กินเวลา 10-20 วินาทีโดยไม่ได้อะไรกลับมา ผลพลอยได้ที่ตั้งใจ
@@ -162,25 +167,68 @@ def analyze(audio_path: Path, pipeline: Any) -> dict:
         }
 
     seconds = _seconds_by_speaker(result.turns)
+    # ป้ายที่ pyannote ไม่ได้คำนวณเวกเตอร์ให้ (pad ศูนย์มา ดู speakers.is_usable_embedding)
+    # ไม่ใช่ "คนที่สอง" -- มันคือเศษที่โผล่ทับช่วงที่คนคนเดียวกันกำลังพูดอยู่ วัดจริงกับ
+    # คลิปพูดคนเดียวล้วน 67 วินาที (2026-07-29): ได้ป้ายที่สองยาว 0.5 วินาที ซ้อนอยู่
+    # กลางช่วง 12.8-16.5s ที่ป้ายแรกพูดอยู่ norm ของมันเป็น 0.0000 ขณะที่ป้ายจริงได้ 3.32
+    # การนับมันเป็นคนแปลว่าปฏิเสธไฟล์ที่ถูกต้องทิ้ง ซึ่งเกิดบ่อยพอที่จะทำให้ลงทะเบียน
+    # ไม่สำเร็จสักครั้ง
+    #
+    # นี่ไม่ใช่การผ่อนด่าน multiple_speakers: เสียงคนอื่นที่ปนมาจริงมีเวกเตอร์ของตัวเอง
+    # (norm ระดับเดียวกับป้ายจริง) จึงยังถูกนับและยังถูกปฏิเสธเหมือนเดิมทุกประการ ป้ายที่
+    # ไม่มีเวกเตอร์ต่างหากที่เอาไปทำอะไรต่อไม่ได้อยู่แล้ว -- เก็บไว้นับก็ได้แค่ปฏิเสธของดี
+    #
+    # จงใจไม่ตัดป้ายที่ "พูดสั้นกว่า N วินาที" ทิ้งไปด้วย ทั้งที่เศษพวกนี้มักสั้น: เกณฑ์
+    # เวลาจะกลืนคนที่สองที่พูดจริงแค่แวบเดียวไปด้วย ซึ่งเป็นการผ่อนด่านของจริง ส่วนเกณฑ์
+    # "ไม่มีเวกเตอร์" ไม่กลืนใครเลยเพราะคนที่พูดจริงย่อมมีเวกเตอร์เสมอ
+    usable = {
+        label: total
+        for label, total in seconds.items()
+        if is_usable_embedding(result.embeddings.get(label))
+    }
+    ignored = len(seconds) - len(usable)
+    if ignored:
+        logger.info(
+            "ข้ามป้ายผู้พูดที่ไม่มีเวกเตอร์ %d ป้ายในไฟล์ %s (เหลือ %d ป้ายที่นับเป็นคนจริง)",
+            ignored,
+            audio_path.name,
+            len(usable),
+        )
+
     base = {
         "suggested_name": suggested_name,
-        "speaker_count": len(seconds),
+        "speaker_count": len(usable),
+        # นับเวลาจากทุกป้าย ไม่ใช่เฉพาะที่นับเป็นคน: เศษที่ถูกข้ามไปทับอยู่บนช่วงที่คน
+        # จริงพูดอยู่แล้ว (วัดได้: 14.6-15.1s ซ้อนใน 12.8-16.5s) เวลานั้นจึงเป็นเสียงของ
+        # คนนั้นจริง ๆ ตัดออกเท่ากับรายงานต่ำกว่าความจริง -- และที่สำคัญกว่านั้น ถ้านับ
+        # เฉพาะป้ายที่ใช้ได้ ไฟล์ที่มีคนพูด 45 วินาทีแต่เวกเตอร์เสียจะรายงานเป็น 0.0
+        # วินาที แล้วตกด้วยเหตุผล "สั้นเกินไป" ซึ่งเป็นคำอธิบายที่ผิดและแก้ตามไม่ได้
         "speaking_seconds": round(sum(seconds.values()), 1),
     }
+    if ignored:
+        base["ignored_empty_labels"] = ignored
 
-    if len(seconds) > 1:
+    if len(usable) > 1:
         return {**base, "status": "rejected", "reason": "multiple_speakers"}
-    # ถึงตรงนี้มีผู้พูดไม่เกินหนึ่งคน ผลรวมจึงเท่ากับเวลาพูดของคนนั้นพอดี ไฟล์ที่ไม่มี
-    # เสียงพูดเลยตกที่นี่ด้วย (0.0 วินาที) ซึ่งเป็นคำตอบที่ถูกต้องอยู่แล้ว
+    # เรียงก่อน unusable_embedding โดยเจตนา: ไฟล์ที่ไม่มีเสียงพูดเลย (0.0 วินาที) ต้อง
+    # ได้เหตุผล "สั้นเกินไป" ซึ่งผู้ใช้ทำตามได้ ไม่ใช่ "เวกเตอร์ใช้ไม่ได้" ที่เป็นภาษา
+    # ของระบบและไม่บอกว่าต้องทำอะไรต่อ
     if base["speaking_seconds"] < MIN_SPEAKING_SECONDS:
         return {**base, "status": "rejected", "reason": "too_short"}
-
-    label = next(iter(seconds))
-    embedding = result.embeddings.get(label)
-    if not is_usable_embedding(embedding):
+    # มีเสียงพูดยาวพอ แต่ไม่มีป้ายไหนมีเวกเตอร์ให้เก็บเลย
+    if not usable:
         return {**base, "status": "rejected", "reason": "unusable_embedding"}
 
-    return {**base, "status": "ok", "embedding": [float(value) for value in embedding]}
+    # ผ่านตัวกรอง usable มาแล้ว จึงการันตีว่าใช้ได้ ไม่ต้องเช็คซ้ำอีกชั้น (การเช็คซ้ำ
+    # ตรงนี้จะเป็นโค้ดที่ไม่มีวันทำงาน ซึ่งอ่านเหมือนมีการป้องกันทั้งที่ไม่มี)
+    embedding = result.embeddings[next(iter(usable))]
+
+    return {
+        **base,
+        "status": "ok",
+        "model": model,
+        "embedding": [float(value) for value in embedding],
+    }
 
 
 def _sidecar_path(base_dir: Path, audio_file: str, suffix: str) -> Path | None:

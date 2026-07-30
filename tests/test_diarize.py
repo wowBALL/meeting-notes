@@ -2,7 +2,12 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.diarize import DiarizationResult, diarize_audio, load_diarization_pipeline
+from src.config import DEFAULT_DIARIZATION_MODEL
+from src.diarize import (
+    DiarizationResult,
+    diarize_audio,
+    load_diarization_pipeline,
+)
 
 
 def _fake_pyannote(mock_pipeline_cls):
@@ -177,12 +182,29 @@ def test_load_diarization_pipeline_moves_to_gpu_when_available():
         result = load_diarization_pipeline("hf-test-token")
 
     mock_pipeline_cls.from_pretrained.assert_called_once_with(
-        "pyannote/speaker-diarization-3.1", token="hf-test-token"
+        DEFAULT_DIARIZATION_MODEL, token="hf-test-token"
     )
     # pyannote defaults to CPU; without this .to() a 50-minute meeting spends
     # 15+ minutes in diarization instead of ~2
     loaded.to.assert_called_once_with(cuda_device)
     assert result is loaded
+
+
+def test_load_diarization_pipeline_honours_a_custom_checkpoint():
+    """DIARIZATION_MODEL ใน .env ต้องไปถึง from_pretrained จริง ไม่ใช่ถูก default ทับ"""
+    loaded = MagicMock()
+    mock_pipeline_cls = MagicMock()
+    mock_pipeline_cls.from_pretrained.return_value = loaded
+
+    with patch.dict(
+        sys.modules,
+        {**_fake_pyannote(mock_pipeline_cls), "torch": _fake_torch(False, object())},
+    ):
+        load_diarization_pipeline("hf-test-token", "pyannote/speaker-diarization-3.1")
+
+    mock_pipeline_cls.from_pretrained.assert_called_once_with(
+        "pyannote/speaker-diarization-3.1", token="hf-test-token"
+    )
 
 
 def test_load_diarization_pipeline_disables_torch_cudnn_on_gpu():
@@ -234,5 +256,5 @@ def test_diarize_audio_loads_pipeline_via_helper_when_none_given(tmp_path):
     ) as mock_load:
         diarize_audio(audio_path, hf_token="hf-test-token", pipeline=None)
 
-    mock_load.assert_called_once_with("hf-test-token")
+    mock_load.assert_called_once_with("hf-test-token", DEFAULT_DIARIZATION_MODEL)
     loaded.assert_called_once_with(str(audio_path))

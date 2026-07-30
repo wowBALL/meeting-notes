@@ -63,6 +63,7 @@ def build_pending_speakers(
     merged_segments: list[dict],
     labels: dict[str, str],
     embeddings: dict[str, list[float]],
+    model: str,
     matches: dict | None = None,
     min_seconds: float = MIN_SPEAKING_SECONDS,
 ) -> list[dict]:
@@ -70,6 +71,10 @@ def build_pending_speakers(
 
     ข้ามสามกลุ่ม: คนที่จำได้แล้วอย่างมั่นใจ (ไม่ต้องถามซ้ำ), คนที่ไม่มีเวกเตอร์ที่ใช้ได้
     (ถามไปก็เก็บเข้าทะเบียนไม่ได้), และคนที่พูดสั้นเกินกว่าจะเชื่อเวกเตอร์ได้
+
+    `model` คือโมเดลที่สร้าง `embeddings` ติดไปกับทุกคนในคิว เพราะคิวนี้อยู่ข้ามวันได้
+    ผู้ใช้สลับ DIARIZATION_MODEL ก่อนกลับมากดตั้งชื่อได้ -- ป้ายที่ติดตอนสร้างคิวคือ
+    ป้ายเดียวที่บอกความจริงเรื่องพื้นที่เวกเตอร์ (ดู speakers.add_sample)
     """
     matches = matches or {}
     seconds: dict[str, float] = {}
@@ -95,6 +100,7 @@ def build_pending_speakers(
             {
                 "label": labels.get(key, key),
                 "diarization_id": key,
+                "model": model,
                 "embedding": [float(value) for value in embedding],
                 "speaking_seconds": round(total, 1),
                 "samples": _longest_samples(lines[key], SAMPLE_COUNT),

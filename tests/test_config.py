@@ -1,10 +1,44 @@
 import pytest
 
 from src.config import (
+    DEFAULT_DIARIZATION_MODEL,
     DEFAULT_SPEAKER_MATCH_HIGH,
     DEFAULT_SPEAKER_MATCH_LOW,
+    LEGACY_DIARIZATION_MODEL,
     load_config,
 )
+
+
+def test_load_config_defaults_to_the_measured_diarization_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("DIARIZATION_MODEL", raising=False)
+
+    config = load_config(base_dir=tmp_path)
+
+    # เขียนชื่อเต็มตรง ๆ ที่นี่ที่เดียว ไม่อ้างค่าคงที่: การเปลี่ยนโมเดลตั้งต้นต้องเป็น
+    # การตัดสินใจที่มีคนแก้เทสต์ตาม ไม่ใช่สิ่งที่เลื่อนตามค่าคงที่ไปเงียบ ๆ
+    assert config.diarization_model == "pyannote/speaker-diarization-community-1"
+
+
+def test_load_config_reads_the_diarization_model_override(tmp_path, monkeypatch):
+    """การกลับไปใช้ 3.1 ต้องทำได้ด้วย .env บรรทัดเดียว ไม่ต้อง revert โค้ด"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("DIARIZATION_MODEL", LEGACY_DIARIZATION_MODEL)
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.diarization_model == LEGACY_DIARIZATION_MODEL
+
+
+def test_load_config_falls_back_when_the_diarization_model_is_blank(tmp_path, monkeypatch):
+    # "DIARIZATION_MODEL=" ที่ลืมเติมค่า -- สตริงว่างที่หลุดไปถึง from_pretrained
+    # ทำให้เปิดโปรแกรมไม่ได้เลย แบบเดียวกับที่ UI_PORT ที่พิมพ์ผิดต้องไม่ทำ
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("DIARIZATION_MODEL", "   ")
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.diarization_model == DEFAULT_DIARIZATION_MODEL
 
 
 def test_load_config_reads_required_env_vars(tmp_path, monkeypatch):

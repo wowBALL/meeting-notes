@@ -3,15 +3,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.config import DEFAULT_DIARIZATION_MODEL
+
 logger = logging.getLogger(__name__)
 
 
-def load_diarization_pipeline(hf_token: str) -> Any:
+def load_diarization_pipeline(
+    hf_token: str, checkpoint: str = DEFAULT_DIARIZATION_MODEL
+) -> Any:
+    """โหลด pipeline แยกผู้พูดตาม checkpoint ที่เลือก (ดู config.DIARIZATION_MODEL)
+
+    ค่า default อยู่ที่ config.py ที่เดียว ไม่ทำสำเนาไว้ที่นี่ -- โมดูลนี้กับ .env ต้อง
+    ตอบคำถาม "ตกลงใช้โมเดลไหน" ตรงกันเสมอ
+    """
     from pyannote.audio import Pipeline
 
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1", token=hf_token
-    )
+    pipeline = Pipeline.from_pretrained(checkpoint, token=hf_token)
     # Pipeline.from_pretrained leaves the model on the CPU; nothing warns about
     # it, the work just runs an order of magnitude slower (measured: 15+ minutes
     # of diarization for a 50-minute meeting vs ~2 on the GPU). Same model, same
@@ -83,10 +90,13 @@ def _speaker_embeddings(result: Any, diarization: Any) -> dict[str, list[float]]
 
 
 def diarize_audio(
-    audio_path: Path, hf_token: str, pipeline: Any = None
+    audio_path: Path,
+    hf_token: str,
+    pipeline: Any = None,
+    checkpoint: str = DEFAULT_DIARIZATION_MODEL,
 ) -> DiarizationResult:
     if pipeline is None:
-        pipeline = load_diarization_pipeline(hf_token)
+        pipeline = load_diarization_pipeline(hf_token, checkpoint)
     result = pipeline(str(audio_path))
     diarization = result.speaker_diarization
     turns = []

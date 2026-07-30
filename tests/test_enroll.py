@@ -9,6 +9,8 @@ from src import enroll
 from src.diarize import DiarizationResult
 from src.speakers import MIN_SPEAKING_SECONDS
 
+MODEL = "pyannote/speaker-diarization-community-1"
+
 
 @pytest.fixture(autouse=True)
 def _stub_convert_to_wav(monkeypatch):
@@ -146,13 +148,16 @@ def test_analyze_accepts_a_single_speaker_who_talks_long_enough(tmp_path, monkey
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert analyzed["status"] == "ok"
     assert analyzed["speaker_count"] == 1
     assert analyzed["speaking_seconds"] == 68.5
     assert analyzed["suggested_name"] == "สมชาย"
     assert analyzed["embedding"] == [0.1, 0.2, 0.3]
+    # ผลค้างข้ามการสลับโมเดลได้ -- ป้ายนี้คือสิ่งเดียวที่บอกว่าเวกเตอร์นี้เป็นของ
+    # พื้นที่ไหน ตอนที่ผู้ใช้กลับมากดยืนยันชื่อในภายหลัง
+    assert analyzed["model"] == MODEL
     assert "reason" not in analyzed
 
 
@@ -168,7 +173,7 @@ def test_analyze_rejects_a_file_with_more_than_one_speaker(tmp_path, monkeypatch
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "multiple_speakers"
@@ -177,6 +182,82 @@ def test_analyze_rejects_a_file_with_more_than_one_speaker(tmp_path, monkeypatch
     assert analyzed["speaking_seconds"] == 140.0
     # เวกเตอร์ที่ไม่ควรถูกใช้ ต้องไม่มีอยู่ในไฟล์ให้ใครหยิบไปใช้ผิด
     assert "embedding" not in analyzed
+
+
+def test_analyze_ignores_a_label_pyannote_gave_no_vector_for(tmp_path, monkeypatch):
+    """รูปร่างที่วัดได้จริงจากคลิปพูดคนเดียวล้วน 67 วินาที (2026-07-29)
+
+    pyannote คืนป้ายที่สองยาว 0.5 วินาที ซ้อนอยู่กลางช่วงที่ป้ายแรกพูดอยู่ แล้ว pad
+    เวกเตอร์ศูนย์ให้ (norm 0.0 เทียบกับ 3.32 ของป้ายจริง) -- ป้ายแบบนี้เอาไปเก็บเข้า
+    ทะเบียนไม่ได้อยู่แล้ว การนับมันเป็น "คนที่สอง" ทำได้แค่ปฏิเสธไฟล์ที่ถูกต้องทิ้ง
+    """
+    audio_path = tmp_path / "อัดเสียงฉัน.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[
+            {"start": 12.8, "end": 16.5, "speaker": "SPEAKER_00"},
+            {"start": 14.6, "end": 15.1, "speaker": "SPEAKER_01"},
+            {"start": 20.0, "end": 62.0, "speaker": "SPEAKER_00"},
+        ],
+        embeddings={"SPEAKER_00": [0.1, 0.2], "SPEAKER_01": [0.0, 0.0]},
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+
+    assert analyzed["status"] == "ok"
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["embedding"] == [0.1, 0.2]
+    # ไม่เงียบ: ผู้ใช้ต้องเห็นได้ว่ามีป้ายถูกข้ามไป ไม่ใช่ผ่านไปเฉย ๆ
+    assert analyzed["ignored_empty_labels"] == 1
+    # เวลานับจากทุกป้าย เพราะเศษที่ข้ามไปทับอยู่บนเสียงของคนจริงอยู่แล้ว
+    assert analyzed["speaking_seconds"] == 46.2
+
+
+def test_analyze_still_rejects_a_real_second_voice_that_has_a_vector(tmp_path, monkeypatch):
+    """ด่านกันเสียงคนอื่นปนต้องไม่ถูกผ่อนไปด้วย -- คนที่พูดจริงย่อมมีเวกเตอร์เสมอ
+
+    ตั้งใจให้คนที่สองพูดแค่ 0.5 วินาทีเท่ากับเศษในเทสต์ด้านบนเป๊ะ ๆ ต่างกันแค่ตรงที่
+    เวกเตอร์ใช้ได้ -- ถ้าวันหนึ่งมีคนเผลอเปลี่ยนไปตัดทิ้งด้วย "ป้ายที่สั้นกว่า N วินาที"
+    แทนที่จะเป็น "ป้ายที่ไม่มีเวกเตอร์" เทสต์นี้จะจับได้
+    """
+    audio_path = tmp_path / "มีคนแทรก.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[
+            {"start": 0.0, "end": 45.0, "speaker": "SPEAKER_00"},
+            {"start": 20.0, "end": 20.5, "speaker": "SPEAKER_01"},
+        ],
+        embeddings={"SPEAKER_00": [0.1, 0.2], "SPEAKER_01": [0.9, 0.4]},
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "multiple_speakers"
+    assert analyzed["speaker_count"] == 2
+    assert "ignored_empty_labels" not in analyzed
+    assert "embedding" not in analyzed
+
+
+def test_analyze_rejects_when_every_label_lacks_a_vector(tmp_path, monkeypatch):
+    """พูดยาวพอ แต่ไม่มีป้ายไหนมีเวกเตอร์เลย -- ต้องไม่หลุดเป็น ok และไม่ใช่ too_short"""
+    audio_path = tmp_path / "เสียงแปลก.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[{"start": 0.0, "end": 45.0, "speaker": "SPEAKER_00"}],
+        embeddings={"SPEAKER_00": [0.0, 0.0]},
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "unusable_embedding"
+    assert analyzed["speaker_count"] == 0
+    # เวลาต้องยังรายงานตามจริง ไม่ใช่ 0.0 ซึ่งจะทำให้ดูเหมือนไฟล์สั้นเกินไป
+    assert analyzed["speaking_seconds"] == 45.0
 
 
 def test_analyze_rejects_a_long_file_holding_only_a_few_seconds_of_speech(
@@ -191,7 +272,7 @@ def test_analyze_rejects_a_long_file_holding_only_a_few_seconds_of_speech(
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "too_short"
@@ -210,7 +291,7 @@ def test_analyze_accepts_speech_at_exactly_the_minimum_boundary(tmp_path, monkey
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert analyzed["status"] == "ok"
     assert analyzed["speaking_seconds"] == MIN_SPEAKING_SECONDS
@@ -224,7 +305,7 @@ def test_analyze_rejects_a_file_with_no_speech_at_all(tmp_path, monkeypatch):
         fake_diarize(DiarizationResult(turns=[], embeddings={})),
     )
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "too_short"
@@ -242,7 +323,7 @@ def test_analyze_rejects_a_zero_vector_pyannote_padded_in(tmp_path, monkeypatch)
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "unusable_embedding"
@@ -260,7 +341,7 @@ def test_analyze_rejects_when_the_label_has_no_embedding_at_all(tmp_path, monkey
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "unusable_embedding"
@@ -273,7 +354,7 @@ def test_analyze_turns_a_pipeline_crash_into_a_rejected_result(tmp_path, monkeyp
         "src.enroll.diarize_audio", fake_diarize(error=RuntimeError("cuda oom"))
     )
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     # เงียบไปเฉย ๆ = หน้าจอค้างที่ "กำลังวิเคราะห์" ตลอดกาล ต้องได้ผลกลับมาเสมอ
     assert analyzed["status"] == "rejected"
@@ -298,7 +379,7 @@ def test_analyze_passes_the_pipeline_through_without_loading_one(tmp_path, monke
 
     monkeypatch.setattr("src.enroll.diarize_audio", _spy)
 
-    enroll.analyze(audio_path, pipeline=sentinel)
+    enroll.analyze(audio_path, pipeline=sentinel, model=MODEL)
 
     assert seen["pipeline"] is sentinel
 
@@ -328,7 +409,7 @@ def test_analyze_converts_to_wav_before_diarizing(tmp_path, monkeypatch):
     monkeypatch.setattr("src.enroll.convert_to_wav", fake_convert)
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize)
 
-    enroll.analyze(audio_path, pipeline=object())
+    enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert seen["src"] == audio_path
     assert seen["dst"].suffix == ".wav"
@@ -353,7 +434,7 @@ def test_analyze_turns_a_conversion_failure_into_a_rejected_result(tmp_path, mon
         "src.enroll.diarize_audio", lambda *a, **k: diarize_calls.append(1)
     )
 
-    analyzed = enroll.analyze(audio_path, pipeline=object())
+    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "analysis_failed"
