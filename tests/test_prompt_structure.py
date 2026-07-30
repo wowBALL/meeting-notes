@@ -21,6 +21,7 @@ REQUIRED_SECTIONS = (
     "## ความเห็นที่ยังไม่ตรงกัน",
     "## ต้องคุยต่อครั้งหน้า",
     "## คำที่น่าจะถอดเพี้ยน",
+    "## จุดที่ควรตรวจเอง",
 )
 
 FULL_SUMMARY_PROMPTS = ("reduce", "single")
@@ -89,6 +90,35 @@ def test_the_map_prompt_carries_the_agreed_versus_proposed_distinction():
     text = _raw("map")
     assert "ตกลงแล้ว" in text
     assert "เสนอไว้" in text
+
+
+def test_the_self_check_section_is_last_so_it_sits_above_the_footer():
+    """6-8 คน = diarization พลาดบ่อย เสียงทับกัน ต้องบอกตรงๆ ว่าตรงไหนไม่มั่นใจ
+    และต้องอยู่ท้ายสุด ติดกับ footer ที่ storage เขียน เพราะทั้งสองส่วนคือ
+    "เรื่องที่ควรรู้เกี่ยวกับสรุปนี้" ไม่ใช่เนื้อหาของการประชุม"""
+    for name in FULL_SUMMARY_PROMPTS:
+        headings = [
+            line.strip()
+            for line in _raw(name).splitlines()
+            if line.strip().startswith("## ")
+        ]
+        assert headings[-1] == "## จุดที่ควรตรวจเอง", (
+            f"{name}.md: หัวข้อสุดท้ายคือ {headings[-1]} ไม่ใช่ จุดที่ควรตรวจเอง"
+        )
+
+
+def test_the_map_stage_is_told_to_flag_what_it_cannot_hear():
+    """ขั้น map เป็นขั้นเดียวที่เห็น transcript ดิบ ความไม่มั่นใจเรื่องเสียงทับกัน
+    หรือผู้พูดไม่ชัดมีแต่ที่นั่นที่รู้ได้"""
+    assert "[ไม่มั่นใจ]" in _raw("map")
+
+
+def test_the_self_check_section_must_not_be_invented():
+    for name in FULL_SUMMARY_PROMPTS:
+        text = _raw(name)
+        assert "ไม่มีจุดที่ไม่มั่นใจ" in text, (
+            f"{name}.md ไม่ได้บอกว่าจะทำอย่างไรเมื่อไม่มีอะไรต้องตรวจ"
+        )
 
 
 def test_the_dev_profile_adds_the_blocker_section_only():

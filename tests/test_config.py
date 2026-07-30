@@ -3,6 +3,8 @@ import logging
 import pytest
 
 from src.config import (
+    DEFAULT_CHUNK_MAX_TOKENS,
+    DEFAULT_CHUNK_OVERLAP_TOKENS,
     DEFAULT_DIARIZATION_MODEL,
     DEFAULT_SPEAKER_MATCH_HIGH,
     DEFAULT_SPEAKER_MATCH_LOW,
@@ -144,6 +146,71 @@ def test_an_unreadable_carryover_value_warns_and_keeps_the_default(
 
     assert config.carryover_enabled is True
     assert "flase" in caplog.text
+
+
+def test_chunk_overlap_defaults_to_ten_percent_of_a_chunk(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("CHUNK_OVERLAP_TOKENS", raising=False)
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.chunk_overlap_tokens == DEFAULT_CHUNK_OVERLAP_TOKENS
+    assert config.chunk_overlap_tokens * 10 == DEFAULT_CHUNK_MAX_TOKENS
+
+
+def test_chunk_overlap_can_be_tuned_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", "2250")
+
+    assert load_config(base_dir=tmp_path).chunk_overlap_tokens == 2250
+
+
+def test_zero_overlap_is_allowed(tmp_path, monkeypatch):
+    """0 = ไม่ให้ chunk คาบเกี่ยวกันเลย เป็นค่าที่ตั้งใจตั้งได้ ไม่ใช่ค่าผิด"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", "0")
+
+    assert load_config(base_dir=tmp_path).chunk_overlap_tokens == 0
+
+
+@pytest.mark.parametrize("value", ["ไม่ใช่เลข", "-100", "15000", "99999"])
+def test_an_unusable_overlap_warns_and_falls_back(tmp_path, monkeypatch, caplog, value):
+    """overlap ที่ >= ขนาด chunk ทำให้ split_into_chunks raise ValueError ซึ่งจะทำให้
+    ประชุมนั้นตกไป failed/ ทั้งที่ถอดเสียงด้วย GPU เสร็จไปแล้ว -- ต้องดักที่นี่
+    ไม่ใช่ปล่อยให้ไประเบิดตอนสรุป (แบบเดียวกับ UI_PORT และ SPEAKER_MATCH_*)"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", value)
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.chunk_overlap_tokens == DEFAULT_CHUNK_OVERLAP_TOKENS
+    assert value in caplog.text
+
+
+def test_a_very_large_overlap_is_honoured_but_warned_about(tmp_path, monkeypatch, caplog):
+    """วัดแล้ว: overlap 14999 (ต่ำกว่าเพดานแค่ 1) ทำให้ transcript เดียวกันแตกจาก
+    13 chunk เป็น 277 chunk = ค่า API 21 เท่าแบบเงียบๆ ค่านี้ "ถูกต้อง" ตามกฎ
+    overlap < max จึงไม่ปฏิเสธ แต่ต้องเตือน ไม่ใช่ปล่อยให้บิลมาเซอร์ไพรส์"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", "12000")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.chunk_overlap_tokens == 12000, "ต้องเคารพค่าที่ผู้ใช้ตั้ง"
+    assert "12000" in caplog.text
+
+
+def test_a_normal_overlap_produces_no_warning(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", "3000")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.chunk_overlap_tokens == 3000
+    assert "CHUNK_OVERLAP_TOKENS" not in caplog.text
 
 
 def test_load_config_reads_whisper_model_override(tmp_path, monkeypatch):

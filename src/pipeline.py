@@ -340,6 +340,7 @@ def _finish_meeting(
                 glossary_text=glossary_text,
                 profile=profile,
                 carryover_text=carryover_text,
+                chunk_overlap_tokens=config.chunk_overlap_tokens,
             )
         except Exception as e:
             activity.append(

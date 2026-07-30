@@ -98,6 +98,17 @@ DEFAULT_CARRYOVER_ENABLED = True
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
+# ขนาด chunk ตอนหั่น transcript ยาว และส่วนที่ให้ chunk คาบเกี่ยวกัน
+#
+# ค่าคู่นี้อยู่ที่นี่ไม่ใช่ใน summarize.py เพราะ summarize.py import config อยู่แล้ว
+# ทางกลับกันจะเป็น import วน และการตรวจว่า overlap < max ต้องเห็นทั้งสองค่า
+#
+# overlap มีไว้กันบทสนทนาขาดกลางประโยคตรงรอยต่อ chunk 1_500/15_000 = 10%
+# ผลข้างเคียงที่ต้องรู้: segment ท้าย chunk ถูกเล่นซ้ำที่หัว chunk ถัดไป จึงเป็นเหตุผล
+# ที่ตัวกรองศัพท์ต้องทำงานครั้งเดียวก่อนหั่น chunk ไม่ใช่ทีละ chunk (ไม่งั้นนับซ้ำ)
+DEFAULT_CHUNK_MAX_TOKENS = 15_000
+DEFAULT_CHUNK_OVERLAP_TOKENS = 1_500
+
 
 @dataclass
 class Config:
@@ -115,6 +126,7 @@ class Config:
     speaker_match_low: float = DEFAULT_SPEAKER_MATCH_LOW
     meeting_profile: str = DEFAULT_MEETING_PROFILE
     carryover_enabled: bool = DEFAULT_CARRYOVER_ENABLED
+    chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -144,6 +156,49 @@ def _read_bool(name: str, default: bool) -> bool:
         default,
     )
     return default
+
+
+def _read_chunk_overlap() -> int:
+    """overlap จาก .env -- ตกกลับไปที่ default พร้อมเตือนเมื่อใช้ไม่ได้
+
+    ต้องดักที่นี่ ไม่ใช่ปล่อยไปถึง split_into_chunks: ที่นั่น overlap >= max_tokens
+    raise ValueError ซึ่งจะทำให้ประชุมนั้นตกไป failed/ ทั้งที่ถอดเสียงด้วย GPU เสร็จ
+    และจ่ายไปแล้ว ค่าที่พิมพ์ผิดใน .env ต้องไม่แพงขนาดนั้น (เหมือน UI_PORT)
+
+    0 ผ่านได้: การไม่ให้ chunk คาบเกี่ยวกันเลยเป็นค่าที่ตั้งใจตั้งได้
+    """
+    raw = os.environ.get("CHUNK_OVERLAP_TOKENS", "").strip()
+    if not raw:
+        return DEFAULT_CHUNK_OVERLAP_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = None
+    if value is None or value < 0 or value >= DEFAULT_CHUNK_MAX_TOKENS:
+        logger.warning(
+            "CHUNK_OVERLAP_TOKENS=%r ใช้ไม่ได้ (ต้องเป็นจำนวนเต็ม 0 ถึง %d) "
+            "ใช้ค่าเริ่มต้น %d แทน / unusable CHUNK_OVERLAP_TOKENS %r, falling back to %d",
+            raw,
+            DEFAULT_CHUNK_MAX_TOKENS - 1,
+            DEFAULT_CHUNK_OVERLAP_TOKENS,
+            raw,
+            DEFAULT_CHUNK_OVERLAP_TOKENS,
+        )
+        return DEFAULT_CHUNK_OVERLAP_TOKENS
+    # เกินครึ่งของขนาด chunk = จำนวน chunk เริ่มระเบิด วัดกับ transcript 300 segment:
+    # overlap 1500 -> 14 chunk, 7500 (ครึ่ง) -> 24 chunk, 14999 -> 277 chunk
+    # ค่านี้ยัง "ถูกต้อง" ตามกฎ overlap < max จึงไม่ปฏิเสธ (ผู้ใช้ตั้งมาเองย่อมมีเหตุผล)
+    # แต่ต้องเตือน เพราะแต่ละ chunk คือ API call ที่จ่ายจริง ไม่ควรมาเซอร์ไพรส์ตอนดูบิล
+    if value > DEFAULT_CHUNK_MAX_TOKENS // 2:
+        logger.warning(
+            "CHUNK_OVERLAP_TOKENS=%d เกินครึ่งของขนาด chunk (%d) จำนวน chunk จะเพิ่มขึ้น "
+            "อย่างรวดเร็วและแต่ละ chunk คือหนึ่ง API call ที่จ่ายเงินจริง / "
+            "overlap %d exceeds half the chunk size, expect many more paid API calls",
+            value,
+            DEFAULT_CHUNK_MAX_TOKENS,
+            value,
+        )
+    return value
 
 
 def _read_float(name: str, default: float) -> float:
@@ -190,6 +245,7 @@ def load_config(base_dir: Path | None = None) -> Config:
         )
         meeting_profile = DEFAULT_MEETING_PROFILE
     carryover_enabled = _read_bool("CARRYOVER_ENABLED", DEFAULT_CARRYOVER_ENABLED)
+    chunk_overlap_tokens = _read_chunk_overlap()
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -231,4 +287,5 @@ def load_config(base_dir: Path | None = None) -> Config:
         speaker_match_low=speaker_match_low,
         meeting_profile=meeting_profile,
         carryover_enabled=carryover_enabled,
+        chunk_overlap_tokens=chunk_overlap_tokens,
     )

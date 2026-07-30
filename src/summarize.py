@@ -3,7 +3,11 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
-from src.config import DEFAULT_SUMMARY_MODEL
+from src.config import (
+    DEFAULT_CHUNK_MAX_TOKENS,
+    DEFAULT_CHUNK_OVERLAP_TOKENS,
+    DEFAULT_SUMMARY_MODEL,
+)
 from src.llm import MissingSettingError, Provider, UnusableAnswerError, resolve
 from src.prompts import DEFAULT_PROFILE, FALLBACKS, render
 from src.render import format_timestamp
@@ -12,8 +16,10 @@ from src.retry import retry_with_backoff
 logger = logging.getLogger(__name__)
 
 SINGLE_CALL_THRESHOLD_TOKENS = 20_000
-CHUNK_MAX_TOKENS = 15_000
-CHUNK_OVERLAP_TOKENS = 1_500
+# ค่าจริงอยู่ใน config.py (ที่นั่นตรวจ .env ให้ด้วย) ชื่อสองตัวนี้คงไว้เพราะเป็นค่า
+# เริ่มต้นที่ใช้เมื่อผู้เรียกไม่ได้ส่ง overlap มา และมีเทสต์อ้างถึงอยู่
+CHUNK_MAX_TOKENS = DEFAULT_CHUNK_MAX_TOKENS
+CHUNK_OVERLAP_TOKENS = DEFAULT_CHUNK_OVERLAP_TOKENS
 # Chunks are independent, so the map stage is bound by its slowest call rather
 # than by their sum. 4 keeps a 13-chunk (5-hour) meeting well inside the API's
 # rate limits while cutting the map stage to roughly a quarter of its wall clock.
@@ -184,6 +190,7 @@ def summarize_transcript(
     glossary_text: str = "",
     profile: str = DEFAULT_PROFILE,
     carryover_text: str = "",
+    chunk_overlap_tokens: int | None = None,
 ) -> str:
     """`glossary_text` มาจาก glossary.format_for_prompt() -- ว่างได้ แปลว่าไม่มีตาราง
     `profile` เลือกไฟล์ prompts/profiles/<profile>.md ที่จะแทรกเข้า {profile_rules}
@@ -226,7 +233,10 @@ def summarize_transcript(
         return single_call()
 
     segments = parse_transcript_segments(transcript_markdown)
-    chunks = split_into_chunks(segments, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS)
+    overlap = (
+        CHUNK_OVERLAP_TOKENS if chunk_overlap_tokens is None else chunk_overlap_tokens
+    )
+    chunks = split_into_chunks(segments, CHUNK_MAX_TOKENS, overlap)
 
     if not chunks:
         return single_call()

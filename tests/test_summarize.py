@@ -55,6 +55,43 @@ def _is_single(system: str) -> bool:
     return not _is_map(system) and not _is_reduce(system)
 
 
+def test_a_tuned_chunk_overlap_actually_changes_the_chunking():
+    """ค่า overlap ที่ตั้งใน .env ต้องมีผลจริง ไม่ใช่รับมาแล้ววางเฉยๆ
+    overlap มากขึ้น = เนื้อหาถูกเล่นซ้ำมากขึ้น = จำนวน chunk มากขึ้นบน transcript เดิม"""
+    transcript = _long_transcript(200)
+
+    def chunk_count(overlap):
+        client = _prompt_aware_client()
+        with _patch_anthropic(client):
+            summarize_transcript(
+                transcript, model="claude-opus-5", chunk_overlap_tokens=overlap
+            )
+        return sum(
+            1
+            for call in client.messages.create.call_args_list
+            if _is_map(call.kwargs["system"])
+        )
+
+    no_overlap = chunk_count(0)
+    heavy_overlap = chunk_count(7_500)
+
+    assert no_overlap >= 2, "sanity: transcript ต้องยาวพอให้หั่นหลาย chunk"
+    assert heavy_overlap > no_overlap
+
+
+def test_the_default_overlap_is_used_when_none_is_given():
+    transcript = _long_transcript(200)
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, model="claude-opus-5")
+
+    default_calls = sum(
+        1 for c in client.messages.create.call_args_list if _is_map(c.kwargs["system"])
+    )
+    assert default_calls == _expected_chunk_count(transcript)
+
+
 def test_the_stage_markers_stay_mutually_exclusive():
     """ตัวแยกขั้นตอนด้านบนคือฐานของเทสต์อีกสิบกว่าตัวในไฟล์นี้ ถ้ามันแยกผิด
     fake client จะตอบผิดสาขาแล้วเทสต์พวกนั้นล้มแบบชี้สาเหตุไม่ได้
