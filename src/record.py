@@ -452,6 +452,14 @@ def run_recording(
         )
 
         def on_part_closed(parts: list[str]) -> None:
+            # profile ต้องมาคู่กับ claude_model ทุกที่ที่เขียน manifest -- ไฟล์นี้ถูกเขียน
+            # ทับทั้งไฟล์ ไม่ใช่ patch ทีละคีย์ คีย์ที่ไม่ส่งจึงกลายเป็น None (default ของ
+            # write_manifest) แล้ว finish_session ที่อ่านต่อเขียน job.json โดยไม่มี profile
+            # ฝั่งสรุปจึงตกไปใช้ค่าจาก .env ทุกครั้งไม่ว่าผู้ใช้จะเลือกอะไรไว้
+            #
+            # ทุกการอัดปิด part อย่างน้อยหนึ่งครั้งตอนหยุด จึงพลาดทุกประชุม ไม่ใช่เคสมุม
+            # (วัดจาก activity.jsonl ของจริง 2026-07-30 12:51:29: part_closed ยิงก่อน
+            # encode_started ทันที และ job.json ที่ได้มีแต่ claude_model)
             write_manifest(
                 session_dir,
                 stem,
@@ -461,6 +469,7 @@ def run_recording(
                 "recording",
                 devices,
                 claude_model=claude_model,
+                profile=profile,
             )
             emit("part_closed", {"count": len(parts)})
 
