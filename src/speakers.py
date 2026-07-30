@@ -11,6 +11,7 @@
 import json
 import logging
 import math
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -106,12 +107,51 @@ def is_usable_embedding(vector) -> bool:
     pyannote/audio/pipelines/speaker_diarization.py ของไลบรารี บรรทัด ~765) เวกเตอร์
     ศูนย์ล้วนไม่มีทิศทาง cosine จึงไม่นิยาม และถ้าปล่อยเข้าทะเบียนมันจะ "เหมือน" กับ
     เวกเตอร์ศูนย์อื่นทุกตัว
+
+    ที่เหลือคือขนาดที่ float เก็บค่าที่ต้องใช้เทียบไว้ไม่ได้ เกณฑ์จึงเป็น "ผลรวมกำลังสอง
+    เป็น float ปกติ" ไม่ใช่ "norm > 0.0" ซึ่งกันทั้งสองปลายพร้อมเวกเตอร์ศูนย์ในตัว:
+
+    * inf/nan -- norm ของ inf เป็น inf ซึ่ง > 0.0 จริง แต่ cosine ที่ได้เป็น nan และ nan
+      แพ้ `score > best.score` ใน match_known ทุกครั้ง ตัวอย่างพิษตัวเดียวจึงล็อก best
+      ไว้แล้วกลบตัวอย่างจริงของคนคนนั้นทั้งหมดเงียบ ๆ = อาการ "ลงทะเบียนแล้วระบบก็ยังจำ
+      ไม่ได้" ที่การ์ดนี้มีไว้กันตั้งแต่แรก
+    * ใหญ่เกิน -- 1e308 ก็พอให้ผลรวมกำลังสองล้นเป็น inf แปลว่าเทียบกับใครไม่ได้เลย
+    * เล็กเกิน -- กำลังสองตกไปอยู่ช่วง subnormal เหลือ precision ไม่กี่บิต norm ที่ได้จึง
+      ผิดและ cosine ออกนอก [-1, 1] ได้จริง (วัด 2026-07-30: คู่สเกล 1e-162 ให้ -2.0)
+      ปลายนี้ร้ายที่สุดเพราะไม่พังให้เห็น -- ค่าบวกทำนองเดียวกัน >= high คือใส่ชื่อผิดคน
+      ลง transcript.md ให้เองโดยไม่มีใครกดยืนยัน
+
+    ทางเข้ามีจริงทุกแบบ: registry.json กับไฟล์คิวถูกแก้มือได้ตามเจตนาของโปรเจกต์ (ดู
+    save_registry) json.loads รับ `Infinity`/`NaN` เปล่า ๆ และคืน int ที่ยาวเท่าไหร่ก็ได้
+    -- จึงเช็คแต่ละช่องด้วยการแปลงเป็น float จริง ไม่ใช่ดูแค่ชนิด เพราะปลายทางทุกทางเรียก
+    float(value) ตรง ๆ (add_sample ตอนเก็บ, cosine_similarity ตอนเทียบ) การ์ดที่ผ่านทั้งที่
+    ปลายทางแปลงไม่ได้คือการเลื่อนความพังไปที่ที่ไม่มีใครดักไว้
+
+    เกณฑ์นี้ไม่แตะเวกเตอร์จริง: ของจาก pyannote มี norm ราว 3.3 (ดู enroll.py) ห่างจากทั้ง
+    สองปลายร้อยกว่า order of magnitude และเมื่อผลรวมกำลังสองที่นี่เป็นค่าปกติ กำลังสองของ
+    ทุกช่องกับ dot product ที่ cosine_similarity คิดต่อก็คำนวณได้เสมอ
     """
     if not isinstance(vector, list) or not vector:
         return False
-    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in vector):
-        return False
-    return math.sqrt(sum(float(value) ** 2 for value in vector)) > 0.0
+    numbers: list[float] = []
+    for value in vector:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            number = float(value)
+        except OverflowError:
+            return False
+        if not math.isfinite(number):
+            return False
+        numbers.append(number)
+    # คูณเอง ไม่ใช้ `** 2`: float ที่ล้นจากการคูณได้ inf ซึ่งเช็คต่อได้ ส่วน `**` โยน
+    # OverflowError ออกมาจากการ์ด และมันไม่ใช่ ValueError ที่ผู้เรียกดักไว้ (ดู
+    # session_service ที่แปลงเป็น 400 bad_embedding) จึงกลายเป็น 500 ที่ไม่มีใครอธิบาย
+    #
+    # sys.float_info.min คือ float ปกติที่เล็กสุด ค่าที่ต่ำกว่านี้ยังเก็บได้แต่เสีย
+    # precision ไปตามความเล็ก -- เทียบตรง ๆ แบบนี้จึงกันเวกเตอร์ศูนย์ล้วนไปด้วยในตัว
+    total = sum(number * number for number in numbers)
+    return math.isfinite(total) and total >= sys.float_info.min
 
 
 def sample_model(sample: dict) -> str:

@@ -1118,6 +1118,27 @@ def test_post_confirm_refuses_a_zero_vector(tmp_path):
     assert speakers.load_registry(tmp_path) == []
 
 
+def test_post_confirm_refuses_a_huge_vector_with_a_400_not_a_500(tmp_path):
+    # ไฟล์ผลถูกแก้มือได้และมาจากเวอร์ชันเก่ากว่านี้ได้ (ดูคอมเมนต์ที่จุดเช็คใน
+    # session_service) ค่าใหญ่ระดับนี้ทำให้การคิด norm ในการ์ดล้นเป็น OverflowError
+    # ซึ่งไม่ใช่ ValueError ที่ endpoint นี้ดักไว้ ผู้ใช้จึงได้ 500 เปล่า ๆ แทนที่จะได้
+    # bad_embedding ที่บอกได้ว่าไฟล์ผลใช้ไม่ได้
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [1e308, 1e308]}
+    )
+    client = create_app(config).test_client()
+
+    response = client.post(
+        "/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "bad_embedding"
+    assert speakers.load_registry(tmp_path) == []
+
+
 def test_post_confirm_refuses_a_name_that_is_empty_after_cleaning(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
