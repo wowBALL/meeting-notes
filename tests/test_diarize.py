@@ -1,5 +1,5 @@
 import sys
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -31,14 +31,6 @@ def _fake_pyannote(mock_pipeline_cls):
     audio_mod.Pipeline = mock_pipeline_cls
     pyannote_pkg.audio = audio_mod
     return {"pyannote": pyannote_pkg, "pyannote.audio": audio_mod}
-
-
-def _fake_torch(cuda_available: bool, device_sentinel):
-    torch_mod = ModuleType("torch")
-    torch_mod.cuda = SimpleNamespace(is_available=lambda: cuda_available)
-    torch_mod.device = MagicMock(return_value=device_sentinel)
-    torch_mod.backends = SimpleNamespace(cudnn=SimpleNamespace(enabled=True))
-    return torch_mod
 
 
 class FakeTurn:
@@ -201,24 +193,21 @@ def test_diarize_audio_keeps_the_turns_when_the_embeddings_attribute_itself_rais
     assert result.embeddings == {}
 
 
-def test_load_diarization_pipeline_moves_to_gpu_when_available():
+def test_load_diarization_pipeline_moves_to_the_device_gpu_py_hands_it():
     loaded = MagicMock()
     mock_pipeline_cls = MagicMock()
     mock_pipeline_cls.from_pretrained.return_value = loaded
-    cuda_device = object()
+    device = object()
 
-    with patch.dict(
-        sys.modules,
-        {**_fake_pyannote(mock_pipeline_cls), "torch": _fake_torch(True, cuda_device)},
+    with patch.dict(sys.modules, _fake_pyannote(mock_pipeline_cls)), patch(
+        "src.diarize.cuda_device", return_value=device
     ):
         result = load_diarization_pipeline("hf-test-token")
 
     mock_pipeline_cls.from_pretrained.assert_called_once_with(
         DEFAULT_DIARIZATION_MODEL, token="hf-test-token"
     )
-    # pyannote defaults to CPU; without this .to() a 50-minute meeting spends
-    # 15+ minutes in diarization instead of ~2
-    loaded.to.assert_called_once_with(cuda_device)
+    loaded.to.assert_called_once_with(device)
     assert result is loaded
 
 
@@ -228,9 +217,8 @@ def test_load_diarization_pipeline_honours_a_custom_checkpoint():
     mock_pipeline_cls = MagicMock()
     mock_pipeline_cls.from_pretrained.return_value = loaded
 
-    with patch.dict(
-        sys.modules,
-        {**_fake_pyannote(mock_pipeline_cls), "torch": _fake_torch(False, object())},
+    with patch.dict(sys.modules, _fake_pyannote(mock_pipeline_cls)), patch(
+        "src.diarize.cuda_device", return_value=None
     ):
         load_diarization_pipeline("hf-test-token", "pyannote/speaker-diarization-3.1")
 
@@ -239,38 +227,17 @@ def test_load_diarization_pipeline_honours_a_custom_checkpoint():
     )
 
 
-def test_load_diarization_pipeline_disables_torch_cudnn_on_gpu():
-    # faster-whisper's ctranslate2 loads the cu12 cuDNN DLLs while torch ships
-    # its own cu13 build under the same DLL basenames. Windows dedupes by name,
-    # so mixing them dies with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH the
-    # moment pyannote's first GPU forward runs after whisper (observed on the
-    # real watcher, 2026-07-24). torch must not touch cuDNN at all.
+def test_load_diarization_pipeline_stays_on_cpu_when_there_is_no_device():
     loaded = MagicMock()
     mock_pipeline_cls = MagicMock()
     mock_pipeline_cls.from_pretrained.return_value = loaded
-    fake_torch = _fake_torch(True, object())
 
-    with patch.dict(sys.modules, {**_fake_pyannote(mock_pipeline_cls), "torch": fake_torch}):
-        load_diarization_pipeline("hf-test-token")
-
-    assert fake_torch.backends.cudnn.enabled is False
-
-
-def test_load_diarization_pipeline_stays_on_cpu_without_cuda():
-    loaded = MagicMock()
-    mock_pipeline_cls = MagicMock()
-    mock_pipeline_cls.from_pretrained.return_value = loaded
-    fake_torch = _fake_torch(False, object())
-
-    with patch.dict(
-        sys.modules,
-        {**_fake_pyannote(mock_pipeline_cls), "torch": fake_torch},
+    with patch.dict(sys.modules, _fake_pyannote(mock_pipeline_cls)), patch(
+        "src.diarize.cuda_device", return_value=None
     ):
         result = load_diarization_pipeline("hf-test-token")
 
     loaded.to.assert_not_called()
-    # no GPU -> no DLL clash possible; leave torch's defaults alone
-    assert fake_torch.backends.cudnn.enabled is True
     assert result is loaded
 
 
