@@ -19,8 +19,9 @@ from typing import Any
 
 from src.audio_convert import convert_to_wav
 from src.diarize import diarize_audio
-from src.speakers import MIN_SPEAKING_SECONDS, clean_name, is_usable_embedding
+from src.speakers import MIN_SPEAKING_SECONDS, clean_name
 from src.storage import replace_with_retry
+from src.voiceprint import clean_intervals, extract_voiceprints, select_intervals
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +126,19 @@ def _seconds_by_speaker(turns: list[dict]) -> dict[str, float]:
     return seconds
 
 
-def analyze(audio_path: Path, pipeline: Any, model: str) -> dict:
+def analyze(audio_path: Path, pipeline: Any, model: str, embedder) -> dict:
     """ไฟล์เสียงหนึ่งไฟล์ -> ผลที่พร้อมเขียนลง <ชื่อ>.result.json
 
-    `model` คือชื่อ checkpoint ที่ `pipeline` ถูกโหลดมา -- ถูกบันทึกไปกับผลเพื่อให้
-    ตัวอย่างที่ถูกเก็บเข้าทะเบียนทีหลังติดป้ายโมเดลที่สร้างมันจริง ๆ ไม่ใช่โมเดลที่
+    `model` คือชื่อ checkpoint ที่ `pipeline` (แยกผู้พูด) ถูกโหลดมา -- ถูกบันทึกไปกับผล
+    เพื่อให้ตัวอย่างที่ถูกเก็บเข้าทะเบียนทีหลังติดป้ายโมเดลที่สร้างมันจริง ๆ ไม่ใช่โมเดลที่
     ตั้งอยู่ ณ ตอนที่ผู้ใช้กดยืนยัน (ดู speakers.add_sample) ผลที่วิเคราะห์ค้างไว้ข้าม
     การสลับโมเดลจึงยังผูกกับพื้นที่เวกเตอร์ที่ถูกต้องเสมอ
+
+    `embedder` คือตัวคำนวณ voiceprint จริง (ดู voiceprint.PyannoteEmbedder) -- ผลลัพธ์
+    เก็บ `embedder.checkpoint` ไว้เป็น `embedding_model` เพราะนั่นคือป้ายที่บอกว่า
+    เวกเตอร์นี้อยู่ในพื้นที่ไหนจริง ๆ ไม่ใช่ค่าใน config ตอนที่ผู้ใช้กดยืนยันชื่อทีหลัง
+    (เหตุผลเดียวกับ `model` ด้านบน แต่คนละโมเดลกัน: `model` คือโมเดลแยกผู้พูด ส่วน
+    `embedder.checkpoint` คือโมเดล speaker verification ที่สร้างเวกเตอร์)
 
     รับ pipeline เข้ามาไม่โหลดเอง: ผู้เรียกคือ watcher ซึ่งโหลด pyannote ค้างไว้แล้ว
     และการโหลดซ้ำต่อไฟล์กินเวลา 10-20 วินาทีโดยไม่ได้อะไรกลับมา ผลพลอยได้ที่ตั้งใจ
@@ -167,67 +174,81 @@ def analyze(audio_path: Path, pipeline: Any, model: str) -> dict:
         }
 
     seconds = _seconds_by_speaker(result.turns)
-    # ป้ายที่ pyannote ไม่ได้คำนวณเวกเตอร์ให้ (pad ศูนย์มา ดู speakers.is_usable_embedding)
-    # ไม่ใช่ "คนที่สอง" -- มันคือเศษที่โผล่ทับช่วงที่คนคนเดียวกันกำลังพูดอยู่ วัดจริงกับ
-    # คลิปพูดคนเดียวล้วน 67 วินาที (2026-07-29): ได้ป้ายที่สองยาว 0.5 วินาที ซ้อนอยู่
-    # กลางช่วง 12.8-16.5s ที่ป้ายแรกพูดอยู่ norm ของมันเป็น 0.0000 ขณะที่ป้ายจริงได้ 3.32
-    # การนับมันเป็นคนแปลว่าปฏิเสธไฟล์ที่ถูกต้องทิ้ง ซึ่งเกิดบ่อยพอที่จะทำให้ลงทะเบียน
-    # ไม่สำเร็จสักครั้ง
+    # ตัวนับ "กี่คน" เคยเป็น "label ที่มี centroid ที่ใช้ได้" (pyannote pad ศูนย์เข้ามา
+    # เมื่อจำนวน label มากกว่าจำนวน centroid) ซึ่งไม่มีอีกแล้วหลังย้าย voiceprint ออกจาก
+    # pipeline ไปเป็นโมเดล speaker verification แยกต่างหาก (ดู src/voiceprint.py) --
+    # ตอนนี้คือ "label ที่มีเสียงสะอาดไม่มีใครพูดทับถึง 1.5 วินาที" คำนวณจาก turns ล้วน
+    # ไม่ผ่านโมเดล embedding เลย จึงไม่ปนกับความสำเร็จของการ extract ด้านล่าง
     #
-    # นี่ไม่ใช่การผ่อนด่าน multiple_speakers: เสียงคนอื่นที่ปนมาจริงมีเวกเตอร์ของตัวเอง
-    # (norm ระดับเดียวกับป้ายจริง) จึงยังถูกนับและยังถูกปฏิเสธเหมือนเดิมทุกประการ ป้ายที่
-    # ไม่มีเวกเตอร์ต่างหากที่เอาไปทำอะไรต่อไม่ได้อยู่แล้ว -- เก็บไว้นับก็ได้แค่ปฏิเสธของดี
-    #
-    # จงใจไม่ตัดป้ายที่ "พูดสั้นกว่า N วินาที" ทิ้งไปด้วย ทั้งที่เศษพวกนี้มักสั้น: เกณฑ์
-    # เวลาจะกลืนคนที่สองที่พูดจริงแค่แวบเดียวไปด้วย ซึ่งเป็นการผ่อนด่านของจริง ส่วนเกณฑ์
-    # "ไม่มีเวกเตอร์" ไม่กลืนใครเลยเพราะคนที่พูดจริงย่อมมีเวกเตอร์เสมอ
-    usable = {
-        label: total
-        for label, total in seconds.items()
-        if is_usable_embedding(result.embeddings.get(label))
-    }
-    ignored = len(seconds) - len(usable)
-    if ignored:
+    # คอมเมนต์เดิมที่นี่ห้ามใส่เกณฑ์เวลาไว้ที่ด่านนี้ เพราะกลัวกลืนคนที่สองที่พูดจริงแค่
+    # แวบเดียว -- เหตุผลนั้นหมดอายุแล้ว: สิ่งที่ด่านนี้มีไว้กันคือ voiceprint ที่ปนเสียง
+    # คนอื่น และการตัดช่วงทับ (clean_intervals) + ทิ้งท่อนสั้นกว่า 1.5 วิ (select_intervals)
+    # กันตรงนั้นตรง ๆ อยู่แล้วโดยไม่ต้องพึ่งด่านนี้เลย คนที่สองที่พูดสะอาด 5 วินาทีขึ้นไป
+    # ยังมีคีย์ในผลลัพธ์และยังถูกนับเป็นคน ยังถูกปฏิเสธเหมือนเดิมทุกประการ ที่หลุดผ่าน
+    # ด่านนี้ไปได้คือคนที่พูดทับคนอื่นตลอดหรือพูดสั้นกว่า 1.5 วินาที ซึ่งเสียงของเขาไม่เคย
+    # เข้าไปอยู่ใน voiceprint อยู่แล้วไม่ว่าด่านนี้จะนับเขาเป็นคนหรือไม่
+    usable_labels = select_intervals(clean_intervals(result.turns))
+    ignored = len(seconds) - len(usable_labels)
+    if ignored > 0:
         logger.info(
-            "ข้ามป้ายผู้พูดที่ไม่มีเวกเตอร์ %d ป้ายในไฟล์ %s (เหลือ %d ป้ายที่นับเป็นคนจริง)",
+            "ข้ามป้ายผู้พูดที่ไม่มีเสียงสะอาดยาวพอ %d ป้ายในไฟล์ %s (เหลือ %d ป้ายที่นับเป็นคนจริง)",
             ignored,
             audio_path.name,
-            len(usable),
+            len(usable_labels),
         )
 
     base = {
         "suggested_name": suggested_name,
-        "speaker_count": len(usable),
+        "speaker_count": len(usable_labels),
         # นับเวลาจากทุกป้าย ไม่ใช่เฉพาะที่นับเป็นคน: เศษที่ถูกข้ามไปทับอยู่บนช่วงที่คน
-        # จริงพูดอยู่แล้ว (วัดได้: 14.6-15.1s ซ้อนใน 12.8-16.5s) เวลานั้นจึงเป็นเสียงของ
-        # คนนั้นจริง ๆ ตัดออกเท่ากับรายงานต่ำกว่าความจริง -- และที่สำคัญกว่านั้น ถ้านับ
-        # เฉพาะป้ายที่ใช้ได้ ไฟล์ที่มีคนพูด 45 วินาทีแต่เวกเตอร์เสียจะรายงานเป็น 0.0
-        # วินาที แล้วตกด้วยเหตุผล "สั้นเกินไป" ซึ่งเป็นคำอธิบายที่ผิดและแก้ตามไม่ได้
+        # จริงพูดอยู่แล้ว เวลานั้นจึงเป็นเสียงของคนนั้นจริง ๆ ตัดออกเท่ากับรายงานต่ำกว่า
+        # ความจริง -- และที่สำคัญกว่านั้น ถ้านับเฉพาะป้ายที่ใช้ได้ ไฟล์ที่มีคนพูด 45
+        # วินาทีแต่ extract เสียจะรายงานเป็น 0.0 วินาที แล้วตกด้วยเหตุผล "สั้นเกินไป"
+        # ซึ่งเป็นคำอธิบายที่ผิดและแก้ตามไม่ได้
         "speaking_seconds": round(sum(seconds.values()), 1),
     }
-    if ignored:
-        base["ignored_empty_labels"] = ignored
+    if ignored > 0:
+        base["ignored_short_labels"] = ignored
 
-    if len(usable) > 1:
+    if len(usable_labels) > 1:
         return {**base, "status": "rejected", "reason": "multiple_speakers"}
     # เรียงก่อน unusable_embedding โดยเจตนา: ไฟล์ที่ไม่มีเสียงพูดเลย (0.0 วินาที) ต้อง
     # ได้เหตุผล "สั้นเกินไป" ซึ่งผู้ใช้ทำตามได้ ไม่ใช่ "เวกเตอร์ใช้ไม่ได้" ที่เป็นภาษา
     # ของระบบและไม่บอกว่าต้องทำอะไรต่อ
     if base["speaking_seconds"] < MIN_SPEAKING_SECONDS:
         return {**base, "status": "rejected", "reason": "too_short"}
-    # มีเสียงพูดยาวพอ แต่ไม่มีป้ายไหนมีเวกเตอร์ให้เก็บเลย
-    if not usable:
+    # มีเสียงพูดยาวพอ แต่ไม่มีป้ายไหนมีเสียงสะอาดพอจะนับเป็นคนเลย
+    if not usable_labels:
         return {**base, "status": "rejected", "reason": "unusable_embedding"}
 
-    # ผ่านตัวกรอง usable มาแล้ว จึงการันตีว่าใช้ได้ ไม่ต้องเช็คซ้ำอีกชั้น (การเช็คซ้ำ
-    # ตรงนี้จะเป็นโค้ดที่ไม่มีวันทำงาน ซึ่งอ่านเหมือนมีการป้องกันทั้งที่ไม่มี)
-    embedding = result.embeddings[next(iter(usable))]
+    # ด่านนับคนใช้ turns ล้วน ไม่รู้จักโมเดล embedding เลย -- การคำนวณเวกเตอร์จริง (ซึ่ง
+    # พึ่ง GPU/โมเดลภายนอก) จึงเพิ่งเริ่มตรงนี้ และยังพังได้อิสระจากด่านข้างบน แปลงเป็น
+    # wav อีกครั้งเป็นครั้งที่สอง (ครั้งแรกอยู่ในบล็อก diarize ด้านบน) แทนที่จะรวมเป็น
+    # ครั้งเดียว: ffmpeg บนไฟล์ enroll สั้น ๆ ราคาไม่กี่ร้อย ms ส่วนการรวมเป็นครั้งเดียว
+    # ต้องขยายอายุของ TemporaryDirectory ให้ครอบทั้งฟังก์ชัน ซึ่งจะทำให้ path การ reject
+    # ทุกทางด้านบน (multiple_speakers/too_short/unusable_embedding) ถือ temp dir ไว้โดย
+    # ไม่จำเป็น -- ถ้าวัดแล้วช้าจริงค่อยรวมทีหลัง
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
+            convert_to_wav(audio_path, wav_path)
+            voiceprints = extract_voiceprints(wav_path, result.turns, embedder)
+    except Exception as e:
+        logger.warning("สร้าง voiceprint ของ %s ไม่สำเร็จ: %s", audio_path.name, e)
+        return {**base, "status": "rejected", "reason": "unusable_embedding"}
+
+    voiceprint = voiceprints.get(next(iter(usable_labels)))
+    if voiceprint is None:
+        return {**base, "status": "rejected", "reason": "unusable_embedding"}
 
     return {
         **base,
         "status": "ok",
         "model": model,
-        "embedding": [float(value) for value in embedding],
+        "embedding_model": embedder.checkpoint,
+        "embedding": list(voiceprint.embedding),
+        "embedding_seconds": voiceprint.seconds,
+        "segment_count": voiceprint.segment_count,
     }
 
 
