@@ -107,6 +107,45 @@ def test_an_empty_meeting_profile_falls_back_to_dev(tmp_path, monkeypatch):
     assert load_config(base_dir=tmp_path).meeting_profile == "dev"
 
 
+def test_carryover_is_enabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("CARRYOVER_ENABLED", raising=False)
+
+    assert load_config(base_dir=tmp_path).carryover_enabled is True
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "off"])
+def test_carryover_can_be_switched_off(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CARRYOVER_ENABLED", value)
+
+    assert load_config(base_dir=tmp_path).carryover_enabled is False
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on"])
+def test_carryover_can_be_switched_on_explicitly(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CARRYOVER_ENABLED", value)
+
+    assert load_config(base_dir=tmp_path).carryover_enabled is True
+
+
+def test_an_unreadable_carryover_value_warns_and_keeps_the_default(
+    tmp_path, monkeypatch, caplog
+):
+    """คนที่พิมพ์ CARRYOVER_ENABLED=flase กำลังพยายาม "ปิด" อยู่ ถ้าเงียบแล้วเปิดต่อ
+    เขาจะไม่รู้ว่ามันยังทำงาน -- ซึ่งเป็นฝั่งที่เสียหายกว่า เพราะเหตุผลที่คนอยากปิดคือ
+    สรุปครั้งก่อนเพี้ยนแล้วไม่อยากให้ส่งต่อ"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CARRYOVER_ENABLED", "flase")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.carryover_enabled is True
+    assert "flase" in caplog.text
+
+
 def test_load_config_reads_whisper_model_override(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")

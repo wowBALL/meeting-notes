@@ -44,4 +44,6 @@ transcript ถอดด้วย faster-whisper คำเทคนิคแล�
 
 {glossary}
 
+{carryover}
+
 {profile_rules}

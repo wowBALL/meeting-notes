@@ -210,6 +210,130 @@ def test_the_meeting_profile_is_recorded_in_the_summary_footer(tmp_path):
     assert "ประเภทประชุม: cross" in summary
 
 
+def _previous_summary(config, name, profile, open_items):
+    d = config.meetings_dir / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "summary.md").write_text(  # noqa: E501 - โครงสรุปย่อที่มีแค่ส่วนที่ carryover อ่าน
+        f"## ตกลงแล้ว\n- x\n\n## ต้องคุยต่อครั้งหน้า\n{open_items}\n"
+        f"\n---\nสรุปด้วย GLM-5.2\nประเภทประชุม: {profile}\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_open_items_from_the_previous_meeting_reach_the_summarizer(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    _previous_summary(config, "2026-07-20_09-00-standup", "dev", "- เรื่องค้างเมื่อวาน")
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป") as summarize,
+    ):
+        process_file(audio_path, config)
+
+    carryover = summarize.call_args.kwargs["carryover_text"]
+    assert "- เรื่องค้างเมื่อวาน" in carryover
+    assert "## คืบหน้าจากครั้งก่อน" in carryover
+
+
+def test_carryover_only_comes_from_the_same_profile(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    _previous_summary(config, "2026-07-26_09-00-crossteam", "cross", "- ของข้ามฝ่าย")
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป") as summarize,
+    ):
+        process_file(audio_path, config)
+
+    assert summarize.call_args.kwargs["carryover_text"] == ""
+
+
+def test_carryover_can_be_switched_off(tmp_path):
+    config = make_config(tmp_path)
+    config.carryover_enabled = False
+    config.inbox_dir.mkdir(parents=True)
+    _previous_summary(config, "2026-07-20_09-00-standup", "dev", "- เรื่องค้างเมื่อวาน")
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป") as summarize,
+    ):
+        process_file(audio_path, config)
+
+    assert summarize.call_args.kwargs["carryover_text"] == ""
+
+
+def test_a_retry_does_not_carry_over_its_own_previous_summary(tmp_path):
+    """ลาก .job.json กลับ inbox แล้วรันซ้ำ -- รอบนี้ใช้ transcript เดิมและโฟลเดอร์เดิม
+    ที่มี summary.md จากรอบก่อนอยู่แล้ว ถ้าไม่กันไว้ ประชุมจะยกเรื่องค้างของตัวเองมา
+    เป็น carryover แล้วเขียน "คืบหน้าจากครั้งก่อน" ทับเรื่องเดียวกันวนไปเรื่อยๆ
+
+    ต้องตั้ง .job.json ให้ชี้ transcript เดิมด้วย ไม่ใช่แค่สร้างโฟลเดอร์ชื่อซ้ำ --
+    ชื่อซ้ำเฉยๆ process_file จะสร้างโฟลเดอร์ใหม่ลงท้าย -2 ซึ่งเป็นคนละเคสกัน
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    transcript_path = _saved_transcript(
+        config, "2026-07-25_09-00-weekly-standup", "# Transcript\n\nของเดิม"
+    )
+    record_transcript(audio_path, transcript_path)
+    own_dir = _previous_summary(
+        config, "2026-07-25_09-00-weekly-standup", "dev", "- เรื่องค้างของตัวเอง"
+    )
+    assert (own_dir / "summary.md").exists(), "sanity: สรุปรอบก่อนต้องอยู่ในโฟลเดอร์เดิม"
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป") as summarize,
+    ):
+        process_file(audio_path, config)
+
+    assert "เรื่องค้างของตัวเอง" not in summarize.call_args.kwargs["carryover_text"]
+
+
 def test_glossary_reaches_the_summarizer_as_prompt_text(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)

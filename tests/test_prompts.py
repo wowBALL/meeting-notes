@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from src.prompts import FALLBACKS, render
+from src.prompts import DEFAULT_PROMPTS_DIR, FALLBACKS, render
 
 
 @pytest.fixture
@@ -89,6 +89,45 @@ def test_braces_in_a_prompt_file_survive_untouched(prompts_dir):
     assert '{"topic": "x"}' in result
     assert "{ไม่ใช่ placeholder}" in result
     assert "กฎ dev ล้วน" in result
+
+
+def test_render_substitutes_the_carryover_block(prompts_dir):
+    (prompts_dir / "reduce.md").write_text(
+        "รวมสรุป\n\n{carryover}\n\n{profile_rules}\n", encoding="utf-8"
+    )
+
+    result = render(
+        "reduce", carryover_text="## เรื่องค้าง\n- A", prompts_dir=prompts_dir
+    )
+
+    assert "## เรื่องค้าง\n- A" in result
+    assert "{carryover}" not in result
+
+
+def test_an_empty_carryover_leaves_no_placeholder_behind(prompts_dir):
+    (prompts_dir / "reduce.md").write_text(
+        "รวมสรุป\n\n{carryover}\n\nจบ\n", encoding="utf-8"
+    )
+
+    result = render("reduce", carryover_text="", prompts_dir=prompts_dir)
+
+    assert "{carryover}" not in result
+    assert "เรื่องค้าง" not in result
+
+
+def test_the_shipped_full_summary_prompts_have_a_carryover_placeholder():
+    """ประชุมสั้น (single) กับประชุมยาว (reduce) ต้องได้ carryover เหมือนกัน
+    ไม่ใช่หายไปเพราะประชุมสั้น"""
+    for name in ("reduce", "single"):
+        raw = (DEFAULT_PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
+        assert "{carryover}" in raw, f"{name}.md ไม่มี placeholder {{carryover}}"
+
+
+def test_map_has_no_carryover_placeholder():
+    """ขั้น map สรุปทีละช่วงของประชุมนี้ เรื่องค้างของประชุมก่อนไม่เกี่ยวกับมันเลย
+    และ map ถูกเรียกต่อ chunk -- ยัดเข้าไปคือจ่ายค่า token ซ้ำทุก chunk ฟรีๆ"""
+    raw = (DEFAULT_PROMPTS_DIR / "map.md").read_text(encoding="utf-8")
+    assert "{carryover}" not in raw
 
 
 def test_every_prompt_name_has_an_embedded_fallback():

@@ -183,6 +183,7 @@ def summarize_transcript(
     model: str = DEFAULT_SUMMARY_MODEL,
     glossary_text: str = "",
     profile: str = DEFAULT_PROFILE,
+    carryover_text: str = "",
 ) -> str:
     """`glossary_text` มาจาก glossary.format_for_prompt() -- ว่างได้ แปลว่าไม่มีตาราง
     `profile` เลือกไฟล์ prompts/profiles/<profile>.md ที่จะแทรกเข้า {profile_rules}
@@ -195,9 +196,15 @@ def summarize_transcript(
     เปิดช่องให้แก้ไฟล์กลางประชุมแล้วได้สรุปที่ครึ่งหนึ่งใช้กฎเก่าครึ่งหนึ่งใช้กฎใหม่
     """
     provider = resolve(model)
-    single_system = render("single", profile=profile, glossary_text=glossary_text)
+    # carryover ไม่เข้าขั้น map: map สรุปทีละช่วงของประชุมนี้ เรื่องค้างของประชุมก่อน
+    # ไม่เกี่ยวกับมัน และ map ถูกเรียกต่อ chunk -- ยัดเข้าไปคือจ่ายค่า token ซ้ำทุก chunk
+    single_system = render(
+        "single", profile=profile, glossary_text=glossary_text, carryover_text=carryover_text
+    )
     chunk_system = render("map", profile=profile, glossary_text=glossary_text)
-    reduce_system = render("reduce", profile=profile, glossary_text=glossary_text)
+    reduce_system = render(
+        "reduce", profile=profile, glossary_text=glossary_text, carryover_text=carryover_text
+    )
 
     # Every API call below is retried here, inside summarize_transcript. Callers
     # must not add a retry of their own: with per-chunk retries in place, an outer

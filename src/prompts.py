@@ -104,6 +104,7 @@ def render(
     *,
     profile: str = DEFAULT_PROFILE,
     glossary_text: str = "",
+    carryover_text: str = "",
     prompts_dir: Path | None = None,
 ) -> str:
     """system prompt ที่พร้อมส่งให้โมเดล
@@ -124,6 +125,7 @@ def render(
         return FALLBACKS[name]
     return (
         base.replace("{glossary}", glossary_text.strip())
+        .replace("{carryover}", carryover_text.strip())
         .replace("{profile_rules}", _profile_rules(prompts_dir, profile))
         .strip()
     )

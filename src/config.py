@@ -87,6 +87,17 @@ DEFAULT_SPEAKER_MATCH_LOW = 0.50
 # คำพูดปกติเกินจำเป็นจนได้สรุปที่อ่านแล้วอ้อมค้อม
 DEFAULT_MEETING_PROFILE = "dev"
 
+# ส่งหัวข้อ "ต้องคุยต่อครั้งหน้า" ของประชุมครั้งก่อน (ประเภทเดียวกัน) เข้าไปในสรุปครั้งนี้
+# เปิดเป็นค่าเริ่มต้นเพราะประชุม dev ถี่ 3 ครั้ง/สัปดาห์ เรื่องค้างถูกยกมาคุยต่อเสมอ
+#
+# ปิดเมื่อไหร่: กลไกนี้ผูกสรุปเข้าด้วยกันเป็นลูกโซ่ ถ้าสรุปครั้งหนึ่งเพี้ยน เรื่องค้าง
+# ที่ผิดจะถูกส่งต่อไปครั้งถัดไป ช่วงที่ยังจูน prompt อยู่ควรอ่านหัวข้อนั้นทุกครั้งก่อน
+# ปล่อยผ่าน หรือปิดสวิตช์นี้ไปก่อน
+DEFAULT_CARRYOVER_ENABLED = True
+
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
 
 @dataclass
 class Config:
@@ -103,6 +114,36 @@ class Config:
     speaker_match_high: float = DEFAULT_SPEAKER_MATCH_HIGH
     speaker_match_low: float = DEFAULT_SPEAKER_MATCH_LOW
     meeting_profile: str = DEFAULT_MEETING_PROFILE
+    carryover_enabled: bool = DEFAULT_CARRYOVER_ENABLED
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    """สวิตช์เปิดปิดจาก .env -- ค่าที่อ่านไม่ออกต้องเตือน ไม่ใช่เงียบแล้วใช้ default
+
+    ต่างจาก _read_float ตรงที่เตือนโดยเจตนา: คนที่พิมพ์ `CARRYOVER_ENABLED=flase`
+    กำลังพยายาม "ปิด" อยู่ ถ้าเงียบแล้วเปิดต่อ เขาจะไม่รู้ว่ามันยังทำงาน ซึ่งเป็นฝั่ง
+    ที่เสียหายกว่า เพราะเหตุผลที่คนอยากปิดคือสรุปครั้งก่อนเพี้ยนแล้วไม่อยากให้ส่งต่อ
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE_WORDS:
+        return True
+    if value in _FALSE_WORDS:
+        return False
+    logger.warning(
+        "%s=%r อ่านไม่ออก (ใช้ได้: %s) ใช้ค่าเริ่มต้น %s แทน / "
+        "unreadable %s value %r, falling back to %s",
+        name,
+        raw,
+        ", ".join(sorted(_TRUE_WORDS | _FALSE_WORDS)),
+        default,
+        name,
+        raw,
+        default,
+    )
+    return default
 
 
 def _read_float(name: str, default: float) -> float:
@@ -148,6 +189,7 @@ def load_config(base_dir: Path | None = None) -> Config:
             DEFAULT_MEETING_PROFILE,
         )
         meeting_profile = DEFAULT_MEETING_PROFILE
+    carryover_enabled = _read_bool("CARRYOVER_ENABLED", DEFAULT_CARRYOVER_ENABLED)
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -188,4 +230,5 @@ def load_config(base_dir: Path | None = None) -> Config:
         speaker_match_high=speaker_match_high,
         speaker_match_low=speaker_match_low,
         meeting_profile=meeting_profile,
+        carryover_enabled=carryover_enabled,
     )

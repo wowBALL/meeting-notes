@@ -28,6 +28,7 @@ from src.storage import (
     save_summary,
     save_transcript,
 )
+from src import carryover
 from src.glossary import load as load_glossary
 from src.prompts import CROSS_TEAM_PROFILE
 from src.summarize import summarize_transcript
@@ -316,6 +317,16 @@ def _finish_meeting(
         glossary_text = glossary.format_for_prompt(
             include_cross_team_context=(profile == CROSS_TEAM_PROFILE)
         )
+        # exclude_dir=meeting_dir สำคัญ ไม่ใช่ทางเลือก: path ลองใหม่ (ลาก .job.json
+        # กลับ inbox) เข้ามาที่โฟลเดอร์เดิมซึ่งอาจมี summary.md จากรอบก่อนอยู่แล้ว
+        # ไม่กันไว้ ประชุมจะยกเรื่องค้างของตัวเองมาเป็น "คืบหน้าจากครั้งก่อน" วนไปเรื่อยๆ
+        carryover_text = ""
+        if config.carryover_enabled:
+            carryover_text = carryover.format_for_prompt(
+                carryover.previous_open_items(
+                    config.meetings_dir, profile, exclude_dir=meeting_dir
+                )
+            )
         activity.append(
             config.base_dir,
             job,
@@ -328,6 +339,7 @@ def _finish_meeting(
                 model=claude_model,
                 glossary_text=glossary_text,
                 profile=profile,
+                carryover_text=carryover_text,
             )
         except Exception as e:
             activity.append(
