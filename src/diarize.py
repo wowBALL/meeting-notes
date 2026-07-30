@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from src.config import DEFAULT_DIARIZATION_MODEL
+from src.waveform import load_waveform
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,10 @@ def diarize_audio(
 ) -> DiarizationResult:
     if pipeline is None:
         pipeline = load_diarization_pipeline(hf_token, checkpoint)
-    result = pipeline(str(audio_path))
+    # ป้อนเสียงเป็น waveform ในหน่วยความจำ ไม่ใช่ path -- pyannote 4.x อ่านไฟล์เองผ่าน
+    # torchcodec เท่านั้น ซึ่งโหลดไม่ขึ้นบนเครื่องนี้และทำให้การแยกผู้พูดตายทุกครั้งแบบ
+    # ที่ผู้ใช้ไม่เห็นอะไรเลย (ดูเหตุผลเต็มใน src/waveform.py)
+    result = pipeline(load_waveform(audio_path))
     diarization = result.speaker_diarization
     turns = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
