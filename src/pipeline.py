@@ -269,32 +269,36 @@ def process_file(
                 # บล็อกนี้มีไว้เพื่อให้ voiceprint ที่ล้มเหลวลดขั้นเหลือ "ผู้พูด N" แทนที่จะ
                 # ทิ้งรอบถอดเสียงที่เสร็จไปแล้วทั้งหมด
                 embedding_model = getattr(embedder, "checkpoint", "")
-                if not embedding_model or not embedding_model.strip():
-                    # Minor 1 ของรีวิวรอบสอง: embedder ที่มี .checkpoint อยู่จริงแต่เป็น
-                    # ค่าว่างเปล่า (หรือมีแต่ช่องว่างล้วน) ไม่ raise ตรง getattr ข้างบน --
-                    # voiceprints ที่คำนวณสำเร็จแล้วยังไม่ว่างเปล่า ถ้าปล่อยผ่านไปแบบนั้น
-                    # embedding_model="" จะหลุดไปถึง match_known ซึ่ง validate พารามิเตอร์
-                    # นี้แล้ว raise ValueError -- _match_known_speakers กลืน exception นั้น
-                    # เงียบ ๆ ไป (ไม่มีชื่อโผล่ในทรานสคริปต์ ปลอดภัยแค่ชั้นนั้น) แต่
-                    # embedding_model ว่างเปล่ายังเดินทางต่อไปถึง _record_pending_speakers
-                    # และถูกเขียนลง speakers/pending/<meeting>.json ค้างไว้ถาวร เพราะ
-                    # speakers.add_sample ปฏิเสธ embedding_model ว่างเปล่าเสมอ คนที่มา
-                    # กดยืนยันชื่อทีหลังจะเจอ error ที่แก้ไม่ได้เลยไม่ว่าจะลองกี่ครั้ง --
-                    # ล้าง voiceprints ทิ้งตรงนี้แทน ให้เดินเข้าท่อ "voiceprint ล้มเหลว"
-                    # เส้นทางเดียวกับข้างล่าง (except Exception) ไม่สร้างท่อล้มเหลวใหม่
+                if not isinstance(embedding_model, str) or not embedding_model.strip():
+                    # รีวิวรอบสาม: เช็คของรอบสอง (`if not embedding_model or not
+                    # embedding_model.strip()`) เรียก .strip() โดยไม่เช็ค type ก่อน --
+                    # embedder.checkpoint ที่ truthy แต่ไม่ใช่สตริง (เช่น int, list) ทำให้
+                    # .strip() ยิง AttributeError หลุดไปถึง except Exception ตัวนอกสุดของ
+                    # บล็อกนี้ ซึ่งเขียน log voiceprint_failed เหมือนกันแต่ "ไม่" ล้าง
+                    # voiceprints -- checkpoint ที่ไม่ใช่สตริงจึงเดินทางต่อไปถึง
+                    # _record_pending_speakers ได้เหมือนกับที่ Minor 1 ของรีวิวรอบสองเคยแก้
+                    # ไปเฉพาะกรณีสตริงว่างเปล่า เช็คด้วย isinstance ก่อนเรียก .strip() เสมอ
+                    # จึงครอบทั้งสองกรณี (ว่างเปล่า และไม่ใช่สตริงเลย) ในเงื่อนไขเดียว
+                    #
+                    # ล้าง voiceprints/embedding_model ก่อน log โดยเจตนา (ไม่ใช่หลัง เหมือน
+                    # โค้ดรอบก่อน): activity.append กลืนเฉพาะ OSError ไว้ข้างใน (ดู
+                    # src/activity.py) exception ชนิดอื่นที่หลุดออกมาจาก logger.warning หรือ
+                    # activity.append เองต้องไม่ทิ้ง voiceprints ที่มี checkpoint เสียไว้ค้าง
+                    # อยู่ -- invariant "checkpoint ใช้ไม่ได้ = voiceprints ว่างเปล่าเสมอ"
+                    # ต้องเป็นจริงไม่ว่า logging จะพังหรือไม่ก็ตาม
+                    voiceprints = {}
+                    embedding_model = ""
                     logger.warning(
-                        "embedder คืน checkpoint ว่างเปล่า ถือว่า voiceprint ล้มเหลว "
-                        "ไปต่อโดยไม่จำเสียง"
+                        "embedder คืน checkpoint ที่ใช้ไม่ได้ (ว่างเปล่าหรือไม่ใช่สตริง) "
+                        "ถือว่า voiceprint ล้มเหลว ไปต่อโดยไม่จำเสียง"
                     )
                     activity.append(
                         config.base_dir,
                         job,
                         "voiceprint_failed",
                         "warn",
-                        {"error": "embedder คืน checkpoint ว่างเปล่า"},
+                        {"error": "embedder คืน checkpoint ที่ใช้ไม่ได้"},
                     )
-                    voiceprints = {}
-                    embedding_model = ""
             except Exception as e:
                 logger.warning("สร้าง voiceprint ไม่สำเร็จ ไปต่อโดยไม่จำเสียง: %s", e)
                 activity.append(

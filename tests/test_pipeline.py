@@ -23,6 +23,7 @@ from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, se
 # size on disk, so a fixture part must be comfortably larger than the allowance.
 _FAKE_WAV_BYTES = b"fake wav bytes " * (WAV_HEADER_ALLOWANCE // 16 + 2)
 
+from src import activity
 from src.diarize import DiarizationResult
 from src.voiceprint import Voiceprint
 
@@ -942,6 +943,154 @@ def test_process_file_treats_a_blank_checkpoint_as_a_voiceprint_failure(tmp_path
     # กับ embedding_model ว่างเปล่า ไม่งั้น pending.json จะติด embedding_model="" ซึ่ง
     # speakers.add_sample ปฏิเสธถาวร
     assert load_all_pending(tmp_path) == []
+
+
+def test_process_file_treats_any_non_string_checkpoint_as_a_voiceprint_failure(
+    tmp_path, monkeypatch
+):
+    """embedder.checkpoint ที่ไม่ใช่สตริงเลยต้องถูกปฏิบัติเหมือน voiceprint ล้มเหลว เช่นเดียวกับ
+    ค่าว่างเปล่า -- ไม่ใช่แค่กรณีเดียวที่รีวิวเจอ
+
+    รีวิวรอบสาม: เช็คของรอบสอง (`if not embedding_model or not embedding_model.strip()`)
+    เรียก .strip() โดยไม่เช็ค type ก่อน -- checkpoint ที่ truthy แต่ไม่ใช่สตริง (int, list, ...)
+    ทำให้ .strip() ยิง AttributeError หลุดไปถึง except Exception ตัวนอกของทั้งบล็อก ซึ่ง
+    เขียน log voiceprint_failed เหมือนกันแต่ "ไม่" ล้าง voiceprints -- ผลคือ pending.json
+    ติด embedding_model ที่พังแบบเดียวกับ Minor 1 รีวิวรอบสอง เพียงแต่มาจากชนิดข้อมูลผิด
+    แทนที่จะเป็นสตริงว่างเปล่า
+
+    ครอบคลุมทั้งสี่แบบในเทสต์เดียว (ไม่มีแบบ parametrize ในไฟล์นี้มาก่อน จึงใช้ลูปแทน):
+    int, None, list ที่ truthy แต่ไม่ใช่สตริงเลย และ ""/"   " ที่ว่างเปล่าซึ่งรอบสองแก้ไว้
+    แล้ว -- เอามาซ้ำในนี้เพื่อยืนยันว่าเช็คใหม่ (isinstance ก่อน) ยังกันกรณีเดิมได้เหมือนเดิม
+    """
+    from src.pending import load_all_pending
+
+    class _FixedCheckpointEmbedder:
+        def __init__(self, checkpoint):
+            self.checkpoint = checkpoint
+
+        def __call__(self, waveform, intervals):
+            return [[1.0, 0.0] for _ in intervals]
+
+    bad_checkpoints = [7, None, ["x"], "", "   "]
+
+    for index, checkpoint in enumerate(bad_checkpoints):
+        case_dir = tmp_path / f"case-{index}"
+        config = make_config(case_dir)
+        config.inbox_dir.mkdir(parents=True)
+        audio_path = config.inbox_dir / "weekly-standup.mp3"
+        audio_path.write_bytes(b"fake audio")
+
+        match_known_calls = []
+
+        def fake_match_known(embeddings, speakers, high, low, *, embedding_model):
+            match_known_calls.append(embedding_model)
+            return {}
+
+        monkeypatch.setattr("src.pipeline.match_known", fake_match_known)
+
+        with (
+            _mock_convert_to_wav(),
+            _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
+            patch(
+                "src.pipeline.transcribe_audio",
+                return_value=[
+                    {"start": 0.0, "end": 30.0, "text": "สวัสดีครับ ผมขอเริ่มเลยนะครับ"}
+                ],
+            ),
+            patch(
+                "src.pipeline.diarize_audio",
+                return_value=_diarization(
+                    [{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}]
+                ),
+            ),
+            patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+        ):
+            meeting_dir = process_file(
+                audio_path, config, embedder=_FixedCheckpointEmbedder(checkpoint)
+            )
+
+        transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+        assert "ผู้พูด 1" in transcript, (
+            f"checkpoint={checkpoint!r} ต้องลดขั้นเป็นป้ายทั่วไป ไม่ใช่ทำให้พังทั้งงาน"
+        )
+        assert load_all_pending(case_dir) == [], (
+            f"checkpoint={checkpoint!r} ต้องไม่ทิ้งไฟล์คิวรอตั้งชื่อที่มี embedding_model พัง"
+        )
+        assert match_known_calls == [], (
+            f"checkpoint={checkpoint!r} ต้องไม่หลุดไปถึง match_known เลย"
+        )
+
+
+def test_process_file_clears_voiceprints_before_logging_an_unusable_checkpoint(
+    tmp_path,
+):
+    """แม้ activity.append ระหว่าง log checkpoint ที่ใช้ไม่ได้จะพังเอง (ไม่ใช่ OSError)
+    voiceprints ก็ต้องถูกล้างไปแล้วก่อนหน้านั้น ไม่ใช่หลัง
+
+    รีวิวรอบสาม: บล็อกป้องกัน checkpoint ที่ใช้ไม่ได้เรียง log ก่อนล้าง voiceprints --
+    activity.append กลืนเฉพาะ OSError ไว้ข้างใน (ดู src/activity.py) exception ชนิดอื่นที่
+    หลุดออกมาจากมันจะทำให้ voiceprints ที่มี checkpoint เสียยังไม่ถูกล้าง แล้วเดินทางต่อไป
+    ถึง _record_pending_speakers เหมือนเดิม -- ต้องล้างก่อนจึงจะปลอดภัยไม่ว่า logging จะพัง
+    ด้วยอะไรก็ตาม
+
+    จำลอง "dependency ที่พัง" แบบเดียวกับที่ไฟล์นี้ใช้ที่อื่น (เช่น
+    `patch("src.pipeline.load_registry", side_effect=OSError(...))`) แต่ตัวที่ต้องพังคือ
+    activity.append เอง และต้องไม่ใช่ OSError -- patch เฉพาะ event "voiceprint_failed" และ
+    แค่ครั้งแรกที่มันถูกเรียก แล้วปล่อยให้ของจริงทำงานหลังจากนั้น ไม่งั้น activity.append
+    ตัวอื่น ๆ ที่ process_file เรียกตลอดทั้งรอบ (queued, diarize_started, ...) จะพังไปด้วย
+    ทั้งที่ไม่เกี่ยวกับสิ่งที่กำลังทดสอบ
+    """
+    from src.pending import load_all_pending
+
+    real_append = activity.append
+    raised = {"done": False}
+
+    def flaky_append(base_dir, job, code, level="info", params=None):
+        if code == "voiceprint_failed" and not raised["done"]:
+            raised["done"] = True
+            raise RuntimeError("บันทึก activity ล้มเหลว แบบไม่ใช่ OSError โดยตั้งใจ")
+        return real_append(base_dir, job, code, level, params)
+
+    class _BlankCheckpointEmbedder:
+        checkpoint = ""
+
+        def __call__(self, waveform, intervals):
+            return [[1.0, 0.0] for _ in intervals]
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        patch("src.pipeline.activity.append", side_effect=flaky_append),
+        _mock_convert_to_wav(),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 30.0, "text": "สวัสดีครับ ผมขอเริ่มเลยนะครับ"}
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}]
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(
+            audio_path, config, embedder=_BlankCheckpointEmbedder()
+        )
+
+    assert raised["done"]  # ยืนยันว่า fault injection ทำงานจริง ไม่ใช่แค่ผ่านเงียบ ๆ
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "ผู้พูด 1" in transcript
+    assert load_all_pending(tmp_path) == [], (
+        "voiceprints ต้องถูกล้างก่อน log เสมอ ไม่ว่า activity.append จะพังด้วย exception "
+        "ชนิดไหนก็ตาม"
+    )
 
 
 def test_process_file_uses_the_model_from_the_job_file(tmp_path):
