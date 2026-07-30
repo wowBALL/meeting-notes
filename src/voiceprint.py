@@ -12,6 +12,9 @@ DIARIZATION_MODEL ทำให้ทุกคนในทะเบียนต�
 """
 
 import logging
+import math
+
+from src.speakers import is_usable_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -134,3 +137,42 @@ def select_intervals(
         if chosen:
             selected[label] = chosen
     return selected
+
+
+def average_unit_vectors(vectors: list) -> list[float] | None:
+    """ทิศทางเฉลี่ยของหลายเวกเตอร์ คืน None เมื่อหาไม่ได้
+
+    normalize แต่ละตัวก่อนเฉลี่ย แล้ว normalize ผลลัพธ์อีกครั้ง -- cosine สนใจแค่ทิศทาง
+    ท่อนที่เสียงดังกว่า (norm ใหญ่กว่า) จึงต้องไม่ได้สิทธิ์โหวตมากกว่า ส่วนน้ำหนักตาม
+    ความยาวเกิดขึ้นเองแล้วจากการที่ select_intervals คัดท่อนยาวเข้ามาก่อน
+
+    ใช้ speakers.is_usable_embedding ตัวเดิมตัดสินว่าเวกเตอร์ไหนใช้ได้ ไม่เขียนกฎชุดที่สอง
+    -- กฎ "เวกเตอร์ศูนย์เทียบไม่ได้" ต้องมีคำจำกัดความเดียวในโปรเจกต์นี้ ไม่งั้นของที่ผ่าน
+    ด่านหนึ่งจะไปตกอีกด่านในเส้นทางเดียวกัน
+
+    ตัดเวกเตอร์ที่ยาวไม่เท่าเสียงส่วนใหญ่ทิ้ง: ความยาวต่างกันแปลว่ามาจากคนละโมเดล การ
+    เฉลี่ยรวมกันจะได้ตัวเลขที่ไม่ได้อยู่ในพื้นที่ไหนเลย (แบบเดียวกับที่ cosine_similarity
+    คืน 0.0 เมื่อความยาวไม่ตรง แทนที่จะ raise)
+    """
+    usable = [
+        [float(value) for value in vector]
+        for vector in vectors
+        if is_usable_embedding(vector)
+    ]
+    if not usable:
+        return None
+    dimension = max(
+        {len(vector) for vector in usable},
+        key=lambda size: sum(1 for vector in usable if len(vector) == size),
+    )
+    usable = [vector for vector in usable if len(vector) == dimension]
+
+    total = [0.0] * dimension
+    for vector in usable:
+        norm = math.sqrt(sum(value * value for value in vector))
+        for index, value in enumerate(vector):
+            total[index] += value / norm
+    mean_norm = math.sqrt(sum(value * value for value in total))
+    if mean_norm == 0.0:
+        return None
+    return [value / mean_norm for value in total]

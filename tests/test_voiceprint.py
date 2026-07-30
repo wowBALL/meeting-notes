@@ -1,7 +1,12 @@
+import math
+
+import pytest
+
 from src.voiceprint import (
     MAX_SEGMENTS_PER_SPEAKER,
     MIN_SEGMENT_SECONDS,
     TARGET_SECONDS,
+    average_unit_vectors,
     clean_intervals,
     select_intervals,
 )
@@ -148,3 +153,48 @@ def test_select_intervals_accepts_a_segment_exactly_at_the_minimum():
 
 def test_select_intervals_returns_nothing_for_an_empty_input():
     assert select_intervals({}) == {}
+
+
+def _norm(vector):
+    return math.sqrt(sum(value * value for value in vector))
+
+
+def test_average_unit_vectors_returns_a_unit_vector():
+    result = average_unit_vectors([[3.0, 0.0], [0.0, 4.0]])
+
+    assert _norm(result) == pytest.approx(1.0)
+
+
+def test_average_unit_vectors_normalises_before_averaging_not_after():
+    # ท่อนที่ norm ใหญ่กว่า (เสียงดังกว่า) ต้องไม่ได้สิทธิ์โหวตมากกว่า -- cosine สนใจแค่
+    # ทิศทาง น้ำหนักตามความยาวเกิดขึ้นเองแล้วจากการที่ท่อนยาวถูกคัดเข้ามาก่อน
+    quiet = [[1.0, 0.0], [0.0, 1.0]]
+    one_is_loud = [[100.0, 0.0], [0.0, 1.0]]
+
+    assert average_unit_vectors(quiet) == pytest.approx(average_unit_vectors(one_is_loud))
+
+
+def test_average_unit_vectors_of_one_vector_is_that_direction():
+    assert average_unit_vectors([[0.0, 5.0]]) == pytest.approx([0.0, 1.0])
+
+
+def test_average_unit_vectors_skips_a_zero_vector():
+    # เวกเตอร์ศูนย์ไม่มีทิศทาง normalize ไม่ได้ -- ต้องข้าม ไม่ใช่ทำให้ทั้งชุดเสีย
+    assert average_unit_vectors([[0.0, 0.0], [0.0, 3.0]]) == pytest.approx([0.0, 1.0])
+
+
+def test_average_unit_vectors_returns_none_for_no_usable_vectors():
+    assert average_unit_vectors([]) is None
+    assert average_unit_vectors([[0.0, 0.0]]) is None
+    assert average_unit_vectors([None, "ไม่ใช่เวกเตอร์"]) is None
+
+
+def test_average_unit_vectors_returns_none_when_directions_cancel_out():
+    # เกิดได้ในทางทฤษฎีเท่านั้น แต่ค่าเฉลี่ยที่ norm เป็น 0 normalize ไม่ได้ และถ้าปล่อย
+    # ผ่านไปมันจะกลายเป็นเวกเตอร์ที่ "เหมือน" กับเวกเตอร์ศูนย์อื่นทุกตัวในทะเบียน
+    assert average_unit_vectors([[1.0, 0.0], [-1.0, 0.0]]) is None
+
+
+def test_average_unit_vectors_ignores_vectors_of_a_different_length():
+    # ความยาวไม่เท่ากันแปลว่ามาจากคนละโมเดล เอามาเฉลี่ยรวมกันไม่ได้เลย
+    assert average_unit_vectors([[0.0, 3.0], [1.0, 2.0, 3.0]]) == pytest.approx([0.0, 1.0])
