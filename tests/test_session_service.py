@@ -1,5 +1,6 @@
 import inspect
 import json
+import re
 import subprocess
 import time
 from unittest.mock import patch
@@ -32,6 +33,24 @@ def _sample(embedding, embedding_model=EMBED, **extra):
     payload = {"embedding": list(embedding), "embedding_model": embedding_model}
     payload.update(extra)
     return payload
+
+
+def _assert_no_embedding_vector_leaks(body):
+    """เวกเตอร์เสียงต้องไม่รั่วออกไปไม่ว่าจะอยู่ใต้คีย์ไหน
+
+    Task 12 เปลี่ยนการ์ดนี้จาก substring "embedding" ธรรมดา ไปเป็นเช็คคีย์ JSON
+    ตรง ๆ ว่า '"embedding":' (เพราะตอนนั้น endpoint เริ่มมี embedding_model ที่การ์ด
+    แบบเดิมปฏิเสธผิด ๆ) แต่การเช็คคีย์ตายตัวคือ denylist ตัวเดียว -- โปรเจกชันที่มันกัน
+    (_public_speaker / list_entries) ก็เป็น denylist เหมือนกัน (ตัดแค่คีย์ชื่อ "embedding"
+    ทิ้ง) ไฟล์ result.json และไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้เอง -- ใครใส่เวกเตอร์
+    ไว้ใต้ชื่ออื่น (เช่น "embedding_backup" หรือ "raw_embedding") จะหลุดผ่าน denylist ทั้งสอง
+    ชั้นไปเงียบ ๆ จับที่ "รูปทรง" ของค่าแทน (array ต่อท้ายคีย์ที่มีคำว่า embedding) ไม่ใช่
+    ชื่อคีย์ตายตัว -- ยังยอม embedding_model ผ่านได้ตามปกติเพราะค่าของมันเป็นสตริง ไม่ใช่ array
+    """
+    dumped = json.dumps(body)
+    leak = re.search(r'"(\w*embedding\w*)":\s*\[', dumped)
+    if leak:
+        pytest.fail(f'พบเวกเตอร์รั่วใต้คีย์ "{leak.group(1)}": {dumped}')
 
 
 def make_config(tmp_path):
@@ -428,18 +447,27 @@ def test_pending_speakers_endpoint_lists_the_queue(client, config):
 def test_pending_speakers_endpoint_never_ships_the_voice_vectors(client, config):
     # เบราว์เซอร์ไม่ต้องใช้เวกเตอร์เลย และมันคือข้อมูล biometric -- ส่งออกไปเปล่า ๆ
     # คือเพิ่มที่ที่มันอาจรั่วโดยไม่ได้อะไรกลับมา
-    _queue_two_speakers(config)
+    meeting = _queue_two_speakers(config)
+    # ไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้ (ดู docstring ของ _write_queue ด้านบน) --
+    # จำลองไฟล์ที่ถูกแก้มือให้มีเวกเตอร์แอบอยู่ใต้ชื่อคีย์อื่นที่ไม่ใช่ "embedding" ตรง ๆ
+    # _public_speaker เป็น denylist (ตัดแค่คีย์ชื่อ "embedding" ทิ้ง) คีย์แปลกใหม่แบบนี้จึง
+    # หลุดผ่านไปได้เงียบ ๆ ถ้าการ์ดข้างล่างเช็คแค่ '"embedding":' ตรง ๆ (รูปแบบที่ task 12
+    # เปลี่ยนมาใช้เพื่อยอม embedding_model แต่ดันแคบไปจนพลาดกรณีนี้)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["speakers"][0]["raw_embedding"] = [1.0, 0.0]
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
 
     body = client.get("/api/speakers/pending").get_json()
 
     for speaker in body["meetings"][0]["speakers"]:
         assert "embedding" not in speaker
-    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้ -- เช็คคีย์ JSON
-    # ตรง ๆ ("embedding": ไม่ใช่แค่สตริง "embedding") เพราะทุกคนในคิววันนี้มีคีย์
-    # embedding_model ติดมาด้วยโดยตั้งใจ (ป้ายพื้นที่เวกเตอร์เป็นสตริงชื่อโมเดล ไม่ใช่ข้อมูล
-    # biometric เหมือนตัวเวกเตอร์เอง จึงไม่ใช่สิ่งที่การ์ดนี้มีไว้กัน) เช็คแบบ substring
-    # ธรรมดาจะชนกับ "embedding_model" เข้าเองอย่างผิด ๆ
-    assert '"embedding":' not in json.dumps(body)
+    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้ (เช่น raw_embedding
+    # ข้างบน) -- จับที่รูปทรงของค่า (array ต่อท้ายคีย์ที่มีคำว่า embedding) ไม่ใช่คีย์ตายตัว
+    # เดียว เพราะทุกคนในคิววันนี้มีคีย์ embedding_model ติดมาด้วยโดยตั้งใจ (ป้ายพื้นที่เวกเตอร์
+    # เป็นสตริงชื่อโมเดล ไม่ใช่ข้อมูล biometric เหมือนตัวเวกเตอร์เอง จึงไม่ใช่สิ่งที่การ์ดนี้
+    # มีไว้กัน) เช็คแบบ substring ธรรมดาจะชนกับ "embedding_model" เข้าเองอย่างผิด ๆ
+    _assert_no_embedding_vector_leaks(body)
 
 
 def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
@@ -1065,17 +1093,29 @@ def test_get_enroll_never_leaks_the_embedding_even_when_a_match_is_found(tmp_pat
     write_ok_result(
         tmp_path,
         "สมชาย.ogg",
-        {"status": "ok", "model": MODEL, "embedding_model": EMBED, "embedding": [1.0, 0.0]},
+        {
+            "status": "ok",
+            "model": MODEL,
+            "embedding_model": EMBED,
+            "embedding": [1.0, 0.0],
+            # result.json แก้มือได้ตามดีไซน์ของโปรเจกต์นี้ (ดู docstring ของ write_ok_result
+            # ด้านบน) -- จำลองไฟล์ที่มีเวกเตอร์แอบอยู่ใต้ชื่อคีย์อื่นที่ไม่ใช่ "embedding"
+            # ตรง ๆ list_entries เป็น denylist (ตัดแค่คีย์ชื่อ "embedding" ทิ้ง) คีย์แปลกใหม่
+            # แบบนี้จึงหลุดผ่านไปได้เงียบ ๆ ถ้าการ์ดข้างล่างเช็คแค่ '"embedding":' ตรง ๆ
+            "embedding_backup": [1.0, 0.0],
+        },
     )
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
 
     assert "match" in body["files"][0]
-    # เช็คคีย์ JSON ตรง ๆ ไม่ใช่แค่สตริง "embedding" ธรรมดา -- ผลลัพธ์ทุกไฟล์วันนี้มีคีย์
-    # embedding_model ติดมาด้วยโดยตั้งใจ (สตริงชื่อโมเดล ไม่ใช่ข้อมูล biometric เหมือน
-    # ตัวเวกเตอร์เอง) เช็คแบบ substring ธรรมดาจะชนกับ "embedding_model" เข้าเองอย่างผิด ๆ
-    assert '"embedding":' not in json.dumps(body)
+    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้ (เช่น embedding_backup
+    # ข้างบน) -- จับที่รูปทรงของค่า (array ต่อท้ายคีย์ที่มีคำว่า embedding) ไม่ใช่คีย์ตายตัว
+    # เดียว เพราะผลลัพธ์ทุกไฟล์วันนี้มีคีย์ embedding_model ติดมาด้วยโดยตั้งใจ (สตริงชื่อโมเดล
+    # ไม่ใช่ข้อมูล biometric เหมือนตัวเวกเตอร์เอง) เช็คแบบ substring ธรรมดาจะชนกับ
+    # "embedding_model" เข้าเองอย่างผิด ๆ
+    _assert_no_embedding_vector_leaks(body)
 
 
 def test_enroll_similarity_uses_the_stamp_recorded_in_the_result_not_the_current_config(

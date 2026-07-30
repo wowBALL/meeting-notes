@@ -119,10 +119,24 @@ class RecorderState:
 def _public_speaker(speaker: dict) -> dict:
     """ผู้พูดหนึ่งคนในรูปที่ส่งออกหน้าเว็บได้
 
-    ตัด embedding ออกเสมอ: หน้าเว็บไม่ได้ใช้ และเวกเตอร์เสียงเป็นข้อมูล biometric
-    ที่ไม่ควรมีสำเนาเพิ่มในที่ที่ไม่จำเป็น
+    allowlist ไม่ใช่ denylist: เดิมตัดแค่คีย์ "embedding" ทิ้ง (denylist ตัวเดียว) ซึ่งเป็น
+    รูรั่วเมื่อไฟล์คิว (แก้มือได้ตามดีไซน์ของโปรเจกต์นี้ ดู pending.py) มีเวกเตอร์แอบอยู่ใต้
+    ชื่อคีย์อื่น (เช่น "raw_embedding") -- คีย์นั้นจะหลุดผ่าน denylist ไปเงียบ ๆ รายการข้างล่าง
+    คือทุกคีย์ที่ web/app.js อ่านจริงจากผู้พูดหนึ่งคน (ดู pendingHtml/speakerAt ใน app.js):
+    label, guess{name,evidence}, samples[]{text,start,end}, suggested{name}, speaking_seconds
+    คีย์อื่นทั้งหมด (diarization_id, model, embedding_model, embedding_seconds, segment_count,
+    embedding หรือเวกเตอร์ใต้ชื่อไหนก็ตาม) เป็นของฝั่งเซิร์ฟเวอร์ล้วน ไม่มีเหตุผลต้องออกไปเลย
+    ใช้ .get() แทนการเข้าถึงตรง ๆ เพราะไฟล์คิวที่แก้มือหรือมาจากเวอร์ชันเก่ากว่านี้อาจไม่มี
+    คีย์พวกนี้ครบ -- หน้าเว็บรับค่า None ของทุกคีย์เหล่านี้ได้อยู่แล้ว (guess ? ... : "",
+    samples || [], suggested ? ... : "")
     """
-    return {key: value for key, value in speaker.items() if key != "embedding"}
+    return {
+        "label": speaker.get("label"),
+        "guess": speaker.get("guess"),
+        "samples": speaker.get("samples"),
+        "suggested": speaker.get("suggested"),
+        "speaking_seconds": speaker.get("speaking_seconds"),
+    }
 
 
 def _speaker_summary(speaker: dict) -> dict:

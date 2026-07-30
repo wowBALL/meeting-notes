@@ -816,11 +816,28 @@ def archive(base_dir: Path, audio_file: str) -> Path | None:
     return candidate
 
 
+_RESULT_ALLOWED_KEYS = {
+    "status",
+    "reason",
+    "speaking_seconds",
+    "speaker_count",
+    "suggested_name",
+}
+"""allowlist ไม่ใช่ denylist: เดิม list_entries ตัดแค่คีย์ "embedding" ทิ้ง (denylist ตัวเดียว)
+ซึ่งเป็นรูรั่วเมื่อ result.json (แก้มือได้ตามดีไซน์ของโปรเจกต์นี้) มีเวกเตอร์แอบอยู่ใต้ชื่อคีย์
+อื่น (เช่น "embedding_backup") -- คีย์นั้นจะหลุดผ่าน denylist ไปเงียบ ๆ รายการข้างบนคือทุกคีย์
+ของ result ที่ web/enroll.js อ่านจริง (ดู renderFile/chipFor ใน enroll.js) คีย์อื่นของ analyze()
+(model, embedding_model, embedding, embedding_seconds, segment_count, detail,
+ignored_short_labels) เป็นของฝั่งเซิร์ฟเวอร์ล้วน ไม่มีเหตุผลต้องออกไปเลย
+"""
+
+
 def list_entries(base_dir: Path) -> list[dict]:
     """ทุกไฟล์ที่รอลงทะเบียน พร้อมสถานะ ในรูปที่ส่งออกหน้าเว็บได้
 
-    ตัด embedding ออกเสมอแบบเดียวกับ session_service._public_speaker -- หน้าเว็บไม่ได้ใช้
-    และเวกเตอร์เสียงเป็นข้อมูล biometric ที่ไม่ควรมีสำเนาเพิ่มในที่ที่ไม่จำเป็น
+    ผลจาก result.json ถูกกรองผ่าน _RESULT_ALLOWED_KEYS (allowlist) ก่อนออกไปเสมอ --
+    หน้าเว็บไม่ได้ใช้เวกเตอร์เสียง และมันเป็นข้อมูล biometric ที่ไม่ควรมีสำเนาเพิ่มในที่ที่
+    ไม่จำเป็น เดิมใช้ denylist (ตัดแค่คีย์ "embedding" ทิ้ง) ซึ่งกันได้แค่คีย์ชื่อนั้นเป๊ะ ๆ
 
     กวาด sidecar กำพร้าทิ้งทุกครั้งที่เรียก (finding 1) เพราะจุดนี้กำลังแจกแจงโฟลเดอร์
     enroll/ อยู่แล้ว และเป็นจุดที่หน้าเว็บ poll ถี่ที่สุด
@@ -877,7 +894,7 @@ def list_entries(base_dir: Path) -> list[dict]:
             entry["changed_during_analysis"] = True
         if result is not None:
             entry.update(
-                {key: value for key, value in result.items() if key != "embedding"}
+                {key: value for key, value in result.items() if key in _RESULT_ALLOWED_KEYS}
             )
         entries.append(entry)
     return entries
