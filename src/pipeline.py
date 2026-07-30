@@ -27,6 +27,7 @@ from src.storage import (
     save_summary,
     save_transcript,
 )
+from src.glossary import load as load_glossary
 from src.summarize import summarize_transcript
 from src.transcribe import transcribe_audio
 
@@ -281,13 +282,32 @@ def _finish_meeting(
     # permanently failing chunk.
     job = audio_path.stem
     summary_markdown = None
+    glossary_counts: dict[str, int] = {}
+    fuzzy_seen: dict[str, int] = {}
     if claude_model != NO_SUMMARY_MODEL:
+        # ตัวกรองศัพท์เสียบที่นี่ ไม่ใช่ใน summarize_transcript สองเหตุผล:
+        # (1) ต้องแก้ก่อนหั่น chunk -- split_into_chunks เล่นซ้ำ segment ท้าย chunk
+        #     ที่หัว chunk ถัดไป (overlap) ถ้าแทนที่ทีละ chunk คำในโซนนั้นจะถูกนับสองรอบ
+        #     เรียกครั้งเดียวที่นี่จึงครอบทั้ง path ที่หั่น chunk และ path ที่ยิงรอบเดียว
+        # (2) summarize_transcript คืน str เปล่า ๆ และถูก mock ไว้หลายสิบจุดในเทสต์
+        #     ให้มันคืนจำนวนที่แก้ด้วยจะเปลี่ยน return type ไปทั้งหมดโดยไม่ได้อะไรเพิ่ม
+        #
+        # transcript_markdown ที่ถูกแก้เป็นแค่ตัวแปรในหน่วยความจำ -- transcript.md บน
+        # ดิสก์ถูกเขียนไปก่อนถึงบรรทัดนี้แล้วและยังเป็นของดิบ ถ้า glossary แก้ผิด
+        # คนอ่านย้อนดูได้ว่าเดิมพูดว่าอะไร และ path ลองใหม่ก็อ่านของดิบตัวเดิมเสมอ
+        glossary = load_glossary(
+            config.base_dir / "glossary.md", config.base_dir / "teams.md"
+        )
+        corrected_markdown, glossary_counts = glossary.apply_exact(transcript_markdown)
+        fuzzy_seen = glossary.count_only(corrected_markdown)
         activity.append(
             config.base_dir, job, "summarize_started", params={"model": claude_model}
         )
         try:
             summary_markdown = summarize_transcript(
-                transcript_markdown, model=claude_model
+                corrected_markdown,
+                model=claude_model,
+                glossary_text=glossary.format_for_prompt(),
             )
         except Exception as e:
             activity.append(
@@ -306,7 +326,13 @@ def _finish_meeting(
         # summary nobody asked for. Everything else below still runs: the meeting
         # is finished, just without that one file.
         if summary_markdown is not None:
-            save_summary(meeting_dir, summary_markdown, claude_model)
+            save_summary(
+                meeting_dir,
+                summary_markdown,
+                claude_model,
+                glossary_counts=glossary_counts,
+                fuzzy_seen=fuzzy_seen,
+            )
         archive_audio(meeting_dir, audio_path)
         discard_job(audio_path)
     except Exception as e:

@@ -173,8 +173,19 @@ def _time_range(chunk: dict) -> str:
     return f"{format_timestamp(chunk['start_seconds'])}–{format_timestamp(chunk['end_seconds'])}"
 
 
+def _with_glossary(system_prompt: str, glossary_text: str) -> str:
+    """system prompt ที่ต่อตารางศัพท์ไว้ท้าย -- คืนของเดิมเมื่อไม่มีตาราง
+
+    ต่อท้ายทั้งขั้น map และ reduce โดยเจตนา: ขั้น map เห็นข้อความดิบพอดี ส่วนขั้น
+    reduce ต้องย้ำอีกครั้งกันคำที่แก้แล้ว drift กลับตอนโมเดลเรียบเรียงใหม่
+    """
+    if not glossary_text:
+        return system_prompt
+    return f"{system_prompt}\n\n{glossary_text}"
+
+
 def _summarize_chunk(
-    provider: Provider, chunk: dict, index: int, total: int
+    provider: Provider, system: str, chunk: dict, index: int, total: int
 ) -> str | Exception:
     """The chunk's summary, or the exception that ended it after every retry.
     Returning the failure instead of raising keeps one dead chunk from throwing
@@ -183,7 +194,7 @@ def _summarize_chunk(
         return _demote_headings(
             retry_with_backoff(
                 lambda: _summarize(
-                    provider, CHUNK_SYSTEM_PROMPT, chunk["text"], provider.map_max_tokens
+                    provider, system, chunk["text"], provider.map_max_tokens
                 ),
                 should_retry=is_retryable,
             )
@@ -202,8 +213,18 @@ def _summarize_chunk(
 def summarize_transcript(
     transcript_markdown: str,
     model: str = DEFAULT_SUMMARY_MODEL,
+    glossary_text: str = "",
 ) -> str:
+    """`glossary_text` มาจาก glossary.format_for_prompt() -- ว่างได้ แปลว่าไม่มีตาราง
+
+    ตัวแทนที่คำแบบเป๊ะ (apply_exact) ไม่ได้อยู่ในนี้โดยเจตนา มันทำที่ pipeline ก่อน
+    เรียกฟังก์ชันนี้ เพราะฟังก์ชันนี้คืน str เปล่า ๆ และถูก mock ไว้หลายสิบจุดในเทสต์
+    การให้มันคืนจำนวนที่แก้ด้วยจะเปลี่ยน return type ไปทั้งหมดโดยไม่ได้อะไรเพิ่ม
+    """
     provider = resolve(model)
+    single_system = _with_glossary(SUMMARY_SYSTEM_PROMPT, glossary_text)
+    chunk_system = _with_glossary(CHUNK_SYSTEM_PROMPT, glossary_text)
+    reduce_system = _with_glossary(REDUCE_SYSTEM_PROMPT, glossary_text)
 
     # Every API call below is retried here, inside summarize_transcript. Callers
     # must not add a retry of their own: with per-chunk retries in place, an outer
@@ -214,7 +235,7 @@ def summarize_transcript(
         return retry_with_backoff(
             lambda: _summarize(
                 provider,
-                SUMMARY_SYSTEM_PROMPT,
+                single_system,
                 transcript_markdown,
                 provider.map_max_tokens,
             ),
@@ -236,7 +257,9 @@ def summarize_transcript(
     with ThreadPoolExecutor(max_workers=min(MAP_MAX_CONCURRENCY, len(chunks))) as pool:
         chunk_summaries = list(
             pool.map(
-                lambda item: _summarize_chunk(provider, item[1], item[0], len(chunks)),
+                lambda item: _summarize_chunk(
+                    provider, chunk_system, item[1], item[0], len(chunks)
+                ),
                 enumerate(chunks),
             )
         )
@@ -271,7 +294,7 @@ def summarize_transcript(
             retry_with_backoff(
                 lambda: _summarize(
                     provider,
-                    REDUCE_SYSTEM_PROMPT,
+                    reduce_system,
                     combined,
                     provider.reduce_max_tokens,
                 ),

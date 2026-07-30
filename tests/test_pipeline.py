@@ -82,6 +82,106 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
     assert not audio_path.exists()
 
 
+def test_glossary_corrects_the_transcript_before_it_reaches_the_summarizer(tmp_path):
+    """apply_exact ต้องทำงานที่ pipeline ก่อนส่งเข้า summarize -- และไฟล์ transcript.md
+    ที่เก็บไว้ต้องเป็นของดิบ ไม่ถูกแก้ เพราะถ้า glossary ผิด คนอ่านต้องย้อนดูได้ว่า
+    เดิมพูดว่าอะไร"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "glossary.md").write_text(
+        "## exact\nPostgreSQL: โพสเกรส\n\n## fuzzy\nElectron: อิเล็กตรอน\n",
+        encoding="utf-8",
+    )
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 2.0, "text": "โพสเกรสกับอิเล็กตรอนพร้อมแล้ว"}
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch(
+            "src.pipeline.summarize_transcript", return_value="## สรุป"
+        ) as summarize_mock,
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    sent_to_model = summarize_mock.call_args.args[0]
+    assert "PostgreSQL" in sent_to_model
+    assert "โพสเกรส" not in sent_to_model
+    # fuzzy ไม่ถูกแทนที่ในโค้ด โมเดลเป็นคนตีความ จึงต้องยังอยู่ในข้อความเดิม
+    assert "อิเล็กตรอน" in sent_to_model
+
+    raw = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "โพสเกรส" in raw, "transcript ดิบต้องไม่ถูกแก้"
+
+    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in summary
+    assert "คำ fuzzy ที่เจอในห้อง: Electron 1 ครั้ง" in summary
+
+
+def test_glossary_reaches_the_summarizer_as_prompt_text(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "glossary.md").write_text(
+        "## fuzzy\nElectron: อิเล็กตรอน\n", encoding="utf-8"
+    )
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "อิเล็กตรอนพร้อม"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch(
+            "src.pipeline.summarize_transcript", return_value="## สรุป"
+        ) as summarize_mock,
+    ):
+        process_file(audio_path, config)
+
+    glossary_text = summarize_mock.call_args.kwargs["glossary_text"]
+    assert "Electron" in glossary_text
+    assert "อิเล็กตรอน" in glossary_text
+
+
+def test_a_missing_glossary_file_changes_nothing(tmp_path):
+    """ไม่มี glossary.md = ทำงานเหมือนเดิมทุกอย่าง ห้าม crash ห้ามมีบรรทัดใหม่ท้ายสรุป"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
+    assert summary == f"## สรุป\n\n---\nสรุปด้วย {config.claude_model}\n"
+
+
 def test_process_file_continues_without_diarization_on_failure(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
