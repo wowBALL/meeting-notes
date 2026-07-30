@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src import segments
 from src.job import JOB_SUFFIX, read_model
 from src.segments import (
     MANIFEST_NAME,
@@ -422,6 +423,39 @@ def test_finish_session_passes_every_part_to_ffmpeg(tmp_path):
         finish_session(session_dir, inbox)
 
     assert seen["listing"].count("file '") == 3
+
+
+def test_finish_session_encodes_without_creating_a_console_window(tmp_path):
+    """ffmpeg ต้องได้ CREATE_NO_WINDOW เสมอ
+
+    วิดเจ็ต (COWORK Desktop) เปิด session_service ด้วย pythonw.exe ซึ่งเป็น GUI
+    subsystem จึงไม่มี console เลย -- run_recording ทำงานในเธรดของ service ตัวนั้น
+    ลูกที่เป็น console subsystem อย่าง ffmpeg จึงต้องถูกสร้าง console ใหม่ให้ แล้ว
+    Windows 11 ส่งต่อให้ Windows Terminal กลายเป็นหน้าต่างดำค้างตลอดการ encode
+    ทุกครั้งที่ปิดห้องประชุม
+    เป็นเหตุเดียวกับ worker probe ใน session_service.py แต่คนละทางเข้า
+    """
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1)
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen.update(kwargs)
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        finish_session(session_dir, inbox)
+
+    assert seen["creationflags"] == segments._NO_WINDOW
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):  # Windows เท่านั้น
+        # กันเทสต์ผ่านแบบว่างเปล่า -- ถ้า _NO_WINDOW เป็น 0 การเทียบข้างบนก็ยังผ่าน
+        assert seen["creationflags"] == subprocess.CREATE_NO_WINDOW != 0
+    # ธงใหม่ต้องไม่ทำให้ตัวกันเดิมหลุด: check=True คือสิ่งที่ทำให้ session ที่ encode
+    # ไม่ผ่านถูกเก็บไว้ให้กู้ต่อ แทนที่จะเดินต่อไปลบ part ทิ้ง
+    assert seen["check"] is True
+    assert seen["capture_output"] is True
 
 
 def test_finish_session_keeps_the_session_when_ffmpeg_fails(tmp_path):
