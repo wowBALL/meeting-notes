@@ -133,6 +133,48 @@ def test_is_usable_embedding_rejects_the_shapes_pyannote_can_hand_back():
     assert is_usable_embedding([1.0, "x"]) is False
 
 
+def test_is_usable_embedding_rejects_components_that_are_not_finite():
+    # inf/nan เข้ามาถึงการ์ดนี้ได้จริง: registry.json กับไฟล์คิวถูกแก้มือได้ตามเจตนา
+    # ของโปรเจกต์ (ดู docstring ของ save_registry) และ json.loads ของ Python รับ
+    # `Infinity`/`NaN` เปล่า ๆ เป็นตัวเลข
+    #
+    # inf เคยผ่านการ์ดนี้เพราะ norm ของมันเป็น inf ซึ่ง > 0.0 จริง แต่ cosine ที่ได้
+    # เป็น nan และ nan แพ้ `score > best.score` ทุกครั้ง -- ตัวอย่างพิษหนึ่งตัวจึงล็อก
+    # best ไว้แล้วกลบตัวอย่างจริงของคนคนนั้นทั้งหมด ซึ่งคืออาการ "ลงทะเบียนแล้วระบบก็ยัง
+    # จำไม่ได้" ที่การ์ดนี้มีไว้กันตั้งแต่แรก
+    assert is_usable_embedding([float("inf"), 0.0]) is False
+    assert is_usable_embedding([float("-inf"), 0.0]) is False
+    assert is_usable_embedding([float("nan"), 0.0]) is False
+
+
+def test_is_usable_embedding_rejects_values_too_large_to_square():
+    # ค่าใหญ่แต่ยังจำกัด: `value ** 2` ล้นก่อนที่จะได้ norm แล้ว OverflowError ทะลุ
+    # ออกไปจากการ์ด ผู้เรียกดัก ValueError กันทั้งนั้น (session_service แปลเป็น 400
+    # bad_embedding) ของที่ไม่ใช่ ValueError จึงกลายเป็น 500 ที่ไม่มีใครอธิบาย --
+    # การ์ดต้องตอบว่า "ใช้ไม่ได้" ไม่ใช่ระเบิดใส่ผู้เรียก
+    assert is_usable_embedding([1e308, 1e308]) is False
+
+
+def test_is_usable_embedding_rejects_a_vector_too_small_for_its_norm_to_be_exact():
+    # ปลายล่างของปัญหาเดียวกับ 1e308 และร้ายกว่า: ค่าที่เล็กจนกำลังสองตกไปอยู่ในช่วง
+    # subnormal (ต่ำกว่า sys.float_info.min) เหลือ precision แค่ไม่กี่บิต norm ที่ได้
+    # จึงผิด และ cosine_similarity คืนค่าที่ออกนอก [-1, 1] ได้จริง -- วัดแล้ว
+    # (2026-07-30) คู่ข้างล่างนี้ให้ -2.0 คู่ที่เป็นบวกในทำนองเดียวกันจะ >= high แปลว่า
+    # match_known ใส่ชื่อผิดคนลง transcript.md ให้เองโดยไม่มีใครกดยืนยัน ซึ่งเป็นความ
+    # เสียหายที่โมดูลนี้ทั้งโมดูลมีไว้กัน
+    assert is_usable_embedding([-1e-163, 2.3e-162]) is False
+    # เกณฑ์นี้ไม่แตะเวกเตอร์จริง: ของจาก pyannote มี norm ราว 3.3 (ดู enroll.py)
+    assert is_usable_embedding([1e-150, 1e-150]) is True
+
+
+def test_is_usable_embedding_rejects_an_integer_too_long_to_be_a_float():
+    # JSON ที่แก้มือใส่จำนวนเต็มยาวเท่าไหร่ก็ได้ และ json.loads คืนมาเป็น int ของ Python
+    # ที่ไม่จำกัดความยาว ปลายทางทุกทางแปลงเป็น float (add_sample เก็บ, cosine_similarity
+    # เทียบ) แล้วได้ OverflowError -- การ์ดที่บอกว่า "ใช้ได้" ทั้งที่ปลายทางใช้ไม่ได้คือ
+    # การเลื่อนความพังไปให้ที่ที่ไม่มีใครดักไว้
+    assert is_usable_embedding([10**400, 0]) is False
+
+
 def test_cosine_similarity_scores_identical_orthogonal_and_opposite_vectors():
     assert cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
     assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
@@ -242,6 +284,22 @@ def test_match_known_skips_unusable_embeddings_on_both_sides():
         )
         == {}
     )
+
+
+def test_match_known_ignores_a_poisoned_sample_and_still_finds_the_person():
+    # ตัวอย่างที่มี inf ให้ cosine เป็น nan และการเทียบใด ๆ กับ nan เป็นเท็จ ดังนั้น
+    # `score > best.score` จะไม่ยอมแทนที่ best ที่เป็น nan ไปตลอด ตัวอย่างจริงที่มา
+    # ทีหลังแม้จะได้ 1.0 ก็ไม่เคยถูกเลือก และคนคนนี้จะหายไปจากผลทั้งหมด
+    #
+    # นี่คือเหตุผลที่การ์ดต้องกรองที่ระดับ "ตัวอย่างเดียว" ให้ได้: ทะเบียนของคนหนึ่งคน
+    # ที่มีตัวอย่างพิษปนอยู่หนึ่งตัวต้องยังใช้งานได้ ไม่ใช่ตายทั้งโปรไฟล์
+    registry = [_person("สมหญิง็ม", [[float("inf"), 0.0], [1.0, 0.0]])]
+
+    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL)
+
+    assert matches["SPEAKER_00"].name == "สมหญิง็ม"
+    assert matches["SPEAKER_00"].score == pytest.approx(1.0)
+    assert matches["SPEAKER_00"].confident is True
 
 
 def test_match_known_returns_nothing_for_an_empty_registry():
