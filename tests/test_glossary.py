@@ -256,6 +256,31 @@ def test_format_for_prompt_never_leaks_already_replaced_layers(tmp_path):
     assert "ระบบชำระเงิน" not in prompt
 
 
+def test_cross_context_without_teams_warns_that_ambiguous_cannot_work(tmp_path, caplog):
+    """ตาราง ambiguous บอกโมเดลให้ "ตีความตามฝ่ายของผู้พูด" ถ้าไม่มี teams.md
+    โมเดลไม่รู้ว่าใครอยู่ฝ่ายไหน ตารางนั้นแทบไม่ช่วยอะไร -- และกฎใน cross.md
+    ยังสั่งให้ไปดูตารางฝ่ายที่ไม่มีอยู่ ต้องเตือนตอนที่มันเกิด ไม่ใช่ปล่อยเงียบ"""
+    glossary = _loaded(tmp_path, teams="# ไม่มีใครเลย\n")
+    assert glossary.ambiguous, "sanity: fixture ต้องมีตาราง ambiguous"
+    assert glossary.teams == {}
+
+    with caplog.at_level(logging.WARNING):
+        prompt = glossary.format_for_prompt(include_cross_team_context=True)
+
+    assert "teams.md" in caplog.text
+    # ตาราง ambiguous ยังใส่ให้ตามที่ขอ -- เตือน ไม่ใช่เงียบ ไม่ใช่ตัดของทิ้ง
+    assert "เสร็จ" in prompt
+
+
+def test_no_teams_warning_when_cross_context_is_not_requested(tmp_path, caplog):
+    glossary = _loaded(tmp_path, teams="# ไม่มีใครเลย\n")
+
+    with caplog.at_level(logging.WARNING):
+        glossary.format_for_prompt()
+
+    assert "teams.md" not in caplog.text
+
+
 def test_format_for_prompt_is_empty_when_nothing_is_configured(tmp_path):
     glossary = load(tmp_path / "nope.md", tmp_path / "also-nope.md")
 

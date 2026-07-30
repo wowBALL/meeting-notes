@@ -133,6 +133,18 @@ class Glossary:
                 for correct, forms in self.project_names.items()
             )
             blocks.append("### ชื่อโปรเจกต์ภายใน (คงรูปตามนี้เสมอ)\n" + lines)
+        if include_cross_team_context and self.ambiguous and not self.teams:
+            # ตาราง ambiguous สั่งให้โมเดล "ตีความตามฝ่ายของผู้พูด" และ cross.md ยัง
+            # สั่งให้ไปดูตารางฝ่ายด้วย -- ไม่มี teams.md แปลว่าทั้งสองอย่างชี้ไปที่
+            # ข้อมูลที่ไม่มีอยู่ ยังใส่ตารางให้ตามที่ขอ (ดีกว่าไม่มีอะไรเลย) แต่ต้อง
+            # เตือนตรงจุดที่มันเกิด ไม่ใช่ปล่อยให้สรุปออกมาเพี้ยนแล้วหาสาเหตุไม่เจอ
+            logger.warning(
+                "ประชุมข้ามฝ่ายแต่ไม่มี teams.md -- โมเดลจะไม่รู้ว่าใครอยู่ฝ่ายไหน "
+                "ตารางคำกำกวม (%d คำ) จึงช่วยได้น้อยมาก คัดลอกจาก teams.example.md "
+                "แล้วใส่ชื่อจริง / cross-team meeting without teams.md: the ambiguous "
+                "table cannot be applied per-speaker",
+                len(self.ambiguous),
+            )
         if include_cross_team_context and self.ambiguous:
             lines = "\n".join(
                 f"- {entry['term']}: "

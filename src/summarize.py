@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
 from src.config import DEFAULT_SUMMARY_MODEL
 from src.llm import MissingSettingError, Provider, UnusableAnswerError, resolve
+from src.prompts import DEFAULT_PROFILE, FALLBACKS, render
 from src.render import format_timestamp
 from src.retry import retry_with_backoff
 
@@ -59,33 +60,11 @@ def _demote_headings(markdown: str, floor: int = 4) -> str:
     return _HEADING_RE.sub(lambda m: "#" * max(floor, len(m.group(1))) + " ", markdown)
 
 
-SUMMARY_SYSTEM_PROMPT = """คุณเป็นผู้ช่วยสรุปการประชุม อ่าน transcript ที่ให้มาแล้วสรุปเป็นภาษาไทยในรูปแบบ Markdown ประกอบด้วย:
-
-## ประเด็นสำคัญ
-(สรุปหัวข้อและประเด็นหลักที่พูดคุยกัน เป็น bullet point)
-
-## Action Items
-(รายการสิ่งที่ต้องทำ พร้อมระบุผู้รับผิดชอบถ้าอ้างอิงได้จากบทสนทนา ถ้าไม่ระบุชัดเจนให้เขียนว่า "ไม่ระบุผู้รับผิดชอบ")
-
-ถ้าจากบริบทการสนทนาพอเดาชื่อจริงของผู้พูดแต่ละคนได้ (เช่นมีการเอ่ยชื่อกัน) ให้ใช้ชื่อจริงแทน label "ผู้พูด N" ในสรุป ถ้าเดาไม่ได้ให้คงป้าย "ผู้พูด N" ไว้"""
-
-CHUNK_SYSTEM_PROMPT = """คุณเป็นผู้ช่วยสรุปการประชุม ข้อความที่ให้มาคือ transcript "เพียงบางช่วง" ของการประชุมที่ยาวกว่านี้ ไม่ใช่ทั้งการประชุม
-
-สรุปเฉพาะเนื้อหาในช่วงนี้เป็นภาษาไทยแบบ Markdown เป็น bullet point เก็บรายละเอียดให้ครบ ทั้งประเด็นที่คุยกัน ข้อสรุป และสิ่งที่ต้องทำพร้อมผู้รับผิดชอบถ้าระบุได้
-
-ห้ามเดาเนื้อหาช่วงอื่นที่ไม่ได้ให้มา และไม่ต้องเขียนคำนำหรือคำลงท้าย ใช้ bullet point เท่านั้น ห้ามใส่ markdown heading (เช่น ## หรือ ###)"""
-
-REDUCE_SYSTEM_PROMPT = """ข้อความที่ให้มาคือสรุปย่อยของการประชุมเดียวกัน เรียงตามช่วงเวลา
-
-รวมทั้งหมดเป็นสรุปฉบับเดียวเป็นภาษาไทยแบบ Markdown ประกอบด้วย:
-
-## ประเด็นสำคัญ
-(รวมประเด็นจากทุกช่วง จัดกลุ่มตามหัวข้อไม่ใช่ตามเวลา ยุบเรื่องที่ซ้ำกันเข้าด้วยกัน)
-
-## Action Items
-(รวมสิ่งที่ต้องทำจากทุกช่วง พร้อมผู้รับผิดชอบถ้าอ้างอิงได้ ถ้าไม่ระบุชัดเจนให้เขียนว่า "ไม่ระบุผู้รับผิดชอบ")
-
-ถ้าพอเดาชื่อจริงของผู้พูดได้จากบริบท ให้ใช้ชื่อจริงแทน label "ผู้พูด N" เก็บเนื้อหาสำคัญให้ครบ อย่าตัดทิ้งเพียงเพราะอยากให้สั้น"""
+# prompt จริงอยู่ในไฟล์ prompts/*.md แล้ว -- ชื่อสามตัวนี้คงไว้เพราะเป็น prompt สำรอง
+# ที่ใช้เมื่อไฟล์หาย และมีโค้ด/เทสต์อ้างถึงอยู่ จูนถ้อยคำให้ไปแก้ไฟล์ ไม่ใช่ที่นี่
+SUMMARY_SYSTEM_PROMPT = FALLBACKS["single"]
+CHUNK_SYSTEM_PROMPT = FALLBACKS["map"]
+REDUCE_SYSTEM_PROMPT = FALLBACKS["reduce"]
 
 
 # ชุดเดียวกับที่ Anthropic SDK ถือว่าลองใหม่ได้: ต่อไม่ติด, 408, 409, 429 และ 5xx
@@ -173,17 +152,6 @@ def _time_range(chunk: dict) -> str:
     return f"{format_timestamp(chunk['start_seconds'])}–{format_timestamp(chunk['end_seconds'])}"
 
 
-def _with_glossary(system_prompt: str, glossary_text: str) -> str:
-    """system prompt ที่ต่อตารางศัพท์ไว้ท้าย -- คืนของเดิมเมื่อไม่มีตาราง
-
-    ต่อท้ายทั้งขั้น map และ reduce โดยเจตนา: ขั้น map เห็นข้อความดิบพอดี ส่วนขั้น
-    reduce ต้องย้ำอีกครั้งกันคำที่แก้แล้ว drift กลับตอนโมเดลเรียบเรียงใหม่
-    """
-    if not glossary_text:
-        return system_prompt
-    return f"{system_prompt}\n\n{glossary_text}"
-
-
 def _summarize_chunk(
     provider: Provider, system: str, chunk: dict, index: int, total: int
 ) -> str | Exception:
@@ -214,17 +182,22 @@ def summarize_transcript(
     transcript_markdown: str,
     model: str = DEFAULT_SUMMARY_MODEL,
     glossary_text: str = "",
+    profile: str = DEFAULT_PROFILE,
 ) -> str:
     """`glossary_text` มาจาก glossary.format_for_prompt() -- ว่างได้ แปลว่าไม่มีตาราง
+    `profile` เลือกไฟล์ prompts/profiles/<profile>.md ที่จะแทรกเข้า {profile_rules}
 
     ตัวแทนที่คำแบบเป๊ะ (apply_exact) ไม่ได้อยู่ในนี้โดยเจตนา มันทำที่ pipeline ก่อน
     เรียกฟังก์ชันนี้ เพราะฟังก์ชันนี้คืน str เปล่า ๆ และถูก mock ไว้หลายสิบจุดในเทสต์
     การให้มันคืนจำนวนที่แก้ด้วยจะเปลี่ยน return type ไปทั้งหมดโดยไม่ได้อะไรเพิ่ม
+
+    prompt ทั้งสามถูก render ที่นี่ครั้งเดียว ไม่ใช่ต่อ chunk: การอ่านไฟล์ซ้ำทุก chunk
+    เปิดช่องให้แก้ไฟล์กลางประชุมแล้วได้สรุปที่ครึ่งหนึ่งใช้กฎเก่าครึ่งหนึ่งใช้กฎใหม่
     """
     provider = resolve(model)
-    single_system = _with_glossary(SUMMARY_SYSTEM_PROMPT, glossary_text)
-    chunk_system = _with_glossary(CHUNK_SYSTEM_PROMPT, glossary_text)
-    reduce_system = _with_glossary(REDUCE_SYSTEM_PROMPT, glossary_text)
+    single_system = render("single", profile=profile, glossary_text=glossary_text)
+    chunk_system = render("map", profile=profile, glossary_text=glossary_text)
+    reduce_system = render("reduce", profile=profile, glossary_text=glossary_text)
 
     # Every API call below is retried here, inside summarize_transcript. Callers
     # must not add a retry of their own: with per-chunk retries in place, an outer
