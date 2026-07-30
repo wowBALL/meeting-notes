@@ -345,8 +345,18 @@ def test_load_config_uses_default_speaker_thresholds(tmp_path, monkeypatch):
 
     # ค่าตัวเลขเขียนตรง ๆ ที่นี่ที่เดียว: การขยับเกณฑ์ต้องเป็นการตัดสินใจที่มีคนแก้
     # เทสต์ตาม ไม่ใช่สิ่งที่เลื่อนไปเองเพราะทุกที่อ้างค่าคงที่ตัวเดียวกันหมด
-    assert config.speaker_match_high == 0.80
-    assert config.speaker_match_low == 0.50
+    assert config.speaker_match_high == 0.70
+    assert config.speaker_match_low == 0.45
+
+
+def test_the_default_thresholds_bracket_the_measured_gap():
+    # หลักฐาน 2026-07-30 (Meet1900 เต็มไฟล์ + คลิป enroll): คู่คนเดียวกันข้ามการบันทึกได้
+    # 0.7493 คู่คนละคนแย่ที่สุด 0.6313 -- เกณฑ์ที่อยู่นอกหน้าต่างนี้ทำให้ระบบผิดแน่นอน
+    # ไม่ใช่แค่ไม่เหมาะ เทสต์นี้จะแดงถ้ามีคนขยับค่าโดยไม่ได้วัดใหม่
+    assert 0.6313 < DEFAULT_SPEAKER_MATCH_HIGH <= 0.7493
+    # LOW ต้องเหนือเพดานของคู่คนละคน *ข้ามไฟล์* (0.4310) เพื่อไม่ให้คนไม่รู้จักโผล่ในโซน
+    # "เสนอให้ยืนยัน" แต่ต้องไม่เกิน HIGH
+    assert 0.4310 < DEFAULT_SPEAKER_MATCH_LOW < DEFAULT_SPEAKER_MATCH_HIGH
 
 
 def test_load_config_falls_back_when_a_threshold_is_not_a_number(tmp_path, monkeypatch):
