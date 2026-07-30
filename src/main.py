@@ -51,8 +51,24 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
     # เริ่มแล้วถือค้างไว้ตลอดอายุ process เหมือน diarization_pipeline/whisper_model
     # สองตัวข้างบน ไม่ใช่ตัวเดียวกับ diarization_pipeline: แยกกันโดยสิ้นเชิงเพราะ 3.1 กับ
     # community-1 ใช้โมเดล embedding คนละตัว (ดู src/voiceprint.py)
+    #
+    # ห่อด้วย try/except โดยเจตนา ต่างจาก diarization_pipeline/whisper_model สองตัวข้างบน:
+    # ทั้งท่อ process_file และ process_enroll_requests ถือว่า embedder หายไปได้อยู่แล้ว
+    # (ป้าย "ผู้พูด N" แทนชื่อจริง -- ดู pipeline.process_file) แต่จุดนี้จุดเดียวที่ไม่มี
+    # การ์ดมาก่อน: EMBEDDING_MODEL พิมพ์ผิดใน .env ทำให้ diarization กับ Whisper โหลดผ่าน
+    # ปกติแล้วมาตายที่นี่ด้วย traceback ดิบ ขัดกับกฎของฟีเจอร์นี้เองที่ว่าการจำเสียงล้มเหลว
+    # ต้องไม่หยุดอะไรเลย -- ข้ามไปเริ่ม watcher ด้วย embedder=None แทน
     logging.info("Loading speaker-embedding model (%s)...", config.embedding_model)
-    embedder = load_embedder(config.hf_token, config.embedding_model)
+    try:
+        embedder = load_embedder(config.hf_token, config.embedding_model)
+    except Exception:
+        logging.exception(
+            "Failed to load the speaker-embedding model (%s) -- starting without "
+            "voice recognition; speakers will be labelled \"ผู้พูด N\" instead of "
+            "matched by name",
+            config.embedding_model,
+        )
+        embedder = None
 
     logging.info("Watching %s for new audio files...", config.inbox_dir)
     watch_loop(

@@ -105,6 +105,7 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -147,6 +148,7 @@ def test_glossary_corrects_the_transcript_before_it_reaches_the_summarizer(tmp_p
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[
@@ -196,6 +198,7 @@ def _run_with_profile(tmp_path, job_profile=None, env_profile=None):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "เสร็จแล้วครับ"}],
@@ -278,6 +281,7 @@ def test_open_items_from_the_previous_meeting_reach_the_summarizer(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
@@ -304,6 +308,7 @@ def test_carryover_only_comes_from_the_same_profile(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
@@ -329,6 +334,7 @@ def test_carryover_can_be_switched_off(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
@@ -393,6 +399,7 @@ def test_glossary_reaches_the_summarizer_as_prompt_text(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "อิเล็กตรอนพร้อม"}],
@@ -423,6 +430,7 @@ def test_a_missing_glossary_file_adds_no_glossary_lines(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -511,6 +519,7 @@ def test_process_file_moves_to_failed_when_summarization_fails(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -573,6 +582,7 @@ def test_process_file_keeps_the_transcript_when_summarization_fails(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -611,6 +621,7 @@ def test_process_file_does_not_retry_summarization_itself(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -638,6 +649,7 @@ def test_process_file_moves_to_failed_when_rendering_fails(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -668,6 +680,7 @@ def test_process_file_moves_to_failed_when_save_fails(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -722,6 +735,7 @@ def test_process_file_threads_diarization_pipeline_to_diarize_audio(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -747,6 +761,7 @@ def test_process_file_threads_whisper_model_to_transcribe_audio(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch("src.pipeline.transcribe_audio", mock_transcribe),
         patch(
             "src.pipeline.diarize_audio",
@@ -837,6 +852,42 @@ def test_process_file_keeps_the_speaker_turns_when_voiceprints_fail(tmp_path, mo
 
     transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
     assert "ผู้พูด 2" in transcript  # ยังแยกผู้พูดได้ แค่จำเสียงไม่ได้
+
+
+def test_process_file_completes_when_embedder_has_no_checkpoint_attribute(tmp_path):
+    """embedder ที่สนองสัญญา embed(waveform, intervals) -> list ของ extract_voiceprints แต่
+    ไม่มี .checkpoint ต้องไม่ทำให้ process_file ล้ม -- docstring ของ process_file ประกาศ
+    พารามิเตอร์ embedder เป็น Any และผูกไว้แค่สัญญาของ extract_voiceprints เท่านั้น ไม่มี
+    อะไรบังคับว่าต้องมี .checkpoint ผู้เรียกที่ทำตามสัญญานั้นแต่ไม่มี attribute นี้ต้องไม่เจอ
+    AttributeError ก่อนถึง create_meeting_folder/save_transcript -- ไม่งั้นการถอดเสียงที่
+    เสร็จไปแล้วทั้งรอบถูกทิ้งและไฟล์เสียงค้างใน inbox/ ทุกรอบ poll ไปเรื่อย ๆ
+    """
+
+    def bare_embedder(waveform, intervals):
+        return [[1.0, 0.0] for _ in intervals]
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config, embedder=bare_embedder)
+
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert transcript  # completed instead of raising AttributeError on .checkpoint
 
 
 def test_process_file_uses_the_model_from_the_job_file(tmp_path):
@@ -1009,6 +1060,7 @@ def test_the_recorded_model_choice_survives_from_manifest_to_summary(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -1277,6 +1329,7 @@ def test_process_file_records_each_stage(tmp_path):
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -1309,6 +1362,7 @@ def test_process_file_skips_the_summarize_event_in_transcript_only_mode(tmp_path
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
@@ -1645,6 +1699,7 @@ def test_process_file_queues_nobody_when_diarization_gave_no_embeddings(tmp_path
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 30.0, "text": "สวัสดีครับ"}],
@@ -1668,6 +1723,7 @@ def test_process_file_finishes_the_meeting_when_writing_the_queue_fails(tmp_path
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 30.0, "text": "สวัสดีครับ"}],

@@ -102,6 +102,32 @@ def test_main_loads_the_embedder_with_the_embedding_model_and_passes_to_watch_lo
     assert mock_watch_loop.call_args.kwargs["embedder"] is loaded_embedder
 
 
+def test_main_starts_watch_loop_with_no_embedder_when_load_embedder_raises(
+    tmp_path, monkeypatch
+):
+    """EMBEDDING_MODEL พิมพ์ผิดใน .env ต้องไม่ทำให้ startup ตายด้วย traceback ดิบ --
+    diarization กับ Whisper โหลดผ่านปกติ ขัดกับกฎของฟีเจอร์นี้เองที่ว่าความล้มเหลวของ
+    "การจำเสียง" ต้องไม่หยุดอะไรเลย (process_file/process_enroll_requests ถือว่า
+    embedder=None ได้อยู่แล้ว) main() ต้อง log แล้วเริ่ม watch_loop ต่อด้วย embedder=None
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+
+    with (
+        patch("src.main.watch_loop") as mock_watch_loop,
+        patch("src.main.load_whisper_model", return_value=object()),
+        patch("src.main.load_diarization_pipeline", return_value=object()),
+        patch(
+            "src.main.load_embedder",
+            side_effect=RuntimeError("model not found: bad checkpoint"),
+        ),
+    ):
+        main(base_dir=tmp_path)
+
+    mock_watch_loop.assert_called_once()
+    assert mock_watch_loop.call_args.kwargs["embedder"] is None
+
+
 # โมดูลที่ import pyaudiowpatch ซึ่งเป็น fork เฉพาะ Windows ของ PyAudio
 WINDOWS_ONLY_MODULES = {"record", "preflight"}
 

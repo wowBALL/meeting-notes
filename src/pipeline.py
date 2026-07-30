@@ -224,6 +224,7 @@ def process_file(
         activity.append(config.base_dir, job, "diarize_started")
         diarization_failed = False
         voiceprints: dict[str, Voiceprint] = {}
+        embedding_model = ""
         try:
             diarization = diarize_audio(
                 wav_path, hf_token=config.hf_token, pipeline=diarization_pipeline
@@ -256,15 +257,20 @@ def process_file(
                     # ไม่ได้ถือโมเดลไว้เอง (เทสต์/สคริปต์แยก)
                     embedder = load_embedder(config.hf_token, config.embedding_model)
                 voiceprints = extract_voiceprints(wav_path, speaker_turns, embedder)
+                # getattr, not embedder.checkpoint: process_file's own docstring only
+                # requires embedder to satisfy extract_voiceprints's `embed` contract, a
+                # bare callable of (waveform, intervals) -> list, not to carry
+                # .checkpoint. A caller passing such a callable must not crash here --
+                # this whole block exists so a voiceprint failure degrades to
+                # "ผู้พูด N" instead of throwing away a completed transcription pass.
+                embedding_model = getattr(embedder, "checkpoint", "")
             except Exception as e:
                 logger.warning("สร้าง voiceprint ไม่สำเร็จ ไปต่อโดยไม่จำเสียง: %s", e)
                 activity.append(
                     config.base_dir, job, "voiceprint_failed", "warn", {"error": str(e)}
                 )
 
-    matches = _match_known_speakers(
-        voiceprints, config, job, embedder.checkpoint if embedder is not None else ""
-    )
+    matches = _match_known_speakers(voiceprints, config, job, embedding_model)
 
     try:
         merged = merge_transcript_and_speakers(whisper_segments, speaker_turns)
@@ -320,7 +326,7 @@ def process_file(
         merged,
         speaker_labels,
         voiceprints,
-        embedder.checkpoint if embedder is not None else "",
+        embedding_model,
         matches,
     )
     return meeting_dir

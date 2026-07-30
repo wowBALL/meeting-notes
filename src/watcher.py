@@ -46,20 +46,6 @@ def process_enroll_requests(
 
     ไม่เคยเขียน registry.json -- เขียนแค่ผลวิเคราะห์ไว้ให้คนมากดยืนยันที่หน้าเว็บ
     """
-    if embedder is None:
-        # โหลดไม่สำเร็จ (hf_token ผิด/ไม่มีเน็ต) ต้องไม่ทำให้ watch_loop ทั้งตัวตาย
-        # เหมือนกับเหตุผลข้างล่างเรื่อง pending_requests -- watch_loop ไม่ได้ห่อการเรียก
-        # ฟังก์ชันนี้ไว้เลย ข้ามรอบ poll นี้ไปทั้งหมด (ใบสั่งงานยังอยู่ครบ ไม่มีอะไรหาย)
-        # ดีกว่าปล่อยให้ exception ทะลุออกไปฆ่า watcher พร้อมงานประมวลผล inbox/ ที่ยังไม่ได้
-        # ทำในรอบถัดไปไปด้วย
-        try:
-            embedder = load_embedder(config.hf_token, config.embedding_model)
-        except Exception:
-            logger.exception(
-                "โหลด embedder ไม่สำเร็จ -- ข้ามการวิเคราะห์ไฟล์ลงทะเบียนรอบ poll นี้ "
-                "(ใบสั่งงานยังอยู่ครบ รอบหน้าจะลองใหม่เอง)"
-            )
-            return
     try:
         # pending_requests เองก็ raise ได้ (อ่านโฟลเดอร์ไม่ได้ ฯลฯ) และแต่เดิมมันอยู่ใน
         # for header ตรง ๆ นอก try ใด ๆ เลย -- ถ้าพังตรงนี้ exception จะทะลุออกไปถึง
@@ -69,6 +55,27 @@ def process_enroll_requests(
     except Exception:
         logger.exception("Failed to list pending enrollment requests")
         return
+    if not pending:
+        # ต้องเช็คก่อนโหลด embedder สำรอง ไม่ใช่หลัง: คิวว่างคือกรณีปกติของแทบทุก poll
+        # (ผู้ใช้ enroll กันไม่บ่อย) โหลดก่อนเช็คแปลว่า hf_token/EMBEDDING_MODEL ที่ผิด
+        # ยิง traceback เต็มลง log ทุก poll แม้ไม่มีงานให้ทำเลยสักไฟล์ -- ย้ายมาไว้หลัง
+        # เช็คนี้แล้วมันจะยิงเฉพาะตอนมีงานค้างจริง ๆ เท่านั้น
+        return
+    if embedder is None:
+        # โหลดไม่สำเร็จ (hf_token ผิด/ไม่มีเน็ต) ต้องไม่ทำให้ watch_loop ทั้งตัวตาย
+        # เหมือนกับเหตุผลข้างบนเรื่อง pending_requests -- watch_loop ไม่ได้ห่อการเรียก
+        # ฟังก์ชันนี้ไว้เลย ข้ามรอบ poll นี้ไปทั้งหมด (ใบสั่งงานยังอยู่ครบ ไม่มีอะไรหาย)
+        # ดีกว่าปล่อยให้ exception ทะลุออกไปฆ่า watcher พร้อมงานประมวลผล inbox/ ที่ยังไม่ได้
+        # ทำในรอบถัดไปไปด้วย โหลดครั้งเดียวตรงนี้ ไม่ใช่ในลูปข้างล่าง -- คิวมีได้หลายไฟล์
+        # ต่อรอบ poll เดียว
+        try:
+            embedder = load_embedder(config.hf_token, config.embedding_model)
+        except Exception:
+            logger.exception(
+                "โหลด embedder ไม่สำเร็จ -- ข้ามการวิเคราะห์ไฟล์ลงทะเบียนรอบ poll นี้ "
+                "(ใบสั่งงานยังอยู่ครบ รอบหน้าจะลองใหม่เอง)"
+            )
+            return
     for audio_file in pending:
         audio_path = enroll.enroll_dir(config.base_dir) / audio_file
         # CRITICAL A: ต้อง stat ไฟล์ *ก่อน* ส่งเข้า analyze() เสมอ ไม่ใช่ตอนเขียนผลทีหลัง
