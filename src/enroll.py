@@ -853,8 +853,6 @@ speaker_count ดู renderFile) การส่ง null ออกไปจะ�
 suggested_name ที่ถ้าทิ้งของปลอมไป ค่าที่เซิร์ฟเวอร์คำนวณจากชื่อไฟล์เองจะรอดไม่ถูกทับ
 """
 
-_RESULT_ALLOWED_KEYS = frozenset(_RESULT_LEAF_TYPES)
-
 
 def list_entries(base_dir: Path) -> list[dict]:
     """ทุกไฟล์ที่รอลงทะเบียน พร้อมสถานะ ในรูปที่ส่งออกหน้าเว็บได้
@@ -952,7 +950,7 @@ def list_entries(base_dir: Path) -> list[dict]:
                     continue
                 entry[key] = value
         # ตาข่ายชั้นล่างอีกครั้งบน entry ทั้งก้อน ไม่ใช่แค่ result: คีย์ที่ใครเพิ่มเข้า
-        # _RESULT_ALLOWED_KEYS ทีหลัง (หรือคีย์ใหม่ที่ประกอบขึ้นตรงนี้) ต้องปลอดภัยเองตั้งแต่
+        # _RESULT_LEAF_TYPES ทีหลัง (หรือคีย์ใหม่ที่ประกอบขึ้นตรงนี้) ต้องปลอดภัยเองตั้งแต่
         # ต้น ไม่ต้องรอให้มีคนมาเขียนชั้นของมันเป็นรีวิวรอบที่หก
         entries.append(drop_numeric_vectors(entry))
     return entries

@@ -64,12 +64,20 @@ def _cosine(a, b) -> float:
 
 
 def score_pairs(voiceprints: dict, truth: dict) -> tuple[list[float], list[float]]:
-    """คะแนนของคู่ข้ามไฟล์ แยกเป็นกองคนเดียวกันกับกองคนละคน
+    """คะแนนของคู่ แยกเป็นกองคนเดียวกันกับกองคนละคน -- แต่ละกองรับคู่คนละชุดโดยเจตนา
 
-    นับเฉพาะคู่ *ข้ามไฟล์* โดยเจตนา: คู่ในไฟล์เดียวกันใช้ไมค์ codec และสภาพห้องเดียวกัน
-    คะแนนของมันสูงกว่าความจริงราว 0.05-0.15 (วัด 2026-07-30: กอง split-half ต่ำสุด 0.8042
-    ขณะที่คู่ข้ามการบันทึกของคนเดียวกันได้ 0.7493) การเอามาปนกันจะได้เกณฑ์ที่เข้มเกินจริง
-    แล้วปฏิเสธคนที่ถูกต้อง
+    **กองคนเดียวกัน: คู่ข้ามไฟล์เท่านั้น** คู่คนเดียวกันในไฟล์เดียวกันใช้ไมค์ codec และ
+    สภาพห้องเดียวกัน คะแนนสูงกว่าความจริงราว 0.05-0.15 (วัด 2026-07-30: กอง split-half
+    ต่ำสุด 0.8042 ขณะที่คู่ข้ามการบันทึกของคนเดียวกันได้ 0.7493) เอามาเป็น *พื้น* ของกองนี้
+    จะได้เกณฑ์เข้มเกินจริงแล้วปฏิเสธคนที่ถูกต้อง
+
+    **กองคนละคน: ทุกคู่ รวมคู่ในไฟล์เดียวกัน** ความไม่สมมาตรนี้คือหัวใจ ไม่ใช่ความหลุด:
+    แต่ละกองต้องรับค่ามาจากฝั่งที่อนุรักษ์นิยมที่สุดของตัวเอง และคู่คนละคนในประชุมเดียวกัน
+    คือรูปทรงของการใส่ชื่อผิดที่เกิดขึ้นจริง -- คนหนึ่งลงทะเบียนไว้ อีกคนนั่งอยู่ในห้องเดียวกัน
+    แล้วได้ชื่อเขาไปโดยไม่มีใครยืนยัน คู่พวกนี้ทำคะแนนสูงกว่าคู่คนละคนข้ามการบันทึกมาก
+    (วัด 2026-07-30: 0.6313 เทียบกับ 0.4310) เวอร์ชันแรกของฟังก์ชันนี้ตัดมันทิ้งด้วย จึงเสนอ
+    HIGH ที่ 0.59 -- ต่ำกว่าคะแนนที่คนละคนทำได้จริงถึง 0.04 คือเลขที่พาไปอยู่ในโซนใส่ชื่อผิด
+    พอดี ทั้งที่ดูเหมือนคำนวณมาอย่างดี
 
     label ที่ไม่มีเฉลยถูกข้ามทั้งคู่ ไม่ถือว่า "เป็นคนอื่น" -- pyannote แยกคนเดียวเป็นสอง
     ป้ายได้ และการเดาจะดันเพดานกองคนละคนขึ้นเอง
@@ -85,10 +93,10 @@ def score_pairs(voiceprints: dict, truth: dict) -> tuple[list[float], list[float
     keys = sorted(resolved)
     for index, left in enumerate(keys):
         for right in keys[index + 1:]:
-            if left[0] == right[0]:
-                continue
             left_person, left_vector = resolved[left]
             right_person, right_vector = resolved[right]
+            if left_person == right_person and left[0] == right[0]:
+                continue
             score = _cosine(left_vector, right_vector)
             (same if left_person == right_person else different).append(score)
     return same, different
@@ -265,7 +273,7 @@ def _report(voiceprints: dict, truth: dict, same: list[float], different: list[f
     result = suggest_thresholds(same, different)
 
     print()
-    print("=== กองคะแนน (คู่ข้ามไฟล์เท่านั้น) ===")
+    print("=== กองคะแนน (คนเดียวกัน: ข้ามไฟล์เท่านั้น / คนละคน: ทุกคู่) ===")
     print("  " + _describe("คนเดียวกัน", same))
     print("  " + _describe("คนละคน", different))
     if same and different:
@@ -283,7 +291,12 @@ def _report(voiceprints: dict, truth: dict, same: list[float], different: list[f
 
 
 def _print_pairs(voiceprints: dict, truth: dict) -> None:
-    """คะแนนรายคู่ข้ามไฟล์ เรียงจากมากไปน้อย พร้อมชื่อคนตามเฉลย"""
+    """คะแนนรายคู่ที่ถูกนับ เรียงจากมากไปน้อย พร้อมชื่อคนตามเฉลย
+
+    ต้องแสดงคู่ชุดเดียวกับที่ score_pairs นับเป๊ะ ๆ ไม่ใช่ชุดที่อ่านง่ายกว่า -- คู่ที่ดัน
+    เพดานกองคนละคนขึ้นมักเป็นคู่ในประชุมเดียวกัน ถ้าตารางนี้ไม่แสดงมัน คนอ่านจะเห็นเกณฑ์ที่
+    เข้มโดยไม่มีอะไรอธิบายว่าทำไม แล้วสรุปว่าเครื่องมือคิดผิด
+    """
     resolved = {}
     for key, voiceprint in voiceprints.items():
         person = truth.get(key) or truth.get((key[0], "*"))
@@ -294,10 +307,10 @@ def _print_pairs(voiceprints: dict, truth: dict) -> None:
     keys = sorted(resolved)
     for index, left in enumerate(keys):
         for right in keys[index + 1:]:
-            if left[0] == right[0]:
-                continue
             left_person, left_vector = resolved[left]
             right_person, right_vector = resolved[right]
+            if left_person == right_person and left[0] == right[0]:
+                continue
             rows.append(
                 (
                     _cosine(left_vector, right_vector),
@@ -311,7 +324,7 @@ def _print_pairs(voiceprints: dict, truth: dict) -> None:
     if not rows:
         return
     print()
-    print("=== คะแนนรายคู่ (ข้ามไฟล์) ===")
+    print("=== คะแนนรายคู่ที่ถูกนับ ===")
     for score, is_same, left, right, left_person, right_person in sorted(rows, reverse=True):
         verdict = "คนเดียวกัน" if is_same else "คนละคน  "
         print(

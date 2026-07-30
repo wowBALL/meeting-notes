@@ -8,14 +8,26 @@
 service ลบทีละคน สองกระบวนการนี้จึงไม่มีวันแตะไฟล์เดียวกันพร้อมกัน
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from src.speakers import MIN_SPEAKING_SECONDS, REGISTRY_DIRNAME
 from src.storage import replace_with_retry
-from src.voiceprint import Voiceprint
+
+if TYPE_CHECKING:
+    # ใช้เป็น type annotation อย่างเดียว ไม่มีโค้ดใน runtime แตะคลาสนี้เลย -- import
+    # จริงจะลาก src.voiceprint -> src.waveform -> torch เข้ามา และ session_service
+    # import โมดูลนี้ตอนสตาร์ท ทำให้หน้าเว็บทั้งหน้า (ที่ไม่เคยเรียก pyannote เลย) ต้อง
+    # โหลด torch 500MB ก่อน Flask จะ bind พอร์ต แถม start-ui.bat เรียก
+    # `python -m src.session_service` ตรง ๆ ซึ่งไม่มีบล็อก add_dll_directory ของ
+    # src/main.py -- บนเครื่องที่ DLL ของ torch ไม่ resolve หน้าเว็บจะตายตั้งแต่ import
+    # ทั้งที่เดิมพังแค่ watcher
+    from src.voiceprint import Voiceprint
 
 logger = logging.getLogger(__name__)
 

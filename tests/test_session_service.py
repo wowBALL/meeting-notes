@@ -2,7 +2,9 @@ import inspect
 import json
 import re
 import subprocess
+import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -1443,7 +1445,7 @@ def test_get_enroll_reports_the_best_registry_match_when_at_or_above_the_low_thr
         tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
-    # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.50) กับ HIGH (0.80) เกณฑ์
+    # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.45) กับ HIGH (0.70) เกณฑ์
     # เริ่มต้นของ Config พอดี ไม่ถึงขั้นเสนอให้รวมชื่อ แต่ต้องเตือนให้เห็น -- embedding_model
     # ต้องตรงกับป้ายในทะเบียนไม่งั้น match_known ข้ามตัวอย่างนี้ไปเงียบ ๆ (คนละพื้นที่เวกเตอร์)
     write_ok_result(
@@ -1548,7 +1550,7 @@ def test_get_enroll_never_leaks_the_embedding_even_when_a_match_is_found(tmp_pat
 def test_get_enroll_drops_vectors_planted_as_values_of_allowlisted_keys(tmp_path):
     """finding 1 ของรีวิวรอบที่ห้า ฝั่ง /api/enroll -- คู่แฝดของเทสต์ชื่อเดียวกันฝั่งคิว
 
-    _RESULT_ALLOWED_KEYS กรอง "ชื่อคีย์" แล้ว entry.update() เอา "ค่า" ของคีย์เหล่านั้นมา
+    allowlist กรอง "ชื่อคีย์" แล้ว entry.update() เอา "ค่า" ของคีย์เหล่านั้นมา
     ตรง ๆ -- result.json แก้มือได้ตามดีไซน์ของโปรเจกต์นี้ เวกเตอร์ที่วางเป็นค่าของ
     speaking_seconds/speaker_count/suggested_name จึงหลุดออกไปได้ทั้งที่ allowlist ทำงาน
     ถูกต้องทุกประการ และ reason ที่เป็น dict ทั้งก้อนพิสูจน์ว่าความลึกไม่มีขอบ: ซับทรี
@@ -2054,3 +2056,39 @@ def test_worker_probe_is_false_when_powershell_cannot_be_launched(monkeypatch):
     monkeypatch.setattr(session_service.subprocess, "run", boom)
 
     assert probe_worker() is False
+
+
+def test_importing_the_web_service_does_not_pull_in_torch():
+    """หน้าเว็บต้องเปิดได้โดยไม่แตะ torch เลย -- ไม่ใช่แค่เรื่องความเร็ว
+
+    session_service ไม่เคยเรียก pyannote สักบรรทัด แต่มัน import pending/enroll ซึ่งเคย
+    ลากทาง src.voiceprint -> src.waveform -> torch เข้ามาที่หัวไฟล์ ผลคือ 500MB และ ~1.5
+    วินาทีก่อน Flask จะ bind พอร์ต เพื่อของที่ไม่ได้ใช้
+
+    ที่ทำให้มันเป็นเรื่องความถูกต้องไม่ใช่ความเร็ว: start-ui.bat เรียก
+    `python -m src.session_service` เป็นกระบวนการของตัวเอง และทางเข้านั้น *ไม่มี* บล็อก
+    os.add_dll_directory ที่ src/main.py มี (ตั้งแต่ python 3.8 PATH ไม่ถูกใช้ตอนแก้ชื่อ
+    DLL ที่ torch พึ่งพา) -- บนเครื่องที่ชนเงื่อนไขนั้น หน้าเว็บทั้งหน้า (อัดเสียง ดู
+    transcript ตั้งชื่อผู้พูด ลงทะเบียน) จะ traceback ตั้งแต่ import ทั้งที่เดิมพังแค่ watcher
+
+    รันในกระบวนการใหม่เพราะ sys.modules ของกระบวนการที่รันเทสต์มี torch อยู่แล้วจาก
+    เทสต์ไฟล์อื่น -- เช็คในนี้จะผ่านตลอดไม่ว่าโค้ดจะเป็นยังไง
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import src.session_service; "
+            "print('torch' in sys.modules or 'pyannote' in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parent.parent),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False", (
+        "session_service โหลด torch/pyannote ตอน import แล้ว -- หา import ที่หัวไฟล์ของ "
+        "โมดูลที่มันดึงเข้ามา แล้วย้ายเข้าไปในฟังก์ชัน (หรือ TYPE_CHECKING ถ้าใช้เป็น "
+        "annotation อย่างเดียว)"
+    )

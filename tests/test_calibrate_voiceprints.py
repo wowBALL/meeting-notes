@@ -20,16 +20,35 @@ def test_score_pairs_counts_a_cross_file_pair_of_the_same_person_as_same():
     assert different == []
 
 
-def test_score_pairs_ignores_pairs_inside_one_file():
-    # คู่ในไฟล์เดียวกันวัดความง่ายของการแยกผู้พูดในไฟล์นั้น ไม่ใช่ความยากของการจำเสียงข้าม
-    # การประชุม ซึ่งเป็นงานจริง -- และคะแนนของมันสูงกว่าความจริงราว 0.05-0.15 (วัด 2026-07-30)
+def test_score_pairs_ignores_a_same_person_pair_inside_one_file():
+    # คู่คนเดียวกันในไฟล์เดียวกันใช้ไมค์ codec และห้องเดียวกัน คะแนนสูงกว่าความจริงราว
+    # 0.05-0.15 (วัด 2026-07-30) เอามาเป็นพื้นของกองคนเดียวกันจะได้เกณฑ์เข้มเกินจริงแล้ว
+    # ปฏิเสธคนที่ถูกต้อง -- พื้นต้องมาจากคู่ข้ามการบันทึกซึ่งเป็นงานจริงเท่านั้น
+    voiceprints = {
+        ("a.ogg", "SPEAKER_00"): _vp(1.0, 0.0),
+        ("a.ogg", "SPEAKER_01"): _vp(1.0, 0.0),
+    }
+    truth = {("a.ogg", "SPEAKER_00"): "satit", ("a.ogg", "SPEAKER_01"): "satit"}
+
+    assert score_pairs(voiceprints, truth) == ([], [])
+
+
+def test_score_pairs_counts_a_different_person_pair_inside_one_file_as_different():
+    # แต่คู่ *คนละคน* ในไฟล์เดียวกันต้องนับ -- มันคือรูปทรงของการใส่ชื่อผิดที่เกิดจริง:
+    # คนหนึ่งลงทะเบียนไว้ อีกคนนั่งอยู่ในห้องเดียวกัน แล้วได้ชื่อเขาไปโดยไม่มีใครยืนยัน
+    # เกณฑ์ที่ไม่เห็นคู่พวกนี้จะต่ำกว่าคะแนนที่คนละคนทำได้จริง (วัด 2026-07-30: คู่ข้ามการ
+    # บันทึกสูงสุด 0.4310 แต่คู่ในประชุมเดียวกันขึ้นไปถึง 0.6313) การตัดทิ้งทำให้เครื่องมือ
+    # เสนอเลขที่อยู่ในโซนใส่ชื่อผิดพอดี
     voiceprints = {
         ("a.ogg", "SPEAKER_00"): _vp(1.0, 0.0),
         ("a.ogg", "SPEAKER_01"): _vp(0.0, 1.0),
     }
     truth = {("a.ogg", "SPEAKER_00"): "satit", ("a.ogg", "SPEAKER_01"): "ton"}
 
-    assert score_pairs(voiceprints, truth) == ([], [])
+    same, different = score_pairs(voiceprints, truth)
+
+    assert same == []
+    assert different == pytest.approx([0.0])
 
 
 def test_score_pairs_skips_a_label_with_no_truth_entry():
@@ -71,7 +90,9 @@ def test_score_pairs_expands_the_wildcard_to_every_label_in_that_file():
     assert different == []
 
 
-def test_suggest_thresholds_puts_high_between_the_two_groups():
+def test_suggest_thresholds_puts_high_above_every_different_person_pair():
+    # 0.63 คือคู่คนละคนในไฟล์เดียวกัน ซึ่ง score_pairs นับเข้ากองคนละคนแล้ว -- เกณฑ์ที่
+    # ออกมาต้องอยู่เหนือมัน ไม่ใช่เหนือแค่คู่ข้ามไฟล์ที่ต่ำกว่า
     result = suggest_thresholds(same=[0.75, 0.80], different=[0.43, 0.63])
 
     assert result["overlap"] is False

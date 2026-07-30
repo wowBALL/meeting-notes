@@ -349,14 +349,20 @@ def test_load_config_uses_default_speaker_thresholds(tmp_path, monkeypatch):
     assert config.speaker_match_low == 0.45
 
 
-def test_the_default_thresholds_bracket_the_measured_gap():
-    # หลักฐาน 2026-07-30 (Meet1900 เต็มไฟล์ + คลิป enroll): คู่คนเดียวกันข้ามการบันทึกได้
-    # 0.7493 คู่คนละคนแย่ที่สุด 0.6313 -- เกณฑ์ที่อยู่นอกหน้าต่างนี้ทำให้ระบบผิดแน่นอน
-    # ไม่ใช่แค่ไม่เหมาะ เทสต์นี้จะแดงถ้ามีคนขยับค่าโดยไม่ได้วัดใหม่
-    assert 0.6313 < DEFAULT_SPEAKER_MATCH_HIGH <= 0.7493
-    # LOW ต้องเหนือเพดานของคู่คนละคน *ข้ามไฟล์* (0.4310) เพื่อไม่ให้คนไม่รู้จักโผล่ในโซน
-    # "เสนอให้ยืนยัน" แต่ต้องไม่เกิน HIGH
-    assert 0.4310 < DEFAULT_SPEAKER_MATCH_LOW < DEFAULT_SPEAKER_MATCH_HIGH
+def test_high_sits_above_every_pair_measured_on_the_real_audio_path():
+    # หลักฐาน 2026-07-31 วัดผ่านทางที่ระบบเดินจริง (แปลงเป็น wav 16k ก่อน diarize เหมือน
+    # pipeline.process_file/enroll.analyze) บน Meet1900 เต็มไฟล์ + คลิป enroll:
+    #   0.6679  คลิป enroll <-> SPEAKER_03 (ป้ายที่ใกล้ที่สุด แต่ยังไม่ยืนยันด้วยหูว่าคือใคร)
+    #   0.5711  คู่คนละคนในประชุมเดียวกัน สูงสุด
+    #   0.4288  คลิป enroll <-> ป้ายที่เหลือ สูงสุด
+    #
+    # ยังไม่มีคู่ "คนเดียวกันข้ามการบันทึก" ที่ยืนยันแล้วสักคู่ HIGH จึงต้องอยู่เหนือทุกคู่ที่
+    # วัดได้ -- ไม่ใส่ชื่อใครอัตโนมัติจนกว่าจะมีหลักฐาน ดีกว่าเดาจากคะแนนแล้วใส่ชื่อผิดคนลง
+    # สรุปที่ระบุผู้รับผิดชอบ เทสต์นี้จะแดงถ้ามีคนลดเกณฑ์ลงมาให้เคสใดเคสหนึ่งผ่านโดยไม่ได้
+    # วัดใหม่ ซึ่งคือวิธีที่ 0.80 กลายเป็นค่าที่ผิดมาแล้วครั้งหนึ่ง
+    assert DEFAULT_SPEAKER_MATCH_HIGH > 0.6679
+    # LOW เหนือ 0.4288 เพื่อไม่ให้คนไม่รู้จักโผล่ในโซน "เสนอให้ยืนยัน" แต่ต้องไม่เกิน HIGH
+    assert 0.4288 < DEFAULT_SPEAKER_MATCH_LOW < DEFAULT_SPEAKER_MATCH_HIGH
 
 
 def test_load_config_falls_back_when_a_threshold_is_not_a_number(tmp_path, monkeypatch):

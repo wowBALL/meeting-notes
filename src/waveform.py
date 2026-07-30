@@ -18,7 +18,6 @@ enroll.analyze) แปลงเป็น wav 16k โมโนด้วย ffmpeg
 from pathlib import Path
 
 import soundfile as sf
-import torch
 
 
 def load_waveform(audio_path: Path) -> dict:
@@ -36,6 +35,14 @@ def load_waveform(audio_path: Path) -> dict:
     ไว้แล้วและบันทึกเหตุผลลง activity log -- การคืนเสียงว่างเงียบ ๆ จะกลายเป็นการประชุม
     ที่ "แยกผู้พูดสำเร็จแต่ไม่มีใครพูด" ซึ่งไม่มีใครตามหาสาเหตุได้
     """
+    # import ในฟังก์ชัน ไม่ใช่หัวไฟล์ -- idiom เดียวกับ gpu.cuda_device และ
+    # transcribe: โมดูลนี้ถูก import ต่อ ๆ กันมาถึง session_service (ผ่าน pending/enroll)
+    # ซึ่งเป็นกระบวนการที่ไม่เคยเรียก pyannote เลย torch ที่หัวไฟล์ทำให้หน้าเว็บกิน
+    # 500MB และรอ ~1.5 วินาทีก่อน bind พอร์ต เพื่อของที่ไม่ได้ใช้ -- และ start-ui.bat
+    # เรียก `python -m src.session_service` ตรง ๆ ซึ่งไม่มีบล็อก add_dll_directory
+    # ของ src/main.py เครื่องที่ DLL ของ torch resolve ไม่ได้จึงเปิดหน้าเว็บไม่ขึ้นเลย
+    import torch
+
     samples, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
     return {
         "waveform": torch.from_numpy(samples.T.copy()),
