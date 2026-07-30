@@ -218,8 +218,15 @@ def extract_voiceprints(audio_path, turns: list[dict], embed) -> dict[str, Voice
 
     การกลืนความล้มเหลวมีสองชั้น แยกกันโดยเจตนา:
     - ระดับท่อน: `embed` คืน None ให้ท่อนไหนก็ตัดแค่ท่อนนั้นทิ้ง (ผ่าน is_usable_embedding)
-    - ระดับคน: `embed` โยน exception ให้คนไหนก็ตัดแค่คนนั้นทิ้ง (try ต่อคนด้านล่าง) --
-      ไม่ใช่ทั้งฟังก์ชันทิ้งทุกคนเป็น {} เพราะคนหนึ่งพัง
+    - ระดับคน: try ต่อคนด้านล่างครอบ *ทุกอย่างเกี่ยวกับคนคนนั้น* -- ไม่ใช่แค่ตัวเรียก
+      embed(...) แต่รวมการประมวลผลค่าที่ embed คืนมาด้วย (นับความยาว, zip กับช่วงที่ขอ,
+      กรองด้วย is_usable_embedding, เฉลี่ยด้วย average_unit_vectors, สร้าง Voiceprint แล้ว
+      เขียนลง prints) ไม่ว่าจะพังตรงไหนในบล็อกนี้ก็ตัดแค่คนนั้นทิ้ง ไม่ใช่ทั้งฟังก์ชันทิ้ง
+      ทุกคนเป็น {} เพราะคนหนึ่งพัง -- เคยแก้ผิดมาสองรอบแล้ว: รอบแรก try ครอบทั้งลูปทำให้คน
+      หนึ่งพังแล้วทุกคนหาย รอบสอง try ครอบแค่บรรทัด embed(...) เอง แต่ len(vectors)/zip/
+      is_usable_embedding/average_unit_vectors ที่กินค่าคืนของ embed ยังอยู่นอก try ทำให้
+      embed ที่คืนค่าผิดสัญญา (generator/None/int ที่ไม่มี __len__) ยัง TypeError หลุดไปโดน
+      except ชั้นนอกแล้วทุกคนหายเหมือนเดิม
     ท่อนเดียวที่พังต้องไม่ทำให้คนทั้งคนหาย และคนคนเดียวที่พังต้องไม่ทำให้คนอื่นในที่ประชุม
     เดียวกันหายไปด้วย -- กฎเดียวกัน ขยับขึ้นมาอีกชั้น
 
@@ -250,39 +257,44 @@ def extract_voiceprints(audio_path, turns: list[dict], embed) -> dict[str, Voice
                     clamped.append((start, end))
             if not clamped:
                 continue
-            # try ต่อคน ไม่ใช่ try ครอบทั้งลูป: embed คือการเรียกโมเดลจริงหนึ่งครั้งต่อคน
-            # และมันพังเป็นราย ๆ ได้ (OOM, crop เพี้ยน) ถ้าจับที่ชั้นนอกชั้นเดียว คนที่
-            # คำนวณสำเร็จไปแล้วก่อนหน้าจะหายไปด้วยทั้งที่เสียงของเขาไม่มีอะไรผิด --
-            # เป็นกฎเดียวกับ "ท่อนเดียวที่พังต้องไม่ทำให้คนทั้งคนหาย" ขยับขึ้นมาอีกชั้น
+            # try ต่อคน ครอบทุกอย่างของคนนี้ ตั้งแต่เรียก embed ไปจนถึงประมวลผลค่าที่มันคืน
+            # และเขียนลง prints -- ไม่ใช่แค่ตัวเรียก embed(...) เอง เดิมเคยครอบแค่บรรทัดเรียก
+            # แล้วปล่อยให้ len(vectors)/zip/is_usable_embedding/average_unit_vectors ที่กิน
+            # ค่าคืนของ embed อยู่นอก try -- ถ้า embed ทำผิดสัญญา (คืน generator/None/int ที่
+            # ไม่มี __len__ เช่น) TypeError จาก len() จะหลุดออกจาก try นี้ไปโดน except ชั้น
+            # นอกที่ทิ้งทุกคนเป็น {} เหมือนบั๊กราวด์ 1 ทุกประการ แค่ทางเข้าใหม่ -- ขอบเขต
+            # ของ try ต้องเป็น "ทุกอย่างเกี่ยวกับคนคนนี้" ไม่ใช่ "การเรียกฟังก์ชันเดียว" คนที่
+            # คำนวณสำเร็จไปแล้วก่อนหน้าต้องไม่หายไปด้วยไม่ว่าคนหลังจะพังตรงจุดไหนในบล็อกนี้
             try:
                 vectors = embed(waveform, clamped)
+                if len(vectors) != len(clamped):
+                    # สัญญาของ embed คือคืนลิสต์ยาวเท่าอินพุต -- ผิดสัญญาแล้ว zip จะตัดท้าย
+                    # ทิ้งเงียบ ๆ (ไม่ได้ผูกผิดช่วง แต่หายไปโดยไม่มีร่องรอย) ต้องมีบรรทัดเดียว
+                    # ใน log
+                    logger.warning(
+                        "embed คืนเวกเตอร์ %d ตัวสำหรับ %d ช่วงของ %s -- ส่วนเกินถูกตัดทิ้ง",
+                        len(vectors),
+                        len(clamped),
+                        label,
+                    )
+                kept = [
+                    (span, vector)
+                    for span, vector in zip(clamped, vectors)
+                    if is_usable_embedding(vector)
+                ]
+                embedding = average_unit_vectors([vector for _, vector in kept])
+                if embedding is None:
+                    continue
+                prints[label] = Voiceprint(
+                    embedding=embedding,
+                    seconds=round(sum(end - start for (start, end), _ in kept), 1),
+                    segment_count=len(kept),
+                )
             except Exception as e:
                 logger.warning(
                     "คำนวณเวกเตอร์ของ %s ไม่สำเร็จ ข้ามคนนี้ไป (คนอื่นไม่กระทบ): %s", label, e
                 )
                 continue
-            if len(vectors) != len(clamped):
-                # สัญญาของ embed คือคืนลิสต์ยาวเท่าอินพุต -- ผิดสัญญาแล้ว zip จะตัดท้ายทิ้ง
-                # เงียบ ๆ (ไม่ได้ผูกผิดช่วง แต่หายไปโดยไม่มีร่องรอย) ต้องมีบรรทัดเดียวใน log
-                logger.warning(
-                    "embed คืนเวกเตอร์ %d ตัวสำหรับ %d ช่วงของ %s -- ส่วนเกินถูกตัดทิ้ง",
-                    len(vectors),
-                    len(clamped),
-                    label,
-                )
-            kept = [
-                (span, vector)
-                for span, vector in zip(clamped, vectors)
-                if is_usable_embedding(vector)
-            ]
-            embedding = average_unit_vectors([vector for _, vector in kept])
-            if embedding is None:
-                continue
-            prints[label] = Voiceprint(
-                embedding=embedding,
-                seconds=round(sum(end - start for (start, end), _ in kept), 1),
-                segment_count=len(kept),
-            )
         return prints
     except Exception as e:
         # กว้างโดยตั้งใจ: soundfile/torch/pyannote โยนอะไรออกมาก็ได้จาก load_waveform หรือ

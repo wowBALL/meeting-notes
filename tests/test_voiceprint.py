@@ -340,6 +340,26 @@ def test_extract_voiceprints_survives_one_failed_speaker(tmp_path):
     assert "B" not in result
 
 
+def test_extract_voiceprints_survives_a_speaker_whose_embed_return_has_no_len(tmp_path):
+    # embed คืนค่าที่ไม่มี __len__ ได้จริงจาก wrapper โมเดลในอนาคต (generator, None, int) --
+    # ถ้า len(vectors) อยู่นอก try ต่อคน TypeError จะหลุดออกจาก try นั้นไปโดน except ชั้นนอก
+    # แล้วทุกคนหาย (คนละท่อนของ except ต่อคน แต่ผลลัพธ์แบบเดียวกับที่ราวด์ 1 เคยพัง) --
+    # ต้องเหลือ A ไว้ทั้งที่ B พังด้วยสาเหตุนี้
+    audio = _write_wav(tmp_path / "a.wav", 60.0)
+    turns = [_turn(0.0, 12.0, "A"), _turn(20.0, 32.0, "B")]
+
+    def embed(waveform, intervals):
+        if intervals[0][0] == 20.0:  # ของ B เท่านั้นที่คืนค่าไม่มี __len__
+            return (v for v in [[end - start, 1.0] for start, end in intervals])
+        return [[end - start, 1.0] for start, end in intervals]
+
+    result = extract_voiceprints(audio, turns, embed)
+
+    assert "A" in result
+    assert isinstance(result["A"], Voiceprint)
+    assert "B" not in result
+
+
 def test_extract_voiceprints_never_raises_when_the_audio_cannot_be_read(tmp_path):
     broken = tmp_path / "broken.wav"
     broken.write_bytes(b"fake audio data")
