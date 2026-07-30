@@ -33,6 +33,7 @@ from src.glossary import load as load_glossary
 from src.prompts import CROSS_TEAM_PROFILE
 from src.summarize import summarize_transcript
 from src.transcribe import transcribe_audio
+from src.voiceprint import Voiceprint, extract_voiceprints, load_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -68,22 +69,31 @@ def _reuse_saved_transcript(audio_path: Path) -> tuple[Path, Path, str] | None:
 
 
 def _match_known_speakers(
-    embeddings: dict[str, list[float]], config: Config, job: str
+    voiceprints: dict[str, Voiceprint], config: Config, job: str, embedding_model: str
 ) -> dict[str, Match]:
     """ผู้พูดในไฟล์นี้ที่ตรงกับคนในทะเบียนเสียง
 
     ล้มเหลวแล้วคืน dict ว่าง ไม่ปล่อย exception ขึ้นไป: ผลลัพธ์ที่แย่ที่สุดของฟีเจอร์นี้
     ต้องเท่ากับสภาพก่อนมีมัน (ป้าย "ผู้พูด N") ไม่ใช่การประชุมที่หายไปทั้งครั้ง
+
+    `embedding_model` มาจาก embedder ที่คำนวณเวกเตอร์ชุดนี้จริง ไม่ใช่ config.embedding_model
+    -- watcher ถือโมเดลค้างในหน่วยความจำข้าม .env ที่ผู้ใช้แก้ระหว่างนั้นได้ ป้ายที่ผิดแปลว่า
+    เทียบข้ามพื้นที่เวกเตอร์โดยไม่มีอะไรเตือน (ดู speakers.match_known)
+
+    ไม่มีทางเรียก match_known ด้วย embedding_model ว่างเปล่า: voiceprints ที่ไม่ว่างเป็น
+    หลักฐานว่า extract_voiceprints เพิ่งใช้ embedder ตัวจริงไปคำนวณมันสำเร็จ (ดูท่อหลักใน
+    process_file) ซึ่งแปลว่ามี embedder อยู่แน่ ๆ ณ จุดนี้ -- เช็ค `if not voiceprints`
+    ด้านล่างจึงกันพารามิเตอร์นี้ว่างเปล่าไปในตัวโดยไม่ต้องเช็คซ้ำ
     """
-    if not embeddings:
+    if not voiceprints:
         return {}
     try:
         matches = match_known(
-            embeddings,
+            {label: voiceprint.embedding for label, voiceprint in voiceprints.items()},
             load_registry(config.base_dir),
             high=config.speaker_match_high,
             low=config.speaker_match_low,
-            model=config.diarization_model,
+            embedding_model=embedding_model,
         )
     except Exception as e:
         logger.warning("จับคู่เสียงกับทะเบียนไม่สำเร็จ ไปต่อโดยไม่ใส่ชื่อ: %s", e)
@@ -106,7 +116,8 @@ def _record_pending_speakers(
     claude_model: str,
     merged: list[dict],
     labels: dict[str, str],
-    embeddings: dict[str, list[float]],
+    voiceprints: dict[str, Voiceprint],
+    embedding_model: str,
     matches: dict[str, Match],
 ) -> None:
     """งานหลังบ้านที่รันหลังการประชุมเสร็จสมบูรณ์แล้ว
@@ -117,10 +128,19 @@ def _record_pending_speakers(
     การเรียกโมเดลเพื่อเดาชื่ออยู่ตรงนี้ ไม่ใช่ก่อนหน้า เพราะมันคือ call เดียวที่เพิ่ม
     เข้ามาในท่อทั้งหมด -- วางไว้ก่อน save จะทำให้เวลาที่ผู้ใช้รอ transcript ยาวขึ้น
     เพื่อสิ่งที่เขาจะมาดูทีหลังเมื่อไหร่ก็ได้
+
+    `embedding_model` ติดไปกับทุกคนในคิว (ดู pending.build_pending_speakers) เพราะคิวนี้
+    อยู่ข้ามวันได้และผู้ใช้แก้ .env ก่อนกลับมากดตั้งชื่อได้ -- ต้องเป็นค่าจาก embedder
+    ตัวจริงที่คำนวณ voiceprints ชุดนี้ ไม่ใช่ config.embedding_model ณ ตอนนี้
     """
     try:
         candidates = build_pending_speakers(
-            merged, labels, embeddings, config.diarization_model, matches=matches
+            merged,
+            labels,
+            voiceprints,
+            config.diarization_model,
+            embedding_model,
+            matches=matches,
         )
         if not candidates:
             return
@@ -149,6 +169,7 @@ def process_file(
     config: Config,
     diarization_pipeline: Any = None,
     whisper_model: Any = None,
+    embedder: Any = None,
 ) -> Path:
     # The recorder wrote this next to the audio; the watcher's own config was read
     # once at startup and cannot know what this meeting asked for.
@@ -202,13 +223,12 @@ def process_file(
 
         activity.append(config.base_dir, job, "diarize_started")
         diarization_failed = False
-        embeddings: dict[str, list[float]] = {}
+        voiceprints: dict[str, Voiceprint] = {}
         try:
             diarization = diarize_audio(
                 wav_path, hf_token=config.hf_token, pipeline=diarization_pipeline
             )
             speaker_turns = diarization.turns
-            embeddings = diarization.embeddings
         except Exception as e:
             logger.warning("Diarization failed, continuing without speaker labels: %s", e)
             activity.append(
@@ -217,7 +237,34 @@ def process_file(
             speaker_turns = []
             diarization_failed = True
 
-    matches = _match_known_speakers(embeddings, config, job)
+        # อยู่นอก try ของ diarization โดยเจตนา และอยู่ใน with ของ wav_path เพราะต้องอ่าน
+        # ไฟล์เดียวกัน -- ความล้มเหลวของการจำเสียงต้องไม่ทำให้ speaker_turns ที่ได้มาแล้ว
+        # หายไป (กฎเดิมของ repo: "การจำเสียง" ล้มเหลวได้ แต่ต้องไม่ทำลาย "การแยกผู้พูด"
+        # ของประชุมที่อัดซ้ำไม่ได้ -- การป้องกันนี้เคยอยู่ใน diarize._speaker_embeddings
+        # ก่อนโมดูลนั้นถูกลบทิ้งไปตอนย้าย voiceprint ออกมาเป็นโมเดล speaker verification
+        # แยกต่างหาก ดู src/voiceprint.py)
+        #
+        # extract_voiceprints ไม่ raise อยู่แล้วโดยสัญญาของมันเอง (ดู docstring ของมัน)
+        # แต่ยังกัน try ไว้อีกชั้นเผื่อสัญญานั้นเปลี่ยนในอนาคต หรือ load_embedder เองพัง
+        # (โหลดโมเดลไม่ได้/hf_token ผิด) ซึ่งไม่มีสัญญาแบบเดียวกันเลย -- ทั้งสองอย่างต้อง
+        # ไม่ทำให้ speaker_turns ที่ได้มาแล้วหายไปด้วย
+        if speaker_turns:
+            try:
+                if embedder is None:
+                    # โหลดครั้งเดียวเมื่อไม่มีใครส่งมาให้ ไม่ใช่โหลดใหม่ทุกไฟล์ -- ทางปกติ
+                    # (main.py) โหลดไว้ก่อนแล้วส่งเข้ามา เส้นทางนี้มีไว้สำหรับผู้เรียกที่
+                    # ไม่ได้ถือโมเดลไว้เอง (เทสต์/สคริปต์แยก)
+                    embedder = load_embedder(config.hf_token, config.embedding_model)
+                voiceprints = extract_voiceprints(wav_path, speaker_turns, embedder)
+            except Exception as e:
+                logger.warning("สร้าง voiceprint ไม่สำเร็จ ไปต่อโดยไม่จำเสียง: %s", e)
+                activity.append(
+                    config.base_dir, job, "voiceprint_failed", "warn", {"error": str(e)}
+                )
+
+    matches = _match_known_speakers(
+        voiceprints, config, job, embedder.checkpoint if embedder is not None else ""
+    )
 
     try:
         merged = merge_transcript_and_speakers(whisper_segments, speaker_turns)
@@ -272,7 +319,8 @@ def process_file(
         claude_model,
         merged,
         speaker_labels,
-        embeddings,
+        voiceprints,
+        embedder.checkpoint if embedder is not None else "",
         matches,
     )
     return meeting_dir

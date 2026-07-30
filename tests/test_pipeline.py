@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.config import Config
+from src.config import DEFAULT_EMBEDDING_MODEL, Config
 from src.job import (
     JOB_SUFFIX,
     NO_SUMMARY_MODEL,
@@ -24,13 +24,61 @@ from src.segments import WAV_HEADER_ALLOWANCE, finish_session, part_filename, se
 _FAKE_WAV_BYTES = b"fake wav bytes " * (WAV_HEADER_ALLOWANCE // 16 + 2)
 
 from src.diarize import DiarizationResult
+from src.voiceprint import Voiceprint
 
 MODEL = "pyannote/speaker-diarization-community-1"
 
 
 def _diarization(turns=None, embeddings=None) -> DiarizationResult:
-    """ผลแยกผู้พูดปลอมในรูปที่ diarize_audio ของจริงคืนมา"""
+    """ผลแยกผู้พูดปลอมในรูปที่ diarize_audio ของจริงคืนมา
+
+    `embeddings` ยังรับไว้เพื่อความเข้ากันได้กับ DiarizationResult ของจริง (ดู
+    src/diarize.py) แต่ pipeline.py ไม่อ่านมันแล้วตั้งแต่ Task 11 -- centroid ของ
+    diarization ถูกแทนที่ด้วย voiceprint จาก extract_voiceprints ทั้งหมด (ดู
+    _stub_voiceprints ด้านล่างสำหรับเทสต์ที่ต้องปลอมเวกเตอร์การจับคู่)
+    """
     return DiarizationResult(turns=turns or [], embeddings=embeddings or {})
+
+
+class _FakeEmbedder:
+    """embedder ปลอมสำหรับเทสต์ที่ mock extract_voiceprints ไปแล้ว -- ไม่เคยถูกเรียกจริง
+
+    checkpoint คงที่เท่ากับ DEFAULT_EMBEDDING_MODEL (ค่าเริ่มต้นของ config.embedding_model
+    ใน make_config) เพื่อให้ registry ที่สร้างด้วย _registry_with ผูกอยู่ในพื้นที่เวกเตอร์
+    เดียวกัน -- speakers.match_known ข้ามตัวอย่างที่ป้าย embedding_model ไม่ตรงทั้งหมด
+    """
+
+    checkpoint = DEFAULT_EMBEDDING_MODEL
+
+    def __call__(self, waveform, intervals):
+        return [[1.0, 0.0] for _ in intervals]
+
+
+def _mock_load_embedder():
+    """แทน load_embedder ตัวจริง (โหลดโมเดลจาก HF จริง) ด้วย _FakeEmbedder
+
+    เทสต์ในไฟล์นี้ไม่ได้ตั้งใจวัดพฤติกรรมของ pyannote/wespeaker ตัวจริง แค่ต้องการ
+    embedder ที่มี .checkpoint ให้ _match_known_speakers ใช้ -- โหลดของจริงทุกเทสต์จะ
+    ผูกชุดเทสต์นี้ไว้กับโมเดลที่ต้องอยู่ในแคช HF ของเครื่องที่รันอยู่โดยไม่จำเป็น
+    """
+    return patch("src.pipeline.load_embedder", return_value=_FakeEmbedder())
+
+
+def _stub_voiceprints(mapping: dict[str, list[float]]):
+    """แทน extract_voiceprints ด้วย Voiceprint ปลอมตาม mapping ที่ให้
+
+    ทดสอบการจับคู่ผู้พูด (match_known) โดยไม่ต้องพึ่งเสียงจริงหรือโมเดล embedding จริง --
+    แนวเดียวกับ tests/test_enroll.py: _stub_extract_voiceprints เวลาพูด (seconds) ตั้งเป็น
+    30.0 ให้พอเกิน MIN_SPEAKING_SECONDS (10.0) เสมอ ไม่ให้ด่านนั้นมากวนเทสต์ที่ไม่ได้ตั้งใจ
+    ทดสอบมัน
+    """
+    return patch(
+        "src.pipeline.extract_voiceprints",
+        return_value={
+            label: Voiceprint(embedding=vector, seconds=30.0, segment_count=1)
+            for label, vector in mapping.items()
+        },
+    )
 
 
 def make_config(tmp_path: Path) -> Config:
@@ -712,6 +760,85 @@ def test_process_file_threads_whisper_model_to_transcribe_audio(tmp_path):
     assert mock_transcribe.call_args.kwargs["model_size"] == config.whisper_model
 
 
+def test_process_file_matches_with_the_embedder_checkpoint_not_the_config_value(
+    tmp_path, monkeypatch
+):
+    # ป้ายที่ใช้เทียบต้องมาจากตัวที่คำนวณจริง ไม่ใช่ค่าใน .env ตอนนั้น -- สองอย่างนี้ต่างกัน
+    # ได้เมื่อผู้ใช้แก้ .env ระหว่างที่ watcher ถือโมเดลเก่าค้างอยู่ในหน่วยความจำ
+    seen = {}
+
+    def fake_match_known(embeddings, speakers, high, low, *, embedding_model):
+        seen["embedding_model"] = embedding_model
+        return {}
+
+    monkeypatch.setattr("src.pipeline.match_known", fake_match_known)
+
+    config = make_config(tmp_path)
+    # ต้องไม่ใช่ค่าที่ไปถึง match_known -- ถ้า pipeline สลับไปอ่าน config.embedding_model
+    # แทน embedder.checkpoint จริง เทสต์นี้ต้องจับได้ทันที
+    config.embedding_model = "config-value-that-must-not-be-used"
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config, embedder=_FakeEmbedder())
+
+    assert seen["embedding_model"] == "pyannote/wespeaker-voxceleb-resnet34-LM"
+    assert seen["embedding_model"] != config.embedding_model
+
+
+def test_process_file_keeps_the_speaker_turns_when_voiceprints_fail(tmp_path, monkeypatch):
+    # กฎเดิมของ repo: ความล้มเหลวของ "การจำเสียง" ต้องไม่ทำลาย "การแยกผู้พูด" ของประชุมที่
+    # อัดซ้ำไม่ได้ การป้องกันนี้เคยอยู่ใน diarize._speaker_embeddings ซึ่งถูกลบไปแล้ว --
+    # ต้องพิสูจน์ว่ามันย้ายมาอยู่กับตัวใหม่จริง ไม่ใช่หายไปพร้อมของเก่า
+    monkeypatch.setattr(
+        "src.pipeline.extract_voiceprints",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"},
+                {"start": 2.0, "end": 4.0, "text": "สวัสดีค่ะ"},
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [
+                    {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+                    {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_01"},
+                ]
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config, embedder=_FakeEmbedder())
+
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "ผู้พูด 2" in transcript  # ยังแยกผู้พูดได้ แค่จำเสียงไม่ได้
+
+
 def test_process_file_uses_the_model_from_the_job_file(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
@@ -1248,10 +1375,21 @@ def test_process_file_survives_an_activity_log_that_cannot_be_written(tmp_path):
     assert (meeting_dir / "summary.md").exists()
 
 
-def _registry_with(tmp_path, name, embedding):
+def _registry_with(tmp_path, name, embedding, embedding_model=DEFAULT_EMBEDDING_MODEL):
+    """คนหนึ่งคนในทะเบียนพร้อมตัวอย่างเสียงเดียว ติดป้าย embedding_model ให้ตรงกับ
+    _FakeEmbedder.checkpoint โดยค่าเริ่มต้น -- ป้ายไม่ตรง = match_known ข้ามตัวอย่างนี้ไป
+    เงียบ ๆ (ดู speakers.match_known)"""
     from src.speakers import add_sample, save_registry
 
-    save_registry(tmp_path, add_sample([], name, embedding, source="ก่อนหน้า", model=MODEL))
+    save_registry(
+        tmp_path,
+        add_sample(
+            [],
+            name,
+            {"embedding": embedding, "embedding_model": embedding_model},
+            source="ก่อนหน้า",
+        ),
+    )
 
 
 def test_process_file_writes_a_known_speakers_real_name_into_the_transcript(tmp_path):
@@ -1263,16 +1401,15 @@ def test_process_file_writes_a_known_speakers_real_name_into_the_transcript(tmp_
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=_diarization(
-                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
-                {"SPEAKER_00": [1.0, 0.0]},
-            ),
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
@@ -1302,6 +1439,13 @@ def test_process_file_only_counts_confident_matches_in_speakers_matched(tmp_path
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        _stub_voiceprints(
+            {
+                "SPEAKER_00": [1.0, 0.0],  # cos = 1.0 -- confident
+                "SPEAKER_01": [0.6, 0.8],  # cos = 0.6 -- แค่ข้อเสนอ ไม่ confident
+            }
+        ),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[
@@ -1315,11 +1459,7 @@ def test_process_file_only_counts_confident_matches_in_speakers_matched(tmp_path
                 [
                     {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
                     {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_01"},
-                ],
-                {
-                    "SPEAKER_00": [1.0, 0.0],  # cos = 1.0 -- confident
-                    "SPEAKER_01": [0.6, 0.8],  # cos = 0.6 -- แค่ข้อเสนอ ไม่ confident
-                },
+                ]
             ),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
@@ -1340,17 +1480,16 @@ def test_process_file_keeps_the_anonymous_label_below_the_high_threshold(tmp_pat
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        # cos = 0.6 -> ระหว่างเกณฑ์: เสนอได้ แต่ห้ามใส่ชื่อให้เอง
+        _stub_voiceprints({"SPEAKER_00": [0.6, 0.8]}),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
         patch(
             "src.pipeline.diarize_audio",
-            # cos = 0.6 -> ระหว่างเกณฑ์: เสนอได้ แต่ห้ามใส่ชื่อให้เอง
-            return_value=_diarization(
-                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
-                {"SPEAKER_00": [0.6, 0.8]},
-            ),
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
     ):
@@ -1369,16 +1508,15 @@ def test_process_file_finishes_the_meeting_when_the_registry_cannot_be_read(tmp_
 
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
         ),
         patch(
             "src.pipeline.diarize_audio",
-            return_value=_diarization(
-                [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}],
-                {"SPEAKER_00": [1.0, 0.0]},
-            ),
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
         ),
         patch("src.pipeline.load_registry", side_effect=OSError("ดิสก์พัง")),
         patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
@@ -1404,6 +1542,8 @@ def _two_speaker_diarization_patched():
     """
     with (
         _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]}),
         patch(
             "src.pipeline.transcribe_audio",
             return_value=[
@@ -1417,8 +1557,7 @@ def _two_speaker_diarization_patched():
                 [
                     {"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"},
                     {"start": 30.0, "end": 70.0, "speaker": "SPEAKER_01"},
-                ],
-                {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]},
+                ]
             ),
         ),
     ):

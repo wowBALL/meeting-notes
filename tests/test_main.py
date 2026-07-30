@@ -14,6 +14,7 @@ def test_main_creates_required_directories_and_starts_watch_loop(tmp_path, monke
         patch("src.main.watch_loop") as mock_watch_loop,
         patch("src.main.load_whisper_model", return_value=object()),
         patch("src.main.load_diarization_pipeline", return_value=object()),
+        patch("src.main.load_embedder", return_value=object()),
     ):
         main(base_dir=tmp_path)
 
@@ -40,6 +41,7 @@ def test_main_loads_diarization_pipeline_once_and_passes_to_watch_loop(
         patch(
             "src.main.load_diarization_pipeline", return_value=loaded_pipeline
         ) as mock_load,
+        patch("src.main.load_embedder", return_value=object()),
     ):
         main(base_dir=tmp_path)
 
@@ -64,6 +66,7 @@ def test_main_loads_whisper_model_once_and_passes_to_watch_loop(tmp_path, monkey
             "src.main.load_whisper_model", return_value=loaded_whisper_model
         ) as mock_load_whisper,
         patch("src.main.load_diarization_pipeline", return_value=object()),
+        patch("src.main.load_embedder", return_value=object()),
     ):
         main(base_dir=tmp_path)
 
@@ -71,6 +74,32 @@ def test_main_loads_whisper_model_once_and_passes_to_watch_loop(tmp_path, monkey
     # โมเดลครั้งเดียวตอนเริ่ม จึงต้องรู้ตั้งแต่ตรงนี้ว่าจะห่อ batched pipeline ไหม
     mock_load_whisper.assert_called_once_with("medium", batched=False)
     assert mock_watch_loop.call_args.kwargs["whisper_model"] is loaded_whisper_model
+
+
+def test_main_loads_the_embedder_with_the_embedding_model_and_passes_to_watch_loop(
+    tmp_path, monkeypatch
+):
+    """embedder ต้องโหลดจาก config.embedding_model (ไม่ใช่ diarization_model) และเป็นตัว
+    เดียวกับที่ watch_loop ถือไว้ตลอดอายุ process -- แบบเดียวกับ diarization_pipeline/
+    whisper_model สองตัวข้างบน (ดู src/main.py: โหลดครั้งเดียวตอนเริ่ม ไม่ใช่ต่อไฟล์)"""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("EMBEDDING_MODEL", "pyannote/wespeaker-voxceleb-resnet34-LM")
+
+    loaded_embedder = object()
+
+    with (
+        patch("src.main.watch_loop") as mock_watch_loop,
+        patch("src.main.load_whisper_model", return_value=object()),
+        patch("src.main.load_diarization_pipeline", return_value=object()),
+        patch("src.main.load_embedder", return_value=loaded_embedder) as mock_load_embedder,
+    ):
+        main(base_dir=tmp_path)
+
+    mock_load_embedder.assert_called_once_with(
+        "hf-test-token", "pyannote/wespeaker-voxceleb-resnet34-LM"
+    )
+    assert mock_watch_loop.call_args.kwargs["embedder"] is loaded_embedder
 
 
 # โมดูลที่ import pyaudiowpatch ซึ่งเป็น fork เฉพาะ Windows ของ PyAudio

@@ -6,6 +6,7 @@ from typing import Any
 from src import enroll
 from src.config import Config
 from src.pipeline import process_file
+from src.voiceprint import load_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +28,38 @@ def is_file_stable(path: Path, check_interval: float = 1.0) -> bool:
     return size_before == size_after and size_before > 0
 
 
-def process_enroll_requests(config: Config, diarization_pipeline: Any = None) -> None:
+def process_enroll_requests(
+    config: Config, diarization_pipeline: Any = None, embedder: Any = None
+) -> None:
     """วิเคราะห์ไฟล์ลงทะเบียนเสียงที่มีใบสั่งงานค้างอยู่
 
-    ใช้ pipeline ตัวเดียวกับที่ถอดเทปประชุมโดยเจตนา: เวกเตอร์ที่จะเอาไปเทียบกันต้องมา
-    จากโมเดลเดียวกัน ไม่งั้น cosine similarity ระหว่างสองฝั่งไม่มีความหมายเลย
+    ใช้ embedder ตัวเดียวกับที่ประมวลผลประชุมโดยเจตนา: เวกเตอร์ที่จะเอาไปเทียบกัน (ตอนกด
+    ยืนยันชื่อ กับตอน match_known เทียบกับทะเบียน) ต้องมาจากโมเดล speaker verification
+    เดียวกัน ไม่งั้น cosine similarity ระหว่างสองฝั่งไม่มีความหมายเลย -- diarization_pipeline
+    ไม่ใช่ตัวที่ต้องเหมือนกันอีกต่อไป มันแค่กำหนดขอบท่อน (ว่าเสียงช่วงไหนเป็นของใคร) ซึ่งไม่ได้
+    เข้าไปอยู่ในเวกเตอร์เอง (ดู src/voiceprint.py: voiceprint แยกจากโมเดลแยกผู้พูดโดยสิ้นเชิง)
+
+    โหลด embedder เองครั้งเดียวก่อนวนลูปเมื่อไม่มีใครส่งมาให้ ไม่ใช่โหลดใหม่ทุกไฟล์ในคิว --
+    แบบเดียวกับ pipeline.process_file (ดูเหตุผลเต็มที่นั่น) ทางปกติ (watch_loop ที่เรียกจาก
+    main.py) จะส่ง embedder ที่โหลดไว้แล้วมาให้เสมอ เส้นทางนี้มีไว้สำหรับผู้เรียกที่ไม่ได้
+    ถือโมเดลไว้เอง (เทสต์/สคริปต์แยก)
 
     ไม่เคยเขียน registry.json -- เขียนแค่ผลวิเคราะห์ไว้ให้คนมากดยืนยันที่หน้าเว็บ
     """
+    if embedder is None:
+        # โหลดไม่สำเร็จ (hf_token ผิด/ไม่มีเน็ต) ต้องไม่ทำให้ watch_loop ทั้งตัวตาย
+        # เหมือนกับเหตุผลข้างล่างเรื่อง pending_requests -- watch_loop ไม่ได้ห่อการเรียก
+        # ฟังก์ชันนี้ไว้เลย ข้ามรอบ poll นี้ไปทั้งหมด (ใบสั่งงานยังอยู่ครบ ไม่มีอะไรหาย)
+        # ดีกว่าปล่อยให้ exception ทะลุออกไปฆ่า watcher พร้อมงานประมวลผล inbox/ ที่ยังไม่ได้
+        # ทำในรอบถัดไปไปด้วย
+        try:
+            embedder = load_embedder(config.hf_token, config.embedding_model)
+        except Exception:
+            logger.exception(
+                "โหลด embedder ไม่สำเร็จ -- ข้ามการวิเคราะห์ไฟล์ลงทะเบียนรอบ poll นี้ "
+                "(ใบสั่งงานยังอยู่ครบ รอบหน้าจะลองใหม่เอง)"
+            )
+            return
     try:
         # pending_requests เองก็ raise ได้ (อ่านโฟลเดอร์ไม่ได้ ฯลฯ) และแต่เดิมมันอยู่ใน
         # for header ตรง ๆ นอก try ใด ๆ เลย -- ถ้าพังตรงนี้ exception จะทะลุออกไปถึง
@@ -82,6 +107,7 @@ def process_enroll_requests(config: Config, diarization_pipeline: Any = None) ->
                 audio_path,
                 pipeline=diarization_pipeline,
                 model=config.diarization_model,
+                embedder=embedder,
             )
         except Exception:
             # enroll.analyze ไม่ raise อยู่แล้วโดยสัญญาของมัน แต่กันไว้อีกชั้น: ไฟล์เดียว
@@ -155,6 +181,7 @@ def watch_loop(
     single_pass: bool = False,
     diarization_pipeline: Any = None,
     whisper_model: Any = None,
+    embedder: Any = None,
 ) -> None:
     while True:
         for audio_path in scan_inbox(config.inbox_dir):
@@ -165,13 +192,16 @@ def watch_loop(
                         config,
                         diarization_pipeline=diarization_pipeline,
                         whisper_model=whisper_model,
+                        embedder=embedder,
                     )
                     logger.info("Processed %s -> %s", audio_path.name, meeting_dir)
                 except Exception:
                     logger.exception("Failed to process %s", audio_path.name)
         # หลัง inbox เสมอ: การประชุมที่อัดซ้ำไม่ได้ต้องได้ GPU ก่อนงานลงทะเบียนเสียง
         # ซึ่งผู้ใช้สั่งใหม่ได้ตลอด try/except ของตัวเองอยู่ข้างในแล้ว
-        process_enroll_requests(config, diarization_pipeline=diarization_pipeline)
+        process_enroll_requests(
+            config, diarization_pipeline=diarization_pipeline, embedder=embedder
+        )
         if single_pass:
             return
         time.sleep(poll_interval)

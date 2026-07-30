@@ -18,6 +18,7 @@ from src.config import load_config
 from src.diarize import load_diarization_pipeline
 from src.enroll import enroll_dir
 from src.transcribe import load_whisper_model
+from src.voiceprint import load_embedder
 from src.watcher import watch_loop
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -46,11 +47,19 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
         config.whisper_model, batched=config.whisper_batched
     )
 
+    # โมเดล speaker verification สำหรับ voiceprint -- ตัวที่สามที่โหลดครั้งเดียวตอน
+    # เริ่มแล้วถือค้างไว้ตลอดอายุ process เหมือน diarization_pipeline/whisper_model
+    # สองตัวข้างบน ไม่ใช่ตัวเดียวกับ diarization_pipeline: แยกกันโดยสิ้นเชิงเพราะ 3.1 กับ
+    # community-1 ใช้โมเดล embedding คนละตัว (ดู src/voiceprint.py)
+    logging.info("Loading speaker-embedding model (%s)...", config.embedding_model)
+    embedder = load_embedder(config.hf_token, config.embedding_model)
+
     logging.info("Watching %s for new audio files...", config.inbox_dir)
     watch_loop(
         config,
         diarization_pipeline=diarization_pipeline,
         whisper_model=whisper_model,
+        embedder=embedder,
     )
 
 
