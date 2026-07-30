@@ -6,6 +6,7 @@ from src.config import (
     DEFAULT_CHUNK_MAX_TOKENS,
     DEFAULT_CHUNK_OVERLAP_TOKENS,
     DEFAULT_DIARIZATION_MODEL,
+    DEFAULT_EMBEDDING_MODEL,
     DEFAULT_SPEAKER_MATCH_HIGH,
     DEFAULT_SPEAKER_MATCH_LOW,
     LEGACY_DIARIZATION_MODEL,
@@ -402,3 +403,26 @@ def test_load_config_accepts_equal_thresholds_as_the_degenerate_but_coherent_cas
 
     assert config.speaker_match_high == 0.6
     assert config.speaker_match_low == 0.6
+
+
+def test_embedding_model_defaults_when_the_env_var_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+
+    assert load_config(tmp_path).embedding_model == DEFAULT_EMBEDDING_MODEL
+
+
+def test_embedding_model_comes_from_the_env_var(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("EMBEDDING_MODEL", "speechbrain/spkrec-ecapa-voxceleb")
+
+    assert load_config(tmp_path).embedding_model == "speechbrain/spkrec-ecapa-voxceleb"
+
+
+def test_a_blank_embedding_model_falls_back_to_the_default(tmp_path, monkeypatch):
+    # `EMBEDDING_MODEL=` ที่ลืมเติมค่าต้องไม่ส่งสตริงว่างไปให้ Model.from_pretrained
+    # ตายเอาตอนเปิดโปรแกรม -- กฎเดียวกับ DIARIZATION_MODEL
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("EMBEDDING_MODEL", "   ")
+
+    assert load_config(tmp_path).embedding_model == DEFAULT_EMBEDDING_MODEL

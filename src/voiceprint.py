@@ -16,6 +16,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.config import DEFAULT_EMBEDDING_MODEL
+from src.gpu import cuda_device
 from src.speakers import is_usable_embedding
 from src.waveform import load_waveform
 
@@ -302,3 +304,58 @@ def extract_voiceprints(audio_path, turns: list[dict], embed) -> dict[str, Voice
         # โดน except กว้างของ pipeline ซึ่งทิ้ง speaker_turns ทั้งชุด
         logger.warning("สร้าง voiceprint ไม่ได้ ไปต่อโดยไม่จำเสียง: %s", e)
         return {}
+
+
+class PyannoteEmbedder:
+    """เวกเตอร์ต่อหนึ่งช่วงเสียง จากโมเดล embedding ตัวเดียวที่ตรึงไว้
+
+    ถือชื่อ checkpoint ติดตัวไว้เพราะปลายทางต้องติดป้ายลงทะเบียนด้วยชื่อของตัวที่ *คำนวณ
+    จริง* ไม่ใช่ค่าใน config ณ ตอนที่ผู้ใช้กดยืนยัน -- คิวรอตั้งชื่ออยู่ข้ามวันได้ และผู้ใช้
+    แก้ .env ระหว่างนั้นได้ (เหตุผลเดียวกับ enroll.analyze(..., model=...))
+
+    ป้อน waveform dict เข้า crop ไม่ใช่ path: pyannote 4.x อ่านไฟล์ผ่าน torchcodec เท่านั้น
+    ซึ่งโหลดไม่ขึ้นบนเครื่องนี้ (ดู src/waveform.py)
+    """
+
+    def __init__(self, inference, checkpoint: str, segment_factory):
+        self._inference = inference
+        self._segment = segment_factory
+        self.checkpoint = checkpoint
+
+    def __call__(self, waveform: dict, intervals: list[tuple[float, float]]) -> list:
+        """เวกเตอร์เรียงตาม `intervals` -- ท่อนที่คำนวณไม่ได้เป็น None ไม่ใช่ช่องที่หายไป
+
+        คืนลิสต์ยาวเท่าอินพุตเสมอ เพราะผู้เรียก (extract_voiceprints) zip มันกับช่วงเพื่อ
+        นับว่าใช้เสียงไปกี่วินาที ลิสต์ที่สั้นกว่าจะทำให้การนับเลื่อนไปทั้งชุดเงียบ ๆ
+        """
+        vectors = []
+        for start, end in intervals:
+            try:
+                raw = self._inference.crop(waveform, self._segment(start, end))
+                vectors.append([float(value) for value in list(raw)])
+            except Exception as e:
+                logger.warning(
+                    "คำนวณเวกเตอร์ของช่วง %.2f-%.2f ไม่ได้ ข้ามท่อนนี้: %s", start, end, e
+                )
+                vectors.append(None)
+        return vectors
+
+
+def load_embedder(
+    hf_token: str, checkpoint: str = DEFAULT_EMBEDDING_MODEL
+) -> PyannoteEmbedder:
+    """โหลดโมเดล embedding ตัวเดียวไว้ใช้ซ้ำทั้ง process
+
+    `window="whole"` แปลว่า "เอาเสียงทั้งท่อนที่ให้มาเป็นหนึ่งหน่วย" ซึ่งเป็นสิ่งที่เราต้องการ
+    ตรง ๆ -- ค่า default `"sliding"` จะคืนลำดับเวกเตอร์ตามหน้าต่างเลื่อน แล้วเราต้องมาเฉลี่ย
+    ซ้อนกับการเฉลี่ยของตัวเองอีกชั้นโดยไม่ได้อะไรเพิ่ม
+
+    ไม่มีเทสต์ที่รันโมเดลจริง แบบเดียวกับ load_diarization_pipeline -- แต่การต่อสาย
+    (checkpoint, window, device, การกลืน exception ต่อท่อน) มีเทสต์ครบ
+    """
+    from pyannote.audio import Inference, Model
+    from pyannote.core import Segment
+
+    model = Model.from_pretrained(checkpoint, token=hf_token)
+    inference = Inference(model, window="whole", device=cuda_device())
+    return PyannoteEmbedder(inference, checkpoint, Segment)

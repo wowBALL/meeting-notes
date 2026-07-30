@@ -41,6 +41,21 @@ DEFAULT_UI_LANG = "th"
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 LEGACY_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 
+# โมเดลที่สร้าง "voiceprint" สำหรับจำเสียงข้ามการประชุม -- แยกจาก DIARIZATION_MODEL โดย
+# สิ้นเชิงและนั่นคือเหตุผลทั้งหมดที่มันมีอยู่: 3.1 กับ community-1 ใช้โมเดล embedding คนละ
+# ตัว (ตรวจจาก config.yaml ของทั้งคู่) การเอา centroid ของ pipeline มาใช้จึงทำให้การสลับ
+# โมเดลแยกผู้พูดล้มทะเบียนทั้งใบ ตรึงตัวนี้ไว้แล้วสลับ DIARIZATION_MODEL ได้อย่างอิสระ
+#
+# wespeaker-voxceleb-resnet34-LM เป็นโมเดล speaker verification โดยตรง (VoxCeleb EER
+# ~0.9% ดีกว่า ECAPA-TDNN) และอยู่ในแคช HF ของเครื่องนี้แล้วเพราะ 3.1 ใช้ตัวเดียวกัน --
+# 26MB ไม่ต้องดาวน์โหลดใหม่ ไม่ต้องเพิ่ม dependency
+#
+# *** การเปลี่ยนค่านี้ทำให้ทุกคนในทะเบียนต้อง enroll ใหม่ *** เวกเตอร์จากคนละโมเดลอยู่คนละ
+# พื้นที่ cosine ระหว่างสองฝั่งได้ตัวเลขที่ "ดูใช้ได้" แต่ไม่มีความหมาย sample ทุกตัวจึงถูก
+# ติดป้าย embedding_model และ speakers.match_known ใช้เฉพาะตัวที่ป้ายตรง (ข้ามตัวที่ไม่มี
+# ป้ายด้วย ไม่มีการเดา) ข้อมูลเดิมไม่หาย สลับกลับมาก็ใช้ได้เหมือนเดิม
+DEFAULT_EMBEDDING_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
+
 # เกณฑ์ความเหมือนของน้ำเสียง (cosine similarity): สูงกว่า HIGH = ใส่ชื่อให้เลย,
 # ระหว่าง LOW กับ HIGH = เสนอให้คนยืนยัน, ต่ำกว่า LOW = ถือว่าไม่รู้จัก
 #
@@ -130,6 +145,7 @@ class Config:
     ui_port: int = DEFAULT_UI_PORT
     ui_lang: str = DEFAULT_UI_LANG
     diarization_model: str = DEFAULT_DIARIZATION_MODEL
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
     speaker_match_high: float = DEFAULT_SPEAKER_MATCH_HIGH
     speaker_match_low: float = DEFAULT_SPEAKER_MATCH_LOW
     meeting_profile: str = DEFAULT_MEETING_PROFILE
@@ -239,6 +255,7 @@ def load_config(base_dir: Path | None = None) -> Config:
     # ค่าว่าง/ช่องว่างล้วนใน .env (DIARIZATION_MODEL= ที่ลืมเติมค่า) ต้องตกกลับไปที่
     # default ไม่ใช่ส่งสตริงว่างไปให้ Pipeline.from_pretrained ตายเอาตอนเปิดโปรแกรม
     diarization_model = os.environ.get("DIARIZATION_MODEL", "").strip() or DEFAULT_DIARIZATION_MODEL
+    embedding_model = os.environ.get("EMBEDDING_MODEL", "").strip() or DEFAULT_EMBEDDING_MODEL
     # ค่าที่พิมพ์ผิดต้องรู้ตัวตอนนี้ ไม่ใช่ไปเจอตอนอ่านสรุปแล้วสงสัยว่าทำไมหน้าตาแปลก
     # -- แต่ต้องไม่ทำให้เปิดโปรแกรมไม่ได้ แบบเดียวกับ UI_PORT และ DIARIZATION_MODEL
     meeting_profile = os.environ.get("MEETING_PROFILE", "").strip() or DEFAULT_MEETING_PROFILE
@@ -293,6 +310,7 @@ def load_config(base_dir: Path | None = None) -> Config:
         ui_port=ui_port,
         ui_lang=ui_lang,
         diarization_model=diarization_model,
+        embedding_model=embedding_model,
         speaker_match_high=speaker_match_high,
         speaker_match_low=speaker_match_low,
         meeting_profile=meeting_profile,

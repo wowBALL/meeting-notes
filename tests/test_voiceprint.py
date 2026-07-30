@@ -1,9 +1,13 @@
 import math
+import sys
+from types import ModuleType
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import soundfile as sf
 
+from src.config import DEFAULT_EMBEDDING_MODEL
 from src.voiceprint import (
     MAX_SEGMENTS_PER_SPEAKER,
     MIN_SEGMENT_SECONDS,
@@ -12,6 +16,7 @@ from src.voiceprint import (
     average_unit_vectors,
     clean_intervals,
     extract_voiceprints,
+    load_embedder,
     select_intervals,
 )
 
@@ -384,3 +389,64 @@ def test_extract_voiceprints_counts_only_the_segments_it_actually_used(tmp_path)
 
     assert result["A"].segment_count == 2
     assert result["A"].seconds == pytest.approx(14.0)
+
+
+def _fake_pyannote(model_cls, inference_cls):
+    package = ModuleType("pyannote")
+    audio = ModuleType("pyannote.audio")
+    audio.Model = model_cls
+    audio.Inference = inference_cls
+    package.audio = audio
+    core = ModuleType("pyannote.core")
+    core.Segment = lambda start, end: ("seg", start, end)
+    return {"pyannote": package, "pyannote.audio": audio, "pyannote.core": core}
+
+
+def test_load_embedder_loads_the_checkpoint_and_remembers_its_name():
+    model_cls = MagicMock()
+    inference_cls = MagicMock()
+    device = object()
+
+    with patch.dict(sys.modules, _fake_pyannote(model_cls, inference_cls)), patch(
+        "src.voiceprint.cuda_device", return_value=device
+    ):
+        embedder = load_embedder("hf-test-token")
+
+    model_cls.from_pretrained.assert_called_once_with(
+        DEFAULT_EMBEDDING_MODEL, token="hf-test-token"
+    )
+    inference_cls.assert_called_once_with(
+        model_cls.from_pretrained.return_value, window="whole", device=device
+    )
+    # ป้ายที่จะถูกเขียนลงทะเบียนต้องมาจากตัวที่คำนวณจริง ไม่ใช่จาก config ตอนกดยืนยัน
+    assert embedder.checkpoint == DEFAULT_EMBEDDING_MODEL
+
+
+def test_load_embedder_honours_a_custom_checkpoint():
+    model_cls = MagicMock()
+
+    with patch.dict(sys.modules, _fake_pyannote(model_cls, MagicMock())), patch(
+        "src.voiceprint.cuda_device", return_value=None
+    ):
+        embedder = load_embedder("t", "speechbrain/spkrec-ecapa-voxceleb")
+
+    model_cls.from_pretrained.assert_called_once_with(
+        "speechbrain/spkrec-ecapa-voxceleb", token="t"
+    )
+    assert embedder.checkpoint == "speechbrain/spkrec-ecapa-voxceleb"
+
+
+def test_the_embedder_returns_none_for_a_segment_the_model_rejects():
+    # Inference.crop โยน ValueError เมื่อขอบเกินความยาวไฟล์ (วัดจริง) -- extract_voiceprints
+    # clamp ให้แล้ว แต่ด่านนี้ต้องมีอยู่ด้วย: ท่อนเดียวที่พังต้องไม่ทำให้คนทั้งคนหาย
+    inference = MagicMock()
+    inference.crop.side_effect = [[1.0, 0.0], ValueError("out of bounds")]
+    inference_cls = MagicMock(return_value=inference)
+
+    with patch.dict(sys.modules, _fake_pyannote(MagicMock(), inference_cls)), patch(
+        "src.voiceprint.cuda_device", return_value=None
+    ):
+        embedder = load_embedder("t")
+        result = embedder({"waveform": None, "sample_rate": 16000}, [(0.0, 3.0), (5.0, 9.0)])
+
+    assert result == [[1.0, 0.0], None]
