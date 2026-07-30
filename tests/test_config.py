@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from src.config import (
@@ -65,6 +67,44 @@ def test_load_config_reads_claude_model_override(tmp_path, monkeypatch):
     config = load_config(base_dir=tmp_path)
 
     assert config.claude_model == "claude-sonnet-5"
+
+
+def test_meeting_profile_defaults_to_dev(tmp_path, monkeypatch):
+    """dev ล้วนเป็น 3 ใน 4 ครั้งของสัปดาห์ ค่าเริ่มต้นจึงต้องเป็นตัวนั้น"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("MEETING_PROFILE", raising=False)
+
+    assert load_config(base_dir=tmp_path).meeting_profile == "dev"
+
+
+def test_load_config_reads_the_meeting_profile_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MEETING_PROFILE", "cross")
+
+    assert load_config(base_dir=tmp_path).meeting_profile == "cross"
+
+
+def test_an_unknown_meeting_profile_warns_and_falls_back_to_dev(
+    tmp_path, monkeypatch, caplog
+):
+    """พิมพ์ผิดใน .env ต้องไม่ทำให้เปิดโปรแกรมไม่ได้ -- แบบเดียวกับ UI_PORT
+    และต้องรู้ตัวตอนโหลด config ไม่ใช่ไปเจอตอนสรุปเสร็จแล้วสงสัยว่าทำไมสรุปหน้าตาแปลก"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MEETING_PROFILE", "crss")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.meeting_profile == "dev"
+    assert "crss" in caplog.text
+
+
+def test_an_empty_meeting_profile_falls_back_to_dev(tmp_path, monkeypatch):
+    """`MEETING_PROFILE=` ที่ลืมเติมค่า -- แบบเดียวกับ DIARIZATION_MODEL"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MEETING_PROFILE", "   ")
+
+    assert load_config(base_dir=tmp_path).meeting_profile == "dev"
 
 
 def test_load_config_reads_whisper_model_override(tmp_path, monkeypatch):

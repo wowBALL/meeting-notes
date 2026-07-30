@@ -74,6 +74,7 @@ def write_manifest(
     status: str,
     devices: dict | None = None,
     claude_model: str | None = None,
+    profile: str | None = None,
 ) -> None:
     manifest = {
         "stem": stem,
@@ -90,6 +91,9 @@ def write_manifest(
         # startup, so the choice cannot live in .env -- it has to travel with the
         # recording. finish_session turns this into the inbox job file.
         "claude_model": claude_model,
+        # ประเภทประชุมที่ผู้ใช้เลือกไว้ตอนอัด เดินทางเส้นเดียวกับ claude_model
+        # เป๊ะๆ ด้วยเหตุผลเดียวกัน (watcher อ่าน .env ครั้งเดียวตอนตัวเองเริ่ม)
+        "profile": profile,
     }
     (session_dir / MANIFEST_NAME).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -222,6 +226,7 @@ def finish_session(
         "encoding",
         devices=manifest.get("devices"),
         claude_model=manifest.get("claude_model"),
+        profile=manifest.get("profile"),
     )
 
     concat_list_path = session_dir / "concat.txt"
@@ -242,8 +247,13 @@ def finish_session(
     # the model choice by then. .get() because a manifest written before this
     # feature existed has no such key.
     claude_model = manifest.get("claude_model")
-    if claude_model:
-        write_job(inbox_dir, stem, claude_model)
+    profile = manifest.get("profile")
+    # `or profile` ไม่ใช่แค่ `claude_model`: `src.record --profile cross` ที่ไม่ได้ส่ง
+    # --model มีค่า profile ที่ต้องรักษาไว้ ถ้าดูแค่ model ค่านั้นจะหายไปเงียบๆ
+    # write_job เขียน claude_model=None ลงไปได้ read_model คืน None แล้วผู้เรียก
+    # ตกไปใช้ค่าจาก .env ตามปกติ
+    if claude_model or profile:
+        write_job(inbox_dir, stem, claude_model, profile=profile)
 
     destination = inbox_dir / f"{stem}.ogg"
     # Atomic within the volume: the watcher never sees a partially written file.

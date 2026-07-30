@@ -11,6 +11,7 @@ from src.job import (
     NO_SUMMARY_MODEL,
     discard_job,
     read_model,
+    read_profile,
     read_transcript,
     record_transcript,
 )
@@ -28,6 +29,7 @@ from src.storage import (
     save_transcript,
 )
 from src.glossary import load as load_glossary
+from src.prompts import CROSS_TEAM_PROFILE
 from src.summarize import summarize_transcript
 from src.transcribe import transcribe_audio
 
@@ -150,6 +152,10 @@ def process_file(
     # The recorder wrote this next to the audio; the watcher's own config was read
     # once at startup and cannot know what this meeting asked for.
     claude_model = read_model(audio_path) or config.claude_model
+    # กลไกเดียวกันเป๊ะ: ค่าที่เลือกไว้ตอนอัดชนะค่าใน .env เพราะคิวอยู่ข้ามวันได้
+    # และผู้ใช้แก้ .env ระหว่างนั้นได้ ประชุมที่ค้างอยู่ต้องยังใช้ค่าที่เลือกไว้จริง
+    # ไม่มีค่า = ไฟล์ที่ลากใส่ inbox/ เอง หรือ .job.json ที่เขียนก่อนมีฟีเจอร์นี้
+    profile = read_profile(audio_path) or config.meeting_profile
 
     # ทุก activity.append ที่นี่ไม่มีทาง raise (ดู src/activity.py) จึงไม่ห่อ try --
     # ห่อแล้วจะบังคับให้คนอ่านคิดว่ามันอาจ raise ได้ ซึ่งไม่จริง
@@ -166,6 +172,7 @@ def process_file(
             meeting_dir,
             transcript_path,
             transcript_markdown,
+            profile,
         )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -250,6 +257,7 @@ def process_file(
         meeting_dir,
         transcript_path,
         transcript_markdown,
+        profile,
     )
     _record_pending_speakers(
         config,
@@ -273,6 +281,7 @@ def _finish_meeting(
     meeting_dir: Path,
     transcript_path: Path,
     transcript_markdown: str,
+    profile: str,
 ) -> Path:
     """The half of the pipeline that runs whether or not the transcript is new."""
     # No retry here on purpose: summarize_transcript retries every API call it
@@ -300,14 +309,25 @@ def _finish_meeting(
         )
         corrected_markdown, glossary_counts = glossary.apply_exact(transcript_markdown)
         fuzzy_seen = glossary.count_only(corrected_markdown)
+        # profile ต้องไปสองที่พร้อมกัน ไม่ใช่ที่เดียว: ไฟล์ prompts/profiles/cross.md
+        # สั่งโมเดลให้ไปดูตารางคำกำกวมกับตารางฝ่ายของผู้เข้าร่วม ถ้าส่ง profile ให้
+        # summarize_transcript แต่ไม่เปิด cross ให้ format_for_prompt ด้วย กฎนั้นจะ
+        # ชี้ไปที่ตารางที่ไม่ได้ถูกใส่เข้ามา -- สรุปเพี้ยนโดยไม่มีอะไรฟ้อง
+        glossary_text = glossary.format_for_prompt(
+            include_cross_team_context=(profile == CROSS_TEAM_PROFILE)
+        )
         activity.append(
-            config.base_dir, job, "summarize_started", params={"model": claude_model}
+            config.base_dir,
+            job,
+            "summarize_started",
+            params={"model": claude_model, "profile": profile},
         )
         try:
             summary_markdown = summarize_transcript(
                 corrected_markdown,
                 model=claude_model,
-                glossary_text=glossary.format_for_prompt(),
+                glossary_text=glossary_text,
+                profile=profile,
             )
         except Exception as e:
             activity.append(
@@ -332,6 +352,7 @@ def _finish_meeting(
                 claude_model,
                 glossary_counts=glossary_counts,
                 fuzzy_seen=fuzzy_seen,
+                profile=profile,
             )
         archive_audio(meeting_dir, audio_path)
         discard_job(audio_path)

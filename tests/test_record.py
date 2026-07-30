@@ -640,26 +640,47 @@ def test_parse_args_reads_the_name_and_the_model():
     assert parse_args(["weekly-standup", "--model", "claude-sonnet-5"]) == (
         "weekly-standup",
         "claude-sonnet-5",
+        None,
     )
 
 
 def test_parse_args_allows_a_model_with_no_name():
-    assert parse_args(["--model", "claude-opus-5"]) == (None, "claude-opus-5")
+    assert parse_args(["--model", "claude-opus-5"]) == (None, "claude-opus-5", None)
 
 
-def test_parse_args_defaults_both_to_none():
-    assert parse_args([]) == (None, None)
+def test_parse_args_defaults_all_to_none():
+    assert parse_args([]) == (None, None, None)
 
 
 def test_parse_args_passes_the_transcript_only_sentinel_through_untouched():
     # ตัวอัดไม่ควรรู้จักโหมดนี้เลย -- มันแค่ส่งต่อสิ่งที่ .bat ให้มา เทสต์นี้จับกรณี
     # ที่มีคนเผลอไปเพิ่ม validation ชื่อโมเดลใน record แล้วโหมดนี้ตายเงียบ
-    assert parse_args(["--model", NO_SUMMARY_MODEL]) == (None, NO_SUMMARY_MODEL)
+    assert parse_args(["--model", NO_SUMMARY_MODEL]) == (None, NO_SUMMARY_MODEL, None)
+
+
+def test_parse_args_reads_the_meeting_profile():
+    assert parse_args(["--model", "GLM-5.2", "--profile", "cross"]) == (
+        None,
+        "GLM-5.2",
+        "cross",
+    )
+
+
+def test_parse_args_passes_an_unknown_profile_through_untouched():
+    """ตัวอัดไม่ validate ชื่อ profile -- มันแค่ส่งต่อสิ่งที่ .bat ให้มา แบบเดียวกับ
+    ชื่อโมเดล คนที่ตัดสินใจว่าจะทำอะไรกับค่าที่ไม่รู้จักคือฝั่งสรุป และมันเตือนแล้วใช้
+    dev ต่อ การ validate ที่นี่จะทำให้ประชุมอัดไม่ได้เพราะพิมพ์ผิดในเมนู"""
+    assert parse_args(["--profile", "พิมพ์ผิด"]) == (None, None, "พิมพ์ผิด")
+
+
+def test_an_empty_profile_string_behaves_like_no_profile():
+    """.bat ส่งสตริงว่างมาได้เมื่อ set /p ถูกกด Enter ผ่าน -- แบบเดียวกับชื่อประชุม"""
+    assert parse_args(["--profile", ""]) == (None, None, None)
 
 
 def test_parse_args_treats_an_empty_name_as_no_name():
     # start-meeting.bat passes "" through when the user skips the name prompt
-    assert parse_args([""]) == (None, None)
+    assert parse_args([""]) == (None, None, None)
 
 
 def test_parse_args_accepts_a_name_starting_with_a_dash_after_the_separator():
@@ -669,6 +690,7 @@ def test_parse_args_accepts_a_name_starting_with_a_dash_after_the_separator():
     assert parse_args(["--model", "claude-opus-5", "--", "-standup"]) == (
         "-standup",
         "claude-opus-5",
+        None,
     )
 
 

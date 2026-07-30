@@ -93,6 +93,7 @@ def save_summary(
     model: str,
     glossary_counts: dict[str, int] | None = None,
     fuzzy_seen: dict[str, int] | None = None,
+    profile: str | None = None,
 ) -> Path:
     # `model` is required, not optional: the point of choosing a model per meeting
     # is being able to judge afterwards whether the pricier one was worth it, and
@@ -103,6 +104,10 @@ def save_summary(
     path = meeting_dir / "summary.md"
     body = summary_markdown.rstrip("\n")
     footer = [f"สรุปด้วย {model}"]
+    if profile:
+        # ต้องเห็นย้อนหลังได้ว่าสรุปนี้ใช้กฎชุดไหน -- เผลอกด dev ในประชุมข้ามฝ่ายแล้ว
+        # สรุปจะดูปกติทุกอย่าง ยกเว้นว่ามันไม่ได้แยก "ทำได้" ออกจาก "จะทำ" ให้
+        footer.append(f"ประเภทประชุม: {profile}")
     if glossary_counts:
         # "แก้ไปแล้ว" -- คำที่โค้ดแทนที่จริง รายคำเพื่อให้เห็นว่าคำไหนแทนที่ผิดที่
         # (จำนวนเฟ้อผิดปกติ) จนควรย้ายจาก exact ไป fuzzy

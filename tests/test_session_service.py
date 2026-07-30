@@ -27,7 +27,7 @@ def make_config(tmp_path):
     )
 
 
-def blocking_recorder(name, model, config, stop_event, on_event=None, mic_muted=None):
+def blocking_recorder(name, model, config, stop_event, on_event=None, mic_muted=None, profile=None):
     """ตัวอัดปลอมที่รอ stop_event เหมือนของจริง"""
     if on_event:
         on_event("room_opened", {"room": name or "", "model": model or ""})
@@ -77,6 +77,51 @@ def test_opening_a_room_moves_the_state_to_recording(client):
     assert body["model"] == "claude-opus-5"
 
     client.post("/api/session/stop")
+
+
+def test_the_chosen_profile_reaches_the_recorder(config):
+    """หน้าเว็บส่ง profile มาแล้วต้องไปถึงตัวอัดจริง ไม่ใช่หายที่ endpoint"""
+    seen = {}
+
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None):
+        seen["profile"] = profile
+        seen["model"] = model
+        stop_event.wait(timeout=5)
+        return None
+
+    app = create_app(config, recorder=recorder, worker_probe=lambda: True)
+    client = app.test_client()
+
+    client.post("/api/session", json={"model": "GLM-5.2", "profile": "cross"})
+    deadline = time.monotonic() + 5
+    while "profile" not in seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    client.post("/api/session/stop")
+
+    assert seen["profile"] == "cross"
+    assert seen["model"] == "GLM-5.2"
+
+
+def test_a_request_without_a_profile_leaves_it_to_the_config(config):
+    """ผู้เรียกที่ไม่ส่ง profile (client เก่า) ต้องไม่ทำให้พัง -- ให้ pipeline
+    ตกไปใช้ค่าจาก .env ตามปกติ"""
+    seen = {}
+
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None):
+        seen["profile"] = profile
+        stop_event.wait(timeout=5)
+        return None
+
+    app = create_app(config, recorder=recorder, worker_probe=lambda: True)
+    client = app.test_client()
+
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    deadline = time.monotonic() + 5
+    while "profile" not in seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    client.post("/api/session/stop")
+
+    assert seen["profile"] is None
 
 
 def test_a_blank_room_name_becomes_no_name(client):
@@ -178,7 +223,7 @@ def test_the_mic_muted_flag_passed_to_the_recorder_reflects_the_endpoint(config)
     """
     captured = {}
 
-    def capturing_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None):
+    def capturing_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None):
         captured["event"] = mic_muted
         stop_event.wait(timeout=5)
         return None
@@ -212,7 +257,7 @@ def test_elapsed_seconds_counts_up_while_recording(client):
 
 
 def test_warnings_from_the_recorder_reach_the_state(config):
-    def warning_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None):
+    def warning_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None):
         on_event("device_changed", {"old": "A", "new": "B"}, "warn")
         stop_event.wait(timeout=5)
         return None
@@ -232,7 +277,7 @@ def test_warnings_from_the_recorder_reach_the_state(config):
 def test_a_recorder_that_crashes_returns_the_state_to_idle(config):
     """ตัวอัดที่ระเบิดต้องไม่ทิ้งหน้าจอค้างที่ 'กำลังอัด' ตลอดไป"""
 
-    def crashing_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None):
+    def crashing_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None):
         raise RuntimeError("พัง")
 
     app = create_app(config, recorder=crashing_recorder, worker_probe=lambda: True)
@@ -281,7 +326,7 @@ def test_activity_text_is_rendered_in_the_requested_language(client, config):
 
 
 def test_warning_text_is_rendered_too(config):
-    def warning_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None):
+    def warning_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None):
         on_event("device_changed", {"old": "A", "new": "B"}, "warn")
         stop_event.wait(timeout=5)
         return None

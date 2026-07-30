@@ -90,6 +90,38 @@ if "%MODEL_ID%"=="transcript-only" (
     echo ใช้โมเดล: %MODEL_ID%
 )
 
+rem Named PROFILE_ID, not MEETING_PROFILE: "set" here would also export the name
+rem to the child python process, where MEETING_PROFILE is the .env variable and
+rem would silently shadow the file the user actually configured.
+rem
+rem Deliberately NOT wrapped in an "if (...)" block: this script runs under plain
+rem setlocal, so %VAR% inside a parenthesized block expands when the block is
+rem parsed -- before set /p has run -- and the choice would always read as empty.
+rem The fix is a label rather than "setlocal EnableDelayedExpansion", because
+rem delayed expansion would eat "!" out of the meeting name prompted for below.
+set "PROFILE_ID=dev"
+rem The profile only selects which summarization rules apply, and transcript-only
+rem produces no summary -- asking would be a question whose answer changes nothing.
+if "%MODEL_ID%"=="transcript-only" goto :profile_done
+
+echo.
+echo ประเภทประชุม:
+echo   [1] dev ล้วน        - ศัพท์เทคนิคตรงๆ
+echo   [2] Business + dev  - แยก "ทำได้" ออกจาก "จะทำ" ขยายศัพท์ให้คนนอกทีม
+rem Anything that is not "2" lands on dev, so a typo cannot reach Python as an
+rem unknown profile. dev is the default because it is three of every four meetings
+rem -- and picking cross by mistake is not merely wasteful: the prompt would tell
+rem the model that words like "เสร็จ" mean different things to two sides when only
+rem dev is in the room, and it starts hedging ordinary statements.
+set "PROFILE_CHOICE=1"
+set /p PROFILE_CHOICE=เลือก [1/2] (Enter=1):
+rem Must stay byte-identical to prompts.CROSS_TEAM_PROFILE and to the filename
+rem prompts/profiles/<value>.md
+if "%PROFILE_CHOICE%"=="2" set "PROFILE_ID=cross"
+echo ใช้ประเภท: %PROFILE_ID%
+
+:profile_done
+
 echo.
 set /p MEETING_NAME=Meeting name (optional, press Enter to skip):
 
@@ -98,11 +130,11 @@ echo Recording started. Press Ctrl+C when the meeting ends.
 echo.
 
 if "%MEETING_NAME%"=="" (
-    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID%
+    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID% --profile %PROFILE_ID%
 ) else (
     rem "--" ends argparse option parsing, so a meeting name starting with "-"
     rem (e.g. "-standup") is taken as the positional name instead of an option.
-    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID% -- "%MEETING_NAME%"
+    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID% --profile %PROFILE_ID% -- "%MEETING_NAME%"
 )
 
 endlocal

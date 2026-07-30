@@ -5,6 +5,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# ชุดประเภทประชุมที่รองรับมาจากที่เดียว: ไฟล์ใน prompts/profiles/ คือของจริง
+# ถ้า config มีลิสต์ของตัวเอง วันหนึ่งจะมี profile ที่ผ่าน config แต่หา prompt ไม่เจอ
+from src.prompts import KNOWN_PROFILES
+
 logger = logging.getLogger(__name__)
 
 # ค่าเริ่มต้นเป็น GLM-5.2 บน endpoint ของบริษัท ไม่ใช่ Claude เพราะเหตุผลเรื่องความเป็น
@@ -74,6 +78,15 @@ LEGACY_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 DEFAULT_SPEAKER_MATCH_HIGH = 0.80
 DEFAULT_SPEAKER_MATCH_LOW = 0.50
 
+# ประเภทประชุม เลือกได้ต่อประชุมจากเมนูตอนเริ่มอัด ค่านี้เป็นค่าที่ใช้เมื่อไม่ได้เลือก
+# (ไฟล์ที่ลากใส่ inbox/ เอง หรือ .job.json ที่เขียนไว้ก่อนจะมีฟีเจอร์นี้)
+#
+# dev เป็นค่าเริ่มต้นเพราะสัดส่วนจริงคือ dev ล้วน 3 ครั้ง / ข้ามฝ่าย 1 ครั้ง ต่อสัปดาห์
+# และการเผลอใช้ cross กับประชุม dev ล้วนไม่ใช่แค่เปลืองโทเคน: prompt จะบอกโมเดลว่า
+# คำอย่าง "เสร็จ" กำกวมระหว่างสองฝ่าย ทั้งที่ในห้องมีแต่ dev โมเดลจะไป qualify
+# คำพูดปกติเกินจำเป็นจนได้สรุปที่อ่านแล้วอ้อมค้อม
+DEFAULT_MEETING_PROFILE = "dev"
+
 
 @dataclass
 class Config:
@@ -89,6 +102,7 @@ class Config:
     diarization_model: str = DEFAULT_DIARIZATION_MODEL
     speaker_match_high: float = DEFAULT_SPEAKER_MATCH_HIGH
     speaker_match_low: float = DEFAULT_SPEAKER_MATCH_LOW
+    meeting_profile: str = DEFAULT_MEETING_PROFILE
 
 
 def _read_float(name: str, default: float) -> float:
@@ -120,6 +134,20 @@ def load_config(base_dir: Path | None = None) -> Config:
     # ค่าว่าง/ช่องว่างล้วนใน .env (DIARIZATION_MODEL= ที่ลืมเติมค่า) ต้องตกกลับไปที่
     # default ไม่ใช่ส่งสตริงว่างไปให้ Pipeline.from_pretrained ตายเอาตอนเปิดโปรแกรม
     diarization_model = os.environ.get("DIARIZATION_MODEL", "").strip() or DEFAULT_DIARIZATION_MODEL
+    # ค่าที่พิมพ์ผิดต้องรู้ตัวตอนนี้ ไม่ใช่ไปเจอตอนอ่านสรุปแล้วสงสัยว่าทำไมหน้าตาแปลก
+    # -- แต่ต้องไม่ทำให้เปิดโปรแกรมไม่ได้ แบบเดียวกับ UI_PORT และ DIARIZATION_MODEL
+    meeting_profile = os.environ.get("MEETING_PROFILE", "").strip() or DEFAULT_MEETING_PROFILE
+    if meeting_profile not in KNOWN_PROFILES:
+        logger.warning(
+            "MEETING_PROFILE=%r ไม่ใช่ประเภทประชุมที่รองรับ (%s) ใช้ %r แทน / "
+            "unknown MEETING_PROFILE %r, falling back to %r",
+            meeting_profile,
+            ", ".join(KNOWN_PROFILES),
+            DEFAULT_MEETING_PROFILE,
+            meeting_profile,
+            DEFAULT_MEETING_PROFILE,
+        )
+        meeting_profile = DEFAULT_MEETING_PROFILE
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -159,4 +187,5 @@ def load_config(base_dir: Path | None = None) -> Config:
         diarization_model=diarization_model,
         speaker_match_high=speaker_match_high,
         speaker_match_low=speaker_match_low,
+        meeting_profile=meeting_profile,
     )

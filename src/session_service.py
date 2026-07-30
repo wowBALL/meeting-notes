@@ -89,6 +89,7 @@ class RecorderState:
         self.status = "idle"  # idle | recording | stopping
         self.room = None
         self.model = None
+        self.profile = None
         self.started_at = None
         self.stop_event = None
         self.thread = None
@@ -187,6 +188,10 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             state.status = "recording"
             state.room = (payload.get("name") or "").strip() or None
             state.model = payload.get("model")
+            # ไม่ validate ที่นี่ เหมือนที่ไม่ validate ชื่อโมเดล -- ฝั่งสรุปเป็นคน
+            # ตัดสินใจกับค่าที่ไม่รู้จัก (เตือนแล้วใช้ dev) การปฏิเสธที่นี่จะทำให้
+            # กดเปิดห้องไม่ได้เพราะค่าที่แก้ทีหลังได้ ทั้งที่ประชุมกำลังจะเริ่ม
+            state.profile = payload.get("profile")
             state.started_at = time.monotonic()
             state.stop_event = threading.Event()
             state.warnings = []
@@ -195,7 +200,7 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             state.mic_muted.clear()
             stop_event = state.stop_event
             mic_muted = state.mic_muted
-            room, model = state.room, state.model
+            room, model, profile = state.room, state.model, state.profile
 
         def on_event(code, params=None, level="info"):
             # ไมค์/ลำโพงที่ถูกดักฟังจริงต้องเห็นได้ตลอดการอัด ไม่ใช่ไปขุดใน log --
@@ -213,7 +218,13 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             # ต้องกลับไป idle ไม่ว่าจะจบทางไหน
             try:
                 result = recorder(
-                    room, model, config, stop_event, on_event, mic_muted=mic_muted
+                    room,
+                    model,
+                    config,
+                    stop_event,
+                    on_event,
+                    mic_muted=mic_muted,
+                    profile=profile,
                 )
             except Exception:
                 logger.exception("ตัวอัดล้มระหว่างทำงาน")

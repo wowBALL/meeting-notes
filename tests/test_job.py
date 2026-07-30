@@ -6,6 +6,7 @@ from src.job import (
     job_path_for,
     move_job,
     read_model,
+    read_profile,
     read_transcript,
     record_transcript,
     write_job,
@@ -22,6 +23,40 @@ def test_write_job_then_read_model_round_trips(tmp_path):
     write_job(tmp_path, "meet1", "claude-sonnet-5")
 
     assert read_model(tmp_path / "meet1.ogg") == "claude-sonnet-5"
+
+
+def test_write_job_then_read_profile_round_trips(tmp_path):
+    write_job(tmp_path, "meet1", "claude-sonnet-5", profile="cross")
+
+    assert read_profile(tmp_path / "meet1.ogg") == "cross"
+    # ต้องเดินทางคู่กับ model ในไฟล์เดียวกัน คิวสลับกันแล้วจะไม่ผิดอัน
+    assert read_model(tmp_path / "meet1.ogg") == "claude-sonnet-5"
+
+
+def test_write_job_without_a_profile_stores_nothing_for_it(tmp_path):
+    write_job(tmp_path, "meet1", "claude-sonnet-5")
+
+    assert read_profile(tmp_path / "meet1.ogg") is None
+    assert read_model(tmp_path / "meet1.ogg") == "claude-sonnet-5"
+
+
+def test_read_profile_returns_none_for_a_job_file_written_before_the_feature(tmp_path):
+    """ไฟล์ที่ค้างใน inbox/ ตอนอัปเดตโค้ดต้องไม่พัง -- ผู้เรียกตกไปใช้ค่าจาก .env"""
+    (tmp_path / f"meet1{JOB_SUFFIX}").write_text(
+        '{"claude_model": "GLM-5.2"}', encoding="utf-8"
+    )
+
+    assert read_profile(tmp_path / "meet1.ogg") is None
+
+
+def test_read_profile_returns_none_when_the_value_is_not_a_string(tmp_path):
+    (tmp_path / f"meet1{JOB_SUFFIX}").write_text('{"profile": 7}', encoding="utf-8")
+
+    assert read_profile(tmp_path / "meet1.ogg") is None
+
+
+def test_read_profile_returns_none_when_there_is_no_job_file(tmp_path):
+    assert read_profile(tmp_path / "dropped.mp3") is None
 
 
 def test_read_model_returns_none_when_there_is_no_job_file(tmp_path):

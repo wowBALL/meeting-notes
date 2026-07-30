@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 DEFAULT_PROFILE = "dev"
-KNOWN_PROFILES = ("dev", "cross")
+# ประชุมข้ามฝ่าย -- แยกเป็นชื่อของตัวเองเพราะมีโค้ดนอกไฟล์นี้ต้องเทียบกับมัน
+# (pipeline เปิดตาราง ambiguous/teams ตามค่านี้) สตริงลอยๆ กระจายหลายที่คือทางที่
+# วันหนึ่งจะมีที่หนึ่งพิมพ์ต่างจากที่อื่นแล้วฟีเจอร์ครึ่งเดียวทำงาน
+CROSS_TEAM_PROFILE = "cross"
+KNOWN_PROFILES = (DEFAULT_PROFILE, CROSS_TEAM_PROFILE)
 
 # prompt ที่ใช้มาก่อนจะย้ายออกเป็นไฟล์ -- คงไว้เป็นตัวสำรองเมื่อ prompts/ หาย
 # ห้ามแก้ที่นี่เพื่อจูนถ้อยคำ ให้ไปแก้ไฟล์ใน prompts/ ตัวนี้มีไว้กันระบบตายเท่านั้น
