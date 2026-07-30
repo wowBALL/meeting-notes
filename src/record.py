@@ -341,10 +341,16 @@ def parse_args(argv: list[str]) -> tuple[str | None, str | None]:
     parser = argparse.ArgumentParser(prog="src.record")
     parser.add_argument("name", nargs="?", default=None)
     parser.add_argument("--model", default=None)
+    parser.add_argument("--profile", default=None)
     args = parser.parse_args(argv)
     # start-meeting.bat passes an empty string through when the user skips the
     # prompt, and an empty meeting name must behave exactly like no name at all.
-    return (args.name or None), args.model
+    # เหตุผลเดียวกันกับ --profile: set /p ที่ถูกกด Enter ผ่านส่งสตริงว่างมา
+    #
+    # ไม่ validate ชื่อ profile ที่นี่โดยเจตนา เหมือนที่ไม่ validate ชื่อโมเดล --
+    # ตัวอัดแค่ส่งต่อ ฝั่งสรุปเป็นคนตัดสินใจกับค่าที่ไม่รู้จัก (เตือนแล้วใช้ dev)
+    # ถ้า validate ที่นี่ การพิมพ์ผิดในเมนูจะทำให้ประชุมอัดไม่ได้เลย
+    return (args.name or None), args.model, (args.profile or None)
 
 
 def run_recording(
@@ -354,6 +360,7 @@ def run_recording(
     stop_event: threading.Event,
     on_event=None,
     mic_muted: threading.Event | None = None,
+    profile: str | None = None,
 ) -> Path | None:
     """อัดจนกว่า stop_event จะถูก set แล้วคืน path ของไฟล์ที่ encode แล้ว
 
@@ -441,9 +448,18 @@ def run_recording(
             "recording",
             devices,
             claude_model=claude_model,
+            profile=profile,
         )
 
         def on_part_closed(parts: list[str]) -> None:
+            # profile ต้องมาคู่กับ claude_model ทุกที่ที่เขียน manifest -- ไฟล์นี้ถูกเขียน
+            # ทับทั้งไฟล์ ไม่ใช่ patch ทีละคีย์ คีย์ที่ไม่ส่งจึงกลายเป็น None (default ของ
+            # write_manifest) แล้ว finish_session ที่อ่านต่อเขียน job.json โดยไม่มี profile
+            # ฝั่งสรุปจึงตกไปใช้ค่าจาก .env ทุกครั้งไม่ว่าผู้ใช้จะเลือกอะไรไว้
+            #
+            # ทุกการอัดปิด part อย่างน้อยหนึ่งครั้งตอนหยุด จึงพลาดทุกประชุม ไม่ใช่เคสมุม
+            # (วัดจาก activity.jsonl ของจริง 2026-07-30 12:51:29: part_closed ยิงก่อน
+            # encode_started ทันที และ job.json ที่ได้มีแต่ claude_model)
             write_manifest(
                 session_dir,
                 stem,
@@ -453,6 +469,7 @@ def run_recording(
                 "recording",
                 devices,
                 claude_model=claude_model,
+                profile=profile,
             )
             emit("part_closed", {"count": len(parts)})
 
@@ -549,7 +566,7 @@ def run_recording(
 
 def main() -> None:
     """ทางเข้าแบบ CLI ที่ start-meeting.bat เรียก: Ctrl+C หยุด ข้อความออก stdout"""
-    name, claude_model = parse_args(sys.argv[1:])
+    name, claude_model, profile = parse_args(sys.argv[1:])
     config = load_config()
     lang = config.ui_lang
 
@@ -560,7 +577,7 @@ def main() -> None:
         if code == "recording_started":
             print(render("press_ctrl_c", {}, lang))
 
-    run_recording(name, claude_model, config, threading.Event(), emit)
+    run_recording(name, claude_model, config, threading.Event(), emit, profile=profile)
 
 
 if __name__ == "__main__":

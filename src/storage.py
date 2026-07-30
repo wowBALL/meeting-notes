@@ -81,13 +81,50 @@ def save_transcript(meeting_dir: Path, transcript_markdown: str) -> Path:
     return path
 
 
-def save_summary(meeting_dir: Path, summary_markdown: str, model: str) -> Path:
+def _busiest_first(counts: dict[str, int]) -> list[tuple[str, int]]:
+    """คำที่เจอบ่อยสุดขึ้นก่อน ชื่อเรียงตัวอักษรเมื่อจำนวนเท่ากัน (ลำดับต้องนิ่ง
+    ไม่ใช่ลำดับของ dict ไม่งั้นเทียบท้ายไฟล์ข้ามประชุมไม่ได้)"""
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
+def save_summary(
+    meeting_dir: Path,
+    summary_markdown: str,
+    model: str,
+    glossary_counts: dict[str, int] | None = None,
+    fuzzy_seen: dict[str, int] | None = None,
+    profile: str | None = None,
+) -> Path:
     # `model` is required, not optional: the point of choosing a model per meeting
     # is being able to judge afterwards whether the pricier one was worth it, and
     # a summary.md with no attribution cannot be judged at all.
+    #
+    # อีกสองค่าเป็น optional และจะไม่เขียนบรรทัดอะไรเลยเมื่อว่าง -- คนที่ยังไม่มี
+    # glossary.md ต้องได้ไฟล์หน้าตาเดิมเป๊ะ ไม่ใช่บรรทัดเปล่าที่อ่านไม่ได้ความ
     path = meeting_dir / "summary.md"
     body = summary_markdown.rstrip("\n")
-    path.write_text(f"{body}\n\n---\nสรุปด้วย {model}\n", encoding="utf-8")
+    footer = [f"สรุปด้วย {model}"]
+    if profile:
+        # ต้องเห็นย้อนหลังได้ว่าสรุปนี้ใช้กฎชุดไหน -- เผลอกด dev ในประชุมข้ามฝ่ายแล้ว
+        # สรุปจะดูปกติทุกอย่าง ยกเว้นว่ามันไม่ได้แยก "ทำได้" ออกจาก "จะทำ" ให้
+        footer.append(f"ประเภทประชุม: {profile}")
+    if glossary_counts:
+        # "แก้ไปแล้ว" -- คำที่โค้ดแทนที่จริง รายคำเพื่อให้เห็นว่าคำไหนแทนที่ผิดที่
+        # (จำนวนเฟ้อผิดปกติ) จนควรย้ายจาก exact ไป fuzzy
+        corrected = ", ".join(
+            f"{term} {count} จุด" for term, count in _busiest_first(glossary_counts)
+        )
+        footer.append(f"แก้คำตาม glossary: {corrected}")
+    if fuzzy_seen:
+        # "เจอ แต่ไม่ได้แก้" -- ชั้น fuzzy โมเดลเป็นคนตีความ บรรทัดนี้เป็นหลักฐาน
+        # ชิ้นเดียวที่บอกได้ว่าคำไหนเลิกใช้ไปแล้ว จึงควรตัดออกจาก prompt (มันกิน
+        # token ทุกครั้งที่สรุป) ต้องแยกจากบรรทัดบนเพราะความหมายต่างกัน
+        seen = ", ".join(
+            f"{term} {count} ครั้ง" for term, count in _busiest_first(fuzzy_seen)
+        )
+        footer.append(f"คำ fuzzy ที่เจอในห้อง: {seen}")
+    joined = "\n".join(footer)
+    path.write_text(f"{body}\n\n---\n{joined}\n", encoding="utf-8")
     return path
 
 

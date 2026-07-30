@@ -24,7 +24,6 @@ from src.summarize import (
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
     REDUCE_FAILURE_NOTICE,
-    SUMMARY_SYSTEM_PROMPT,
     is_retryable,
     summarize_transcript,
 )
@@ -36,6 +35,83 @@ class FakeAPIError(Exception):
     def __init__(self, status_code: int):
         super().__init__(f"Error code: {status_code}")
         self.status_code = status_code
+
+
+# prompt จริงมาจากไฟล์ prompts/*.md แล้ว จึงเทียบเท่ากันเป๊ะกับค่าคงที่ในโค้ดไม่ได้อีก
+# (ค่าคงที่เหลือไว้เป็น prompt สำรองตอนไฟล์หายเท่านั้น) เทียบด้วยประโยคที่มีอยู่ทั้งใน
+# ไฟล์และใน prompt สำรอง เพื่อให้ตัวแยกขั้นตอนนี้ยังถูกต้องทั้งสองทาง
+def _is_map(system: str) -> bool:
+    return "เพียงบางช่วง" in system
+
+
+def _is_reduce(system: str) -> bool:
+    return "รวมทั้งหมดเป็นสรุปฉบับเดียว" in system
+
+
+def _is_single(system: str) -> bool:
+    """นิยามด้วยการตัดออก ไม่ใช่ด้วยวลีของตัวเอง -- ถ้อยคำใน single.md เปลี่ยนได้
+    ตอนจูน แต่ "ไม่ใช่ map และไม่ใช่ reduce" เป็นจริงตลอด
+    (test_the_stage_markers_stay_mutually_exclusive ล็อกสมบัติข้อนี้ไว้)"""
+    return not _is_map(system) and not _is_reduce(system)
+
+
+def test_a_tuned_chunk_overlap_actually_changes_the_chunking():
+    """ค่า overlap ที่ตั้งใน .env ต้องมีผลจริง ไม่ใช่รับมาแล้ววางเฉยๆ
+    overlap มากขึ้น = เนื้อหาถูกเล่นซ้ำมากขึ้น = จำนวน chunk มากขึ้นบน transcript เดิม"""
+    transcript = _long_transcript(200)
+
+    def chunk_count(overlap):
+        client = _prompt_aware_client()
+        with _patch_anthropic(client):
+            summarize_transcript(
+                transcript, model="claude-opus-5", chunk_overlap_tokens=overlap
+            )
+        return sum(
+            1
+            for call in client.messages.create.call_args_list
+            if _is_map(call.kwargs["system"])
+        )
+
+    no_overlap = chunk_count(0)
+    heavy_overlap = chunk_count(7_500)
+
+    assert no_overlap >= 2, "sanity: transcript ต้องยาวพอให้หั่นหลาย chunk"
+    assert heavy_overlap > no_overlap
+
+
+def test_the_default_overlap_is_used_when_none_is_given():
+    transcript = _long_transcript(200)
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, model="claude-opus-5")
+
+    default_calls = sum(
+        1 for c in client.messages.create.call_args_list if _is_map(c.kwargs["system"])
+    )
+    assert default_calls == _expected_chunk_count(transcript)
+
+
+def test_the_stage_markers_stay_mutually_exclusive():
+    """ตัวแยกขั้นตอนด้านบนคือฐานของเทสต์อีกสิบกว่าตัวในไฟล์นี้ ถ้ามันแยกผิด
+    fake client จะตอบผิดสาขาแล้วเทสต์พวกนั้นล้มแบบชี้สาเหตุไม่ได้
+    ตรวจทั้ง prompt จากไฟล์จริงและ prompt สำรองที่ฝังในโค้ด"""
+    from src.prompts import FALLBACKS, render
+
+    for name in ("map", "reduce", "single"):
+        for source, system in (
+            ("file", render(name)),
+            ("fallback", FALLBACKS[name]),
+        ):
+            flags = {
+                "map": _is_map(system),
+                "reduce": _is_reduce(system),
+                "single": _is_single(system),
+            }
+            matched = [stage for stage, hit in flags.items() if hit]
+            assert matched == [name], (
+                f"{name}.md ({source}) ถูกแยกเป็น {matched} ควรเป็น ['{name}']"
+            )
 
 
 def _response(text: str, stop_reason: str = "end_turn"):
@@ -85,7 +161,7 @@ def _prompt_aware_client():
     lock = threading.Lock()
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             return _response("สรุปรวมทั้งประชุม")
         with lock:
             index = state["map_calls"]
@@ -171,8 +247,81 @@ def test_short_transcript_uses_given_model_and_original_prompt():
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["model"] == "claude-sonnet-5"
     assert "transcript" in kwargs["messages"][0]["content"]
-    assert kwargs["system"] == summarize_module.SUMMARY_SYSTEM_PROMPT
+    # prompt ย้ายไปอยู่ prompts/single.md แล้ว ไม่ใช่ค่าคงที่ในโค้ด -- ค่าคงที่เหลือ
+    # ไว้เป็นตัวสำรองเมื่อไฟล์หายเท่านั้น จึงเทียบว่าเนื้อหาหลักยังอยู่ ไม่เทียบเท่ากันเป๊ะ
+    assert "## ตกลงแล้ว" in kwargs["system"]
+    assert "## Action items" in kwargs["system"]
     assert kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
+
+
+def test_the_system_prompt_comes_from_the_prompt_files_not_the_constants():
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript("transcript", model="claude-sonnet-5")
+
+    system = client.messages.create.call_args.kwargs["system"]
+    assert system != summarize_module.SUMMARY_SYSTEM_PROMPT
+    # ประโยคนี้อยู่ใน prompts/single.md เท่านั้น ไม่ได้อยู่ใน prompt สำรองที่ฝังในโค้ด
+    assert "faster-whisper" in system
+    assert "ในห้องมีแต่ทีม dev" in system, "profile dev ต้องถูกแทรกเข้ามาโดยปริยาย"
+
+
+def test_the_cross_profile_adds_its_own_rules_to_the_prompt():
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript("transcript", model="claude-sonnet-5", profile="cross")
+
+    system = client.messages.create.call_args.kwargs["system"]
+    assert "ทำได้" in system and "ไม่ใช่การรับปาก" in system
+    assert "ในห้องมีแต่ทีม dev" not in system
+
+
+def test_an_unknown_profile_still_produces_a_summary(caplog):
+    """profile ที่พิมพ์ผิดต้องไม่ทำให้ประชุมนั้นไม่ได้สรุปเลย -- transcript
+    ถอดเสียงเสร็จและเสียเวลา GPU ไปแล้ว"""
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client), caplog.at_level(logging.WARNING):
+        result = summarize_transcript(
+            "transcript", model="claude-sonnet-5", profile="พิมพ์ผิด"
+        )
+
+    assert result == "สรุป"
+    assert "พิมพ์ผิด" in caplog.text
+    assert "ในห้องมีแต่ทีม dev" in client.messages.create.call_args.kwargs["system"]
+
+
+def test_the_glossary_lands_in_the_prompt_where_the_placeholder_was():
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript(
+            "transcript",
+            model="claude-sonnet-5",
+            glossary_text="## คำศัพท์ในประชุมนี้\n- Electron ← อิเล็กตรอน",
+        )
+
+    system = client.messages.create.call_args.kwargs["system"]
+    assert "Electron ← อิเล็กตรอน" in system
+    assert "{glossary}" not in system
+
+
+def test_a_missing_prompts_directory_falls_back_and_still_summarizes(tmp_path, caplog):
+    client = _single_response_client("สรุป")
+
+    with (
+        _patch_anthropic(client),
+        patch("src.prompts.DEFAULT_PROMPTS_DIR", tmp_path / "ไม่มีอยู่"),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = summarize_transcript("transcript", model="claude-sonnet-5")
+
+    assert result == "สรุป"
+    assert client.messages.create.call_args.kwargs["system"] == (
+        summarize_module.SUMMARY_SYSTEM_PROMPT
+    )
 
 
 def test_response_without_a_text_block_raises_a_diagnosable_error():
@@ -282,7 +431,7 @@ def test_a_doubled_budget_retry_that_raises_inside_a_chunk_keeps_the_first_calls
     calls_for_target = {"n": 0}
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             return _response("สรุปรวมทั้งประชุม")
         if kwargs["messages"][0]["content"] == target_chunk:
             with lock:
@@ -313,7 +462,7 @@ def test_a_doubled_budget_retry_that_raises_400_inside_a_chunk_keeps_the_first_c
     calls_for_target = {"n": 0}
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             return _response("สรุปรวมทั้งประชุม")
         if kwargs["messages"][0]["content"] == target_chunk:
             with lock:
@@ -379,7 +528,7 @@ def test_long_transcript_chunk_calls_use_the_chunk_prompt():
         summarize_transcript(transcript, model="claude-opus-5")
 
     first_kwargs = client.messages.create.call_args_list[0].kwargs
-    assert first_kwargs["system"] == summarize_module.CHUNK_SYSTEM_PROMPT
+    assert _is_map(first_kwargs["system"])
     assert first_kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
 
 
@@ -391,7 +540,7 @@ def test_long_transcript_reduce_call_uses_reduce_prompt_and_larger_cap():
         summarize_transcript(transcript, model="claude-opus-5")
 
     reduce_kwargs = client.messages.create.call_args_list[-1].kwargs
-    assert reduce_kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT
+    assert _is_reduce(reduce_kwargs["system"])
     assert reduce_kwargs["max_tokens"] == CLAUDE_REDUCE_MAX_TOKENS
 
 
@@ -452,7 +601,7 @@ def test_a_permanently_failing_chunk_becomes_a_placeholder():
     reduce_input_holder = {}
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             reduce_input_holder["content"] = kwargs["messages"][0]["content"]
             return _response("สรุปรวมทั้งประชุม")
         if kwargs["messages"][0]["content"] == dead_chunk:
@@ -497,7 +646,7 @@ def test_map_calls_run_concurrently():
     state = {"in_flight": 0, "peak": 0}
 
     def create(**kwargs):
-        if kwargs["system"] != summarize_module.CHUNK_SYSTEM_PROMPT:
+        if not _is_map(kwargs["system"]):
             return _response("สรุปรวมทั้งประชุม")
         with lock:
             state["in_flight"] += 1
@@ -524,7 +673,7 @@ def test_chunk_summaries_keep_transcript_order_under_concurrency():
     index_of = {text: i for i, text in enumerate(chunk_texts)}
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             return _response("สรุปรวมทั้งประชุม")
         index = index_of[kwargs["messages"][0]["content"]]
         # earlier chunks answer last, so completion order is the reverse of
@@ -552,7 +701,7 @@ def test_long_transcript_demotes_heading_levels_in_chunk_summaries():
     reduce_input_holder = {}
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             reduce_input_holder["content"] = kwargs["messages"][0]["content"]
             return _response("สรุปรวมทั้งประชุม")
         return _response(chunk_summary_with_headings)
@@ -586,7 +735,7 @@ def test_reduce_summary_headings_cannot_outrank_the_timeline_section():
     )
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             return _response(reduce_output)
         return _response("- สรุปช่วง")
 
@@ -618,7 +767,7 @@ def test_a_doubly_truncated_chunk_reaches_the_timeline_but_not_the_reduce_input(
     calls_for_target = {"n": 0}
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             reduce_input_holder["content"] = kwargs["messages"][0]["content"]
             return _response("สรุปรวมทั้งประชุม")
         if kwargs["messages"][0]["content"] == target_chunk:
@@ -651,7 +800,7 @@ def test_reduce_truncated_twice_notice_appears_above_the_timeline_separator():
     lock = threading.Lock()
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             with lock:
                 reduce_calls["n"] += 1
             return _response("สรุปที่ยังไม่จบ", "max_tokens")
@@ -683,7 +832,7 @@ def test_over_threshold_transcript_with_no_parseable_segments_falls_back_to_sing
     assert result == "สรุปแบบเดียว"
     assert client.messages.create.call_count == 1
     kwargs = client.messages.create.call_args.kwargs
-    assert kwargs["system"] == SUMMARY_SYSTEM_PROMPT
+    assert _is_single(kwargs["system"])
 
 
 @pytest.mark.parametrize("status_code", [408, 409, 429, 500, 529])
@@ -761,7 +910,7 @@ def _reduce_fails_client(status_code: int = 401):
     """map สำเร็จทุก chunk แต่ reduce โดนปฏิเสธ -- สภาพตอนเครดิตหมดกลางคัน"""
 
     def create(**kwargs):
-        if kwargs["system"] == summarize_module.REDUCE_SYSTEM_PROMPT:
+        if _is_reduce(kwargs["system"]):
             raise FakeAPIError(status_code)
         return _response("สรุปช่วงนี้")
 

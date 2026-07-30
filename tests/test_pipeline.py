@@ -77,9 +77,323 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
     assert (meeting_dir / "transcript.md").exists()
     summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
     assert summary.startswith("## ประเด็นสำคัญ\n- ทดสอบ")
-    assert summary.endswith(f"---\nสรุปด้วย {config.claude_model}\n")
+    assert summary.endswith(
+        f"---\nสรุปด้วย {config.claude_model}\nประเภทประชุม: {config.meeting_profile}\n"
+    )
     assert (meeting_dir / "weekly-standup.mp3").exists()
     assert not audio_path.exists()
+
+
+def test_glossary_corrects_the_transcript_before_it_reaches_the_summarizer(tmp_path):
+    """apply_exact ต้องทำงานที่ pipeline ก่อนส่งเข้า summarize -- และไฟล์ transcript.md
+    ที่เก็บไว้ต้องเป็นของดิบ ไม่ถูกแก้ เพราะถ้า glossary ผิด คนอ่านต้องย้อนดูได้ว่า
+    เดิมพูดว่าอะไร"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "glossary.md").write_text(
+        "## exact\nPostgreSQL: โพสเกรส\n\n## fuzzy\nElectron: อิเล็กตรอน\n",
+        encoding="utf-8",
+    )
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 2.0, "text": "โพสเกรสกับอิเล็กตรอนพร้อมแล้ว"}
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch(
+            "src.pipeline.summarize_transcript", return_value="## สรุป"
+        ) as summarize_mock,
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    sent_to_model = summarize_mock.call_args.args[0]
+    assert "PostgreSQL" in sent_to_model
+    assert "โพสเกรส" not in sent_to_model
+    # fuzzy ไม่ถูกแทนที่ในโค้ด โมเดลเป็นคนตีความ จึงต้องยังอยู่ในข้อความเดิม
+    assert "อิเล็กตรอน" in sent_to_model
+
+    raw = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "โพสเกรส" in raw, "transcript ดิบต้องไม่ถูกแก้"
+
+    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in summary
+    assert "คำ fuzzy ที่เจอในห้อง: Electron 1 ครั้ง" in summary
+
+
+def _run_with_profile(tmp_path, job_profile=None, env_profile=None):
+    """รัน process_file หนึ่งครั้งแล้วคืน kwargs ที่ summarize_transcript ได้รับ"""
+    config = make_config(tmp_path)
+    if env_profile is not None:
+        config.meeting_profile = env_profile
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "glossary.md").write_text(
+        "## fuzzy\nElectron: อิเล็กตรอน\n\n"
+        "## ambiguous\nเสร็จ | Business = demo ได้ | dev = merge แล้ว\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "teams.md").write_text("Business: สมชาย\ndev: บอล\n", encoding="utf-8")
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    if job_profile is not None:
+        write_job(config.inbox_dir, "weekly-standup", config.claude_model, profile=job_profile)
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "เสร็จแล้วครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch(
+            "src.pipeline.summarize_transcript", return_value="## สรุป"
+        ) as summarize_mock,
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    return summarize_mock.call_args.kwargs, meeting_dir
+
+
+def test_the_cross_profile_reaches_both_the_prompt_and_the_glossary(tmp_path):
+    """สองเส้นต้องต่อพร้อมกัน ถ้าต่อแค่เส้นแรก ประชุมข้ามฝ่ายจะได้กฎ cross
+    แต่ไม่ได้ตาราง ambiguous/teams ที่กฎนั้นสั่งให้ไปดู"""
+    kwargs, _ = _run_with_profile(tmp_path, job_profile="cross")
+
+    assert kwargs["profile"] == "cross"
+    glossary_text = kwargs["glossary_text"]
+    assert "เสร็จ" in glossary_text, "ตาราง ambiguous ต้องเข้า prompt"
+    assert "สมชาย" in glossary_text, "ตาราง teams ต้องเข้า prompt"
+
+
+def test_the_dev_profile_keeps_the_cross_team_tables_out(tmp_path):
+    kwargs, _ = _run_with_profile(tmp_path, job_profile="dev")
+
+    assert kwargs["profile"] == "dev"
+    glossary_text = kwargs["glossary_text"]
+    assert "Electron" in glossary_text, "ตาราง fuzzy ยังต้องเข้าตามปกติ"
+    assert "เสร็จ" not in glossary_text
+    assert "สมชาย" not in glossary_text
+
+
+def test_a_job_file_without_a_profile_falls_back_to_the_env_value(tmp_path):
+    """ไฟล์ที่ลากใส่ inbox/ เอง และ .job.json เก่าที่ไม่มี profile"""
+    kwargs, _ = _run_with_profile(tmp_path, job_profile=None, env_profile="cross")
+
+    assert kwargs["profile"] == "cross"
+    assert "สมชาย" in kwargs["glossary_text"]
+
+
+def test_the_job_file_profile_beats_the_env_value(tmp_path):
+    """คิวข้ามวันได้ ผู้ใช้แก้ .env ระหว่างนั้นแล้วประชุมที่ค้างอยู่ต้องยังใช้ค่าที่
+    เลือกไว้ตอนอัด -- เหมือนที่ model ทำอยู่"""
+    kwargs, _ = _run_with_profile(tmp_path, job_profile="dev", env_profile="cross")
+
+    assert kwargs["profile"] == "dev"
+    assert "สมชาย" not in kwargs["glossary_text"]
+
+
+def test_the_meeting_profile_is_recorded_in_the_summary_footer(tmp_path):
+    _, meeting_dir = _run_with_profile(tmp_path, job_profile="cross")
+
+    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
+    assert "ประเภทประชุม: cross" in summary
+
+
+def _previous_summary(config, name, profile, open_items):
+    d = config.meetings_dir / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "summary.md").write_text(  # noqa: E501 - โครงสรุปย่อที่มีแค่ส่วนที่ carryover อ่าน
+        f"## ตกลงแล้ว\n- x\n\n## ต้องคุยต่อครั้งหน้า\n{open_items}\n"
+        f"\n---\nสรุปด้วย GLM-5.2\nประเภทประชุม: {profile}\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_open_items_from_the_previous_meeting_reach_the_summarizer(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    _previous_summary(config, "2026-07-20_09-00-standup", "dev", "- เรื่องค้างเมื่อวาน")
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป") as summarize,
+    ):
+        process_file(audio_path, config)
+
+    carryover = summarize.call_args.kwargs["carryover_text"]
+    assert "- เรื่องค้างเมื่อวาน" in carryover
+    assert "## คืบหน้าจากครั้งก่อน" in carryover
+
+
+def test_carryover_only_comes_from_the_same_profile(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    _previous_summary(config, "2026-07-26_09-00-crossteam", "cross", "- ของข้ามฝ่าย")
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป") as summarize,
+    ):
+        process_file(audio_path, config)
+
+    assert summarize.call_args.kwargs["carryover_text"] == ""
+
+
+def test_carryover_can_be_switched_off(tmp_path):
+    config = make_config(tmp_path)
+    config.carryover_enabled = False
+    config.inbox_dir.mkdir(parents=True)
+    _previous_summary(config, "2026-07-20_09-00-standup", "dev", "- เรื่องค้างเมื่อวาน")
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป") as summarize,
+    ):
+        process_file(audio_path, config)
+
+    assert summarize.call_args.kwargs["carryover_text"] == ""
+
+
+def test_a_retry_does_not_carry_over_its_own_previous_summary(tmp_path):
+    """ลาก .job.json กลับ inbox แล้วรันซ้ำ -- รอบนี้ใช้ transcript เดิมและโฟลเดอร์เดิม
+    ที่มี summary.md จากรอบก่อนอยู่แล้ว ถ้าไม่กันไว้ ประชุมจะยกเรื่องค้างของตัวเองมา
+    เป็น carryover แล้วเขียน "คืบหน้าจากครั้งก่อน" ทับเรื่องเดียวกันวนไปเรื่อยๆ
+
+    ต้องตั้ง .job.json ให้ชี้ transcript เดิมด้วย ไม่ใช่แค่สร้างโฟลเดอร์ชื่อซ้ำ --
+    ชื่อซ้ำเฉยๆ process_file จะสร้างโฟลเดอร์ใหม่ลงท้าย -2 ซึ่งเป็นคนละเคสกัน
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    transcript_path = _saved_transcript(
+        config, "2026-07-25_09-00-weekly-standup", "# Transcript\n\nของเดิม"
+    )
+    record_transcript(audio_path, transcript_path)
+    own_dir = _previous_summary(
+        config, "2026-07-25_09-00-weekly-standup", "dev", "- เรื่องค้างของตัวเอง"
+    )
+    assert (own_dir / "summary.md").exists(), "sanity: สรุปรอบก่อนต้องอยู่ในโฟลเดอร์เดิม"
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดี"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป") as summarize,
+    ):
+        process_file(audio_path, config)
+
+    assert "เรื่องค้างของตัวเอง" not in summarize.call_args.kwargs["carryover_text"]
+
+
+def test_glossary_reaches_the_summarizer_as_prompt_text(tmp_path):
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "glossary.md").write_text(
+        "## fuzzy\nElectron: อิเล็กตรอน\n", encoding="utf-8"
+    )
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "อิเล็กตรอนพร้อม"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch(
+            "src.pipeline.summarize_transcript", return_value="## สรุป"
+        ) as summarize_mock,
+    ):
+        process_file(audio_path, config)
+
+    glossary_text = summarize_mock.call_args.kwargs["glossary_text"]
+    assert "Electron" in glossary_text
+    assert "อิเล็กตรอน" in glossary_text
+
+
+def test_a_missing_glossary_file_adds_no_glossary_lines(tmp_path):
+    """ไม่มี glossary.md = ห้าม crash และห้ามมีบรรทัดเรื่องคำศัพท์โผล่มา
+    (บรรทัด "ประเภทประชุม" ไม่เกี่ยวกับ glossary มันมีเสมอเพื่อให้ย้อนดูได้ว่า
+    สรุปนี้ใช้กฎชุดไหน)"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization([{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(audio_path, config)
+
+    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
+    assert summary == (
+        f"## สรุป\n\n---\nสรุปด้วย {config.claude_model}\n"
+        f"ประเภทประชุม: {config.meeting_profile}\n"
+    )
+    assert "glossary" not in summary
+    assert "fuzzy" not in summary
 
 
 def test_process_file_continues_without_diarization_on_failure(tmp_path):
@@ -582,7 +896,7 @@ def test_the_recorded_model_choice_survives_from_manifest_to_summary(tmp_path):
 
     assert summarize.call_args.kwargs["model"] == "claude-sonnet-5"
     summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
-    assert summary.endswith("---\nสรุปด้วย claude-sonnet-5\n")
+    assert "---\nสรุปด้วย claude-sonnet-5\n" in summary
     assert not (inbox / f"weekly-standup{JOB_SUFFIX}").exists()
 
 

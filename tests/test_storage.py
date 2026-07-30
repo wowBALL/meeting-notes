@@ -130,6 +130,53 @@ def test_save_summary_does_not_stack_blank_lines_before_the_footer(tmp_path):
     )
 
 
+def test_save_summary_records_glossary_corrections_per_term(tmp_path):
+    """รายคำ ไม่ใช่ยอดรวม -- ยอดรวมบอกไม่ได้ว่าคำไหนแทนที่ผิดที่จนควรย้ายไป fuzzy"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(
+        meeting_dir,
+        "# Summary",
+        "GLM-5.2",
+        glossary_counts={"PostgreSQL": 3, "Railway": 1},
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 3 จุด, Railway 1 จุด" in text
+
+
+def test_save_summary_keeps_fuzzy_sightings_on_their_own_line(tmp_path):
+    """คนละความหมายกับบรรทัดบน: บรรทัดนั้น "แก้ไปแล้ว" บรรทัดนี้ "เจอ แต่ไม่ได้แก้"
+    และบรรทัดนี้คือตัวเดียวที่บอกได้ว่าคำใน fuzzy คำไหนตายแล้วควรลบ"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(
+        meeting_dir,
+        "# Summary",
+        "GLM-5.2",
+        glossary_counts={"PostgreSQL": 1},
+        fuzzy_seen={"Electron": 2},
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in text
+    assert "คำ fuzzy ที่เจอในห้อง: Electron 2 ครั้ง" in text
+
+
+def test_save_summary_footer_is_untouched_when_the_glossary_did_nothing(tmp_path):
+    """คนที่ยังไม่มี glossary.md ต้องได้ไฟล์หน้าตาเดิมเป๊ะ ไม่มีบรรทัดเปล่าโผล่มา"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(
+        meeting_dir, "# Summary", "GLM-5.2", glossary_counts={}, fuzzy_seen={}
+    )
+
+    assert path.read_text(encoding="utf-8") == "# Summary\n\n---\nสรุปด้วย GLM-5.2\n"
+
+
 def test_archive_audio_moves_the_recording_into_the_meeting_folder(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)

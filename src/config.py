@@ -5,6 +5,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# ชุดประเภทประชุมที่รองรับมาจากที่เดียว: ไฟล์ใน prompts/profiles/ คือของจริง
+# ถ้า config มีลิสต์ของตัวเอง วันหนึ่งจะมี profile ที่ผ่าน config แต่หา prompt ไม่เจอ
+from src.prompts import KNOWN_PROFILES
+
 logger = logging.getLogger(__name__)
 
 # ค่าเริ่มต้นเป็น GLM-5.2 บน endpoint ของบริษัท ไม่ใช่ Claude เพราะเหตุผลเรื่องความเป็น
@@ -74,6 +78,45 @@ LEGACY_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 DEFAULT_SPEAKER_MATCH_HIGH = 0.80
 DEFAULT_SPEAKER_MATCH_LOW = 0.50
 
+# ประเภทประชุม เลือกได้ต่อประชุมจากเมนูตอนเริ่มอัด ค่านี้เป็นค่าที่ใช้เมื่อไม่ได้เลือก
+# (ไฟล์ที่ลากใส่ inbox/ เอง หรือ .job.json ที่เขียนไว้ก่อนจะมีฟีเจอร์นี้)
+#
+# dev เป็นค่าเริ่มต้นเพราะสัดส่วนจริงคือ dev ล้วน 3 ครั้ง / ข้ามฝ่าย 1 ครั้ง ต่อสัปดาห์
+# และการเผลอใช้ cross กับประชุม dev ล้วนไม่ใช่แค่เปลืองโทเคน: prompt จะบอกโมเดลว่า
+# คำอย่าง "เสร็จ" กำกวมระหว่างสองฝ่าย ทั้งที่ในห้องมีแต่ dev โมเดลจะไป qualify
+# คำพูดปกติเกินจำเป็นจนได้สรุปที่อ่านแล้วอ้อมค้อม
+DEFAULT_MEETING_PROFILE = "dev"
+
+# ส่งหัวข้อ "ต้องคุยต่อครั้งหน้า" ของประชุมครั้งก่อน (ประเภทเดียวกัน) เข้าไปในสรุปครั้งนี้
+# เปิดเป็นค่าเริ่มต้นเพราะประชุม dev ถี่ 3 ครั้ง/สัปดาห์ เรื่องค้างถูกยกมาคุยต่อเสมอ
+#
+# ปิดเมื่อไหร่: กลไกนี้ผูกสรุปเข้าด้วยกันเป็นลูกโซ่ ถ้าสรุปครั้งหนึ่งเพี้ยน เรื่องค้าง
+# ที่ผิดจะถูกส่งต่อไปครั้งถัดไป ช่วงที่ยังจูน prompt อยู่ควรอ่านหัวข้อนั้นทุกครั้งก่อน
+# ปล่อยผ่าน หรือปิดสวิตช์นี้ไปก่อน
+DEFAULT_CARRYOVER_ENABLED = True
+
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
+# ถอดเสียงแบบ batch (BatchedInferencePipeline) -- ปิดไว้เพราะวัดกับเสียงประชุมจริง
+# ของเครื่องนี้แล้วว่ามันทำให้ faster-whisper วนซ้ำคำเดิมจนเนื้อหาหาย (โทเคนที่ซ้ำ
+# มากสุดกินพื้นที่ 31.6% ของ transcript) ตัวเลขการวัดทั้งสี่ config อยู่ใต้ BATCH_SIZE
+# ใน src/transcribe.py
+#
+# เปิดกลับได้ด้วย WHISPER_BATCHED=true ถ้ายอมแลกคุณภาพกับความเร็ว ~4 เท่า
+DEFAULT_WHISPER_BATCHED = False
+
+# ขนาด chunk ตอนหั่น transcript ยาว และส่วนที่ให้ chunk คาบเกี่ยวกัน
+#
+# ค่าคู่นี้อยู่ที่นี่ไม่ใช่ใน summarize.py เพราะ summarize.py import config อยู่แล้ว
+# ทางกลับกันจะเป็น import วน และการตรวจว่า overlap < max ต้องเห็นทั้งสองค่า
+#
+# overlap มีไว้กันบทสนทนาขาดกลางประโยคตรงรอยต่อ chunk 1_500/15_000 = 10%
+# ผลข้างเคียงที่ต้องรู้: segment ท้าย chunk ถูกเล่นซ้ำที่หัว chunk ถัดไป จึงเป็นเหตุผล
+# ที่ตัวกรองศัพท์ต้องทำงานครั้งเดียวก่อนหั่น chunk ไม่ใช่ทีละ chunk (ไม่งั้นนับซ้ำ)
+DEFAULT_CHUNK_MAX_TOKENS = 15_000
+DEFAULT_CHUNK_OVERLAP_TOKENS = 1_500
+
 
 @dataclass
 class Config:
@@ -89,6 +132,82 @@ class Config:
     diarization_model: str = DEFAULT_DIARIZATION_MODEL
     speaker_match_high: float = DEFAULT_SPEAKER_MATCH_HIGH
     speaker_match_low: float = DEFAULT_SPEAKER_MATCH_LOW
+    meeting_profile: str = DEFAULT_MEETING_PROFILE
+    carryover_enabled: bool = DEFAULT_CARRYOVER_ENABLED
+    chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS
+    whisper_batched: bool = DEFAULT_WHISPER_BATCHED
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    """สวิตช์เปิดปิดจาก .env -- ค่าที่อ่านไม่ออกต้องเตือน ไม่ใช่เงียบแล้วใช้ default
+
+    ต่างจาก _read_float ตรงที่เตือนโดยเจตนา: คนที่พิมพ์ `CARRYOVER_ENABLED=flase`
+    กำลังพยายาม "ปิด" อยู่ ถ้าเงียบแล้วเปิดต่อ เขาจะไม่รู้ว่ามันยังทำงาน ซึ่งเป็นฝั่ง
+    ที่เสียหายกว่า เพราะเหตุผลที่คนอยากปิดคือสรุปครั้งก่อนเพี้ยนแล้วไม่อยากให้ส่งต่อ
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE_WORDS:
+        return True
+    if value in _FALSE_WORDS:
+        return False
+    logger.warning(
+        "%s=%r อ่านไม่ออก (ใช้ได้: %s) ใช้ค่าเริ่มต้น %s แทน / "
+        "unreadable %s value %r, falling back to %s",
+        name,
+        raw,
+        ", ".join(sorted(_TRUE_WORDS | _FALSE_WORDS)),
+        default,
+        name,
+        raw,
+        default,
+    )
+    return default
+
+
+def _read_chunk_overlap() -> int:
+    """overlap จาก .env -- ตกกลับไปที่ default พร้อมเตือนเมื่อใช้ไม่ได้
+
+    ต้องดักที่นี่ ไม่ใช่ปล่อยไปถึง split_into_chunks: ที่นั่น overlap >= max_tokens
+    raise ValueError ซึ่งจะทำให้ประชุมนั้นตกไป failed/ ทั้งที่ถอดเสียงด้วย GPU เสร็จ
+    และจ่ายไปแล้ว ค่าที่พิมพ์ผิดใน .env ต้องไม่แพงขนาดนั้น (เหมือน UI_PORT)
+
+    0 ผ่านได้: การไม่ให้ chunk คาบเกี่ยวกันเลยเป็นค่าที่ตั้งใจตั้งได้
+    """
+    raw = os.environ.get("CHUNK_OVERLAP_TOKENS", "").strip()
+    if not raw:
+        return DEFAULT_CHUNK_OVERLAP_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = None
+    if value is None or value < 0 or value >= DEFAULT_CHUNK_MAX_TOKENS:
+        logger.warning(
+            "CHUNK_OVERLAP_TOKENS=%r ใช้ไม่ได้ (ต้องเป็นจำนวนเต็ม 0 ถึง %d) "
+            "ใช้ค่าเริ่มต้น %d แทน / unusable CHUNK_OVERLAP_TOKENS %r, falling back to %d",
+            raw,
+            DEFAULT_CHUNK_MAX_TOKENS - 1,
+            DEFAULT_CHUNK_OVERLAP_TOKENS,
+            raw,
+            DEFAULT_CHUNK_OVERLAP_TOKENS,
+        )
+        return DEFAULT_CHUNK_OVERLAP_TOKENS
+    # เกินครึ่งของขนาด chunk = จำนวน chunk เริ่มระเบิด วัดกับ transcript 300 segment:
+    # overlap 1500 -> 14 chunk, 7500 (ครึ่ง) -> 24 chunk, 14999 -> 277 chunk
+    # ค่านี้ยัง "ถูกต้อง" ตามกฎ overlap < max จึงไม่ปฏิเสธ (ผู้ใช้ตั้งมาเองย่อมมีเหตุผล)
+    # แต่ต้องเตือน เพราะแต่ละ chunk คือ API call ที่จ่ายจริง ไม่ควรมาเซอร์ไพรส์ตอนดูบิล
+    if value > DEFAULT_CHUNK_MAX_TOKENS // 2:
+        logger.warning(
+            "CHUNK_OVERLAP_TOKENS=%d เกินครึ่งของขนาด chunk (%d) จำนวน chunk จะเพิ่มขึ้น "
+            "อย่างรวดเร็วและแต่ละ chunk คือหนึ่ง API call ที่จ่ายเงินจริง / "
+            "overlap %d exceeds half the chunk size, expect many more paid API calls",
+            value,
+            DEFAULT_CHUNK_MAX_TOKENS,
+            value,
+        )
+    return value
 
 
 def _read_float(name: str, default: float) -> float:
@@ -120,6 +239,23 @@ def load_config(base_dir: Path | None = None) -> Config:
     # ค่าว่าง/ช่องว่างล้วนใน .env (DIARIZATION_MODEL= ที่ลืมเติมค่า) ต้องตกกลับไปที่
     # default ไม่ใช่ส่งสตริงว่างไปให้ Pipeline.from_pretrained ตายเอาตอนเปิดโปรแกรม
     diarization_model = os.environ.get("DIARIZATION_MODEL", "").strip() or DEFAULT_DIARIZATION_MODEL
+    # ค่าที่พิมพ์ผิดต้องรู้ตัวตอนนี้ ไม่ใช่ไปเจอตอนอ่านสรุปแล้วสงสัยว่าทำไมหน้าตาแปลก
+    # -- แต่ต้องไม่ทำให้เปิดโปรแกรมไม่ได้ แบบเดียวกับ UI_PORT และ DIARIZATION_MODEL
+    meeting_profile = os.environ.get("MEETING_PROFILE", "").strip() or DEFAULT_MEETING_PROFILE
+    if meeting_profile not in KNOWN_PROFILES:
+        logger.warning(
+            "MEETING_PROFILE=%r ไม่ใช่ประเภทประชุมที่รองรับ (%s) ใช้ %r แทน / "
+            "unknown MEETING_PROFILE %r, falling back to %r",
+            meeting_profile,
+            ", ".join(KNOWN_PROFILES),
+            DEFAULT_MEETING_PROFILE,
+            meeting_profile,
+            DEFAULT_MEETING_PROFILE,
+        )
+        meeting_profile = DEFAULT_MEETING_PROFILE
+    carryover_enabled = _read_bool("CARRYOVER_ENABLED", DEFAULT_CARRYOVER_ENABLED)
+    chunk_overlap_tokens = _read_chunk_overlap()
+    whisper_batched = _read_bool("WHISPER_BATCHED", DEFAULT_WHISPER_BATCHED)
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -159,4 +295,8 @@ def load_config(base_dir: Path | None = None) -> Config:
         diarization_model=diarization_model,
         speaker_match_high=speaker_match_high,
         speaker_match_low=speaker_match_low,
+        meeting_profile=meeting_profile,
+        carryover_enabled=carryover_enabled,
+        chunk_overlap_tokens=chunk_overlap_tokens,
+        whisper_batched=whisper_batched,
     )

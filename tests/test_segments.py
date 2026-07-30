@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from src import segments
-from src.job import JOB_SUFFIX, read_model
+from src.job import JOB_SUFFIX, read_model, read_profile
 from src.segments import (
     MANIFEST_NAME,
     OPUS_BITRATE,
@@ -37,6 +37,7 @@ def _make_session(
     part_count: int,
     status: str = "recording",
     claude_model: str | None = None,
+    profile: str | None = None,
 ) -> Path:
     session_dir = session_dir_for(inbox, stem)
     session_dir.mkdir(parents=True)
@@ -53,6 +54,7 @@ def _make_session(
         parts,
         status,
         claude_model=claude_model,
+        profile=profile,
     )
     return session_dir
 
@@ -108,6 +110,7 @@ def test_manifest_round_trips_every_field(tmp_path):
         "status": "recording",
         "devices": {},
         "claude_model": None,
+        "profile": None,
     }
 
 
@@ -593,6 +596,66 @@ def test_finish_session_writes_the_job_file_with_the_chosen_model(tmp_path):
         destination = finish_session(session_dir, inbox)
 
     assert read_model(destination) == "claude-sonnet-5"
+
+
+def test_finish_session_carries_the_meeting_profile_into_the_job_file(tmp_path):
+    """profile ต้องเดินทางเส้นเดียวกับ model ตลอดสาย
+    write_manifest -> finish_session -> write_job -> read_profile"""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(
+        inbox, "meet1", part_count=1, claude_model="claude-sonnet-5", profile="cross"
+    )
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        destination = finish_session(session_dir, inbox)
+
+    assert read_profile(destination) == "cross"
+    assert read_model(destination) == "claude-sonnet-5"
+
+
+def test_finish_session_keeps_the_profile_when_no_model_was_chosen(tmp_path):
+    """`python -m src.record --profile cross` ที่ไม่ได้ส่ง --model -- ถ้าเงื่อนไข
+    การเขียน job file ดูแค่ model อยู่ profile จะหายไปเงียบๆ"""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(
+        inbox, "meet1", part_count=1, claude_model=None, profile="cross"
+    )
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        destination = finish_session(session_dir, inbox)
+
+    assert read_profile(destination) == "cross"
+
+
+def test_a_manifest_without_a_profile_still_finishes(tmp_path):
+    """session ที่ค้างอยู่ตอนอัปเดตโค้ด manifest ไม่มี key นี้"""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    session_dir = _make_session(inbox, "meet1", part_count=1, claude_model="GLM-5.2")
+    manifest_path = session_dir / MANIFEST_NAME
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del data["profile"]
+    manifest_path.write_text(json.dumps(data), encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"fake opus")
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("src.segments.subprocess.run", side_effect=fake_run):
+        destination = finish_session(session_dir, inbox)
+
+    assert read_profile(destination) is None
+    assert read_model(destination) == "GLM-5.2"
 
 
 def test_finish_session_writes_the_job_file_before_publishing_the_audio(tmp_path):

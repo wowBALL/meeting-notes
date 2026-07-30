@@ -636,30 +636,99 @@ def test_run_recording_closes_the_streams_before_it_waits_for_the_drain(
     assert [s.closed for s in calls["streams"]] == [True, True]
 
 
+def test_run_recording_keeps_the_profile_when_a_part_closes(tmp_path, monkeypatch):
+    """ปิด part แล้ว manifest ต้องยังจดประเภทประชุมไว้ ไม่ใช่ถูกล้างเป็น None
+
+    on_part_closed เขียน manifest ทับทั้งไฟล์ ถ้าไม่ส่ง profile ไปด้วย ค่าที่เขียนไว้
+    ตอนเริ่มอัดจะหายไปเงียบๆ (write_manifest มี default เป็น None) แล้ว finish_session
+    ที่อ่านไฟล์นี้ต่อจะเขียน job.json โดยไม่มี profile -- ฝั่งสรุปจึงตกไปใช้ค่าจาก .env
+    ทุกครั้ง ไม่ว่าผู้ใช้จะเลือกอะไรไว้
+
+    ทุกการอัดปิด part อย่างน้อยหนึ่งครั้งตอนหยุด จึงไม่ใช่เคสมุม -- วัดจากของจริง
+    (activity.jsonl 2026-07-30 12:51:29) part_closed ยิงก่อน encode_started ทันที
+    """
+    _fake_audio(monkeypatch)
+    config = _config(tmp_path)
+
+    def fake_record(*a, **k):
+        # เลียนแบบของจริง: part แรกปิดก่อนตัวอัดจะคืนค่า
+        # on_part_closed ถูกส่งเป็น positional ตัวที่ 7 (ดู args= ของ recorder_thread)
+        on_part_closed = k.get("on_part_closed") or (a[6] if len(a) > 6 else None)
+        assert on_part_closed is not None, (
+            "ไม่ได้รับ on_part_closed -- เทสนี้จะไม่ได้พิสูจน์อะไรเลย"
+        )
+        on_part_closed(["part0001.wav"])
+        return ["part0001.wav"]
+
+    monkeypatch.setattr(record, "record_streams_to_session", fake_record)
+    # กันไม่ให้ finish_session กินโฟลเดอร์ทิ้งก่อนอ่าน manifest
+    monkeypatch.setattr(
+        record, "finish_or_discard", lambda s, i: config.inbox_dir / "meet.ogg"
+    )
+
+    stop_event = threading.Event()
+    stop_event.set()
+    record.run_recording(
+        "meet", "claude-opus-5", config, stop_event, profile="cross"
+    )
+
+    from src.segments import read_manifest
+
+    # stem มีเวลาต่อท้าย (build_output_filename) จึงหาโฟลเดอร์จาก prefix ไม่ใช่เดาชื่อ
+    sessions = list(config.inbox_dir.glob(".session-*"))
+    assert len(sessions) == 1, f"คาดว่าจะมี session เดียว ได้ {sessions}"
+    manifest = read_manifest(sessions[0])
+    assert manifest["profile"] == "cross"
+    # claude_model ผ่านมาได้อยู่แล้ว -- assert คู่กันไว้เพื่อให้เห็นว่าเทสนี้จับ
+    # การหายของ profile จริง ไม่ใช่ manifest ที่ว่างทั้งไฟล์
+    assert manifest["claude_model"] == "claude-opus-5"
+
+
 def test_parse_args_reads_the_name_and_the_model():
     assert parse_args(["weekly-standup", "--model", "claude-sonnet-5"]) == (
         "weekly-standup",
         "claude-sonnet-5",
+        None,
     )
 
 
 def test_parse_args_allows_a_model_with_no_name():
-    assert parse_args(["--model", "claude-opus-5"]) == (None, "claude-opus-5")
+    assert parse_args(["--model", "claude-opus-5"]) == (None, "claude-opus-5", None)
 
 
-def test_parse_args_defaults_both_to_none():
-    assert parse_args([]) == (None, None)
+def test_parse_args_defaults_all_to_none():
+    assert parse_args([]) == (None, None, None)
 
 
 def test_parse_args_passes_the_transcript_only_sentinel_through_untouched():
     # ตัวอัดไม่ควรรู้จักโหมดนี้เลย -- มันแค่ส่งต่อสิ่งที่ .bat ให้มา เทสต์นี้จับกรณี
     # ที่มีคนเผลอไปเพิ่ม validation ชื่อโมเดลใน record แล้วโหมดนี้ตายเงียบ
-    assert parse_args(["--model", NO_SUMMARY_MODEL]) == (None, NO_SUMMARY_MODEL)
+    assert parse_args(["--model", NO_SUMMARY_MODEL]) == (None, NO_SUMMARY_MODEL, None)
+
+
+def test_parse_args_reads_the_meeting_profile():
+    assert parse_args(["--model", "GLM-5.2", "--profile", "cross"]) == (
+        None,
+        "GLM-5.2",
+        "cross",
+    )
+
+
+def test_parse_args_passes_an_unknown_profile_through_untouched():
+    """ตัวอัดไม่ validate ชื่อ profile -- มันแค่ส่งต่อสิ่งที่ .bat ให้มา แบบเดียวกับ
+    ชื่อโมเดล คนที่ตัดสินใจว่าจะทำอะไรกับค่าที่ไม่รู้จักคือฝั่งสรุป และมันเตือนแล้วใช้
+    dev ต่อ การ validate ที่นี่จะทำให้ประชุมอัดไม่ได้เพราะพิมพ์ผิดในเมนู"""
+    assert parse_args(["--profile", "พิมพ์ผิด"]) == (None, None, "พิมพ์ผิด")
+
+
+def test_an_empty_profile_string_behaves_like_no_profile():
+    """.bat ส่งสตริงว่างมาได้เมื่อ set /p ถูกกด Enter ผ่าน -- แบบเดียวกับชื่อประชุม"""
+    assert parse_args(["--profile", ""]) == (None, None, None)
 
 
 def test_parse_args_treats_an_empty_name_as_no_name():
     # start-meeting.bat passes "" through when the user skips the name prompt
-    assert parse_args([""]) == (None, None)
+    assert parse_args([""]) == (None, None, None)
 
 
 def test_parse_args_accepts_a_name_starting_with_a_dash_after_the_separator():
@@ -669,6 +738,7 @@ def test_parse_args_accepts_a_name_starting_with_a_dash_after_the_separator():
     assert parse_args(["--model", "claude-opus-5", "--", "-standup"]) == (
         "-standup",
         "claude-opus-5",
+        None,
     )
 
 

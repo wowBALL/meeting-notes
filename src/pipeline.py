@@ -11,6 +11,7 @@ from src.job import (
     NO_SUMMARY_MODEL,
     discard_job,
     read_model,
+    read_profile,
     read_transcript,
     record_transcript,
 )
@@ -27,6 +28,9 @@ from src.storage import (
     save_summary,
     save_transcript,
 )
+from src import carryover
+from src.glossary import load as load_glossary
+from src.prompts import CROSS_TEAM_PROFILE
 from src.summarize import summarize_transcript
 from src.transcribe import transcribe_audio
 
@@ -149,6 +153,10 @@ def process_file(
     # The recorder wrote this next to the audio; the watcher's own config was read
     # once at startup and cannot know what this meeting asked for.
     claude_model = read_model(audio_path) or config.claude_model
+    # กลไกเดียวกันเป๊ะ: ค่าที่เลือกไว้ตอนอัดชนะค่าใน .env เพราะคิวอยู่ข้ามวันได้
+    # และผู้ใช้แก้ .env ระหว่างนั้นได้ ประชุมที่ค้างอยู่ต้องยังใช้ค่าที่เลือกไว้จริง
+    # ไม่มีค่า = ไฟล์ที่ลากใส่ inbox/ เอง หรือ .job.json ที่เขียนก่อนมีฟีเจอร์นี้
+    profile = read_profile(audio_path) or config.meeting_profile
 
     # ทุก activity.append ที่นี่ไม่มีทาง raise (ดู src/activity.py) จึงไม่ห่อ try --
     # ห่อแล้วจะบังคับให้คนอ่านคิดว่ามันอาจ raise ได้ ซึ่งไม่จริง
@@ -165,6 +173,7 @@ def process_file(
             meeting_dir,
             transcript_path,
             transcript_markdown,
+            profile,
         )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -180,7 +189,10 @@ def process_file(
         try:
             whisper_segments = retry_with_backoff(
                 lambda: transcribe_audio(
-                    wav_path, model_size=config.whisper_model, model=whisper_model
+                    wav_path,
+                    model_size=config.whisper_model,
+                    model=whisper_model,
+                    batched=config.whisper_batched,
                 )
             )
         except Exception as e:
@@ -249,6 +261,7 @@ def process_file(
         meeting_dir,
         transcript_path,
         transcript_markdown,
+        profile,
     )
     _record_pending_speakers(
         config,
@@ -272,6 +285,7 @@ def _finish_meeting(
     meeting_dir: Path,
     transcript_path: Path,
     transcript_markdown: str,
+    profile: str,
 ) -> Path:
     """The half of the pipeline that runs whether or not the transcript is new."""
     # No retry here on purpose: summarize_transcript retries every API call it
@@ -281,13 +295,55 @@ def _finish_meeting(
     # permanently failing chunk.
     job = audio_path.stem
     summary_markdown = None
+    glossary_counts: dict[str, int] = {}
+    fuzzy_seen: dict[str, int] = {}
     if claude_model != NO_SUMMARY_MODEL:
+        # ตัวกรองศัพท์เสียบที่นี่ ไม่ใช่ใน summarize_transcript สองเหตุผล:
+        # (1) ต้องแก้ก่อนหั่น chunk -- split_into_chunks เล่นซ้ำ segment ท้าย chunk
+        #     ที่หัว chunk ถัดไป (overlap) ถ้าแทนที่ทีละ chunk คำในโซนนั้นจะถูกนับสองรอบ
+        #     เรียกครั้งเดียวที่นี่จึงครอบทั้ง path ที่หั่น chunk และ path ที่ยิงรอบเดียว
+        # (2) summarize_transcript คืน str เปล่า ๆ และถูก mock ไว้หลายสิบจุดในเทสต์
+        #     ให้มันคืนจำนวนที่แก้ด้วยจะเปลี่ยน return type ไปทั้งหมดโดยไม่ได้อะไรเพิ่ม
+        #
+        # transcript_markdown ที่ถูกแก้เป็นแค่ตัวแปรในหน่วยความจำ -- transcript.md บน
+        # ดิสก์ถูกเขียนไปก่อนถึงบรรทัดนี้แล้วและยังเป็นของดิบ ถ้า glossary แก้ผิด
+        # คนอ่านย้อนดูได้ว่าเดิมพูดว่าอะไร และ path ลองใหม่ก็อ่านของดิบตัวเดิมเสมอ
+        glossary = load_glossary(
+            config.base_dir / "glossary.md", config.base_dir / "teams.md"
+        )
+        corrected_markdown, glossary_counts = glossary.apply_exact(transcript_markdown)
+        fuzzy_seen = glossary.count_only(corrected_markdown)
+        # profile ต้องไปสองที่พร้อมกัน ไม่ใช่ที่เดียว: ไฟล์ prompts/profiles/cross.md
+        # สั่งโมเดลให้ไปดูตารางคำกำกวมกับตารางฝ่ายของผู้เข้าร่วม ถ้าส่ง profile ให้
+        # summarize_transcript แต่ไม่เปิด cross ให้ format_for_prompt ด้วย กฎนั้นจะ
+        # ชี้ไปที่ตารางที่ไม่ได้ถูกใส่เข้ามา -- สรุปเพี้ยนโดยไม่มีอะไรฟ้อง
+        glossary_text = glossary.format_for_prompt(
+            include_cross_team_context=(profile == CROSS_TEAM_PROFILE)
+        )
+        # exclude_dir=meeting_dir สำคัญ ไม่ใช่ทางเลือก: path ลองใหม่ (ลาก .job.json
+        # กลับ inbox) เข้ามาที่โฟลเดอร์เดิมซึ่งอาจมี summary.md จากรอบก่อนอยู่แล้ว
+        # ไม่กันไว้ ประชุมจะยกเรื่องค้างของตัวเองมาเป็น "คืบหน้าจากครั้งก่อน" วนไปเรื่อยๆ
+        carryover_text = ""
+        if config.carryover_enabled:
+            carryover_text = carryover.format_for_prompt(
+                carryover.previous_open_items(
+                    config.meetings_dir, profile, exclude_dir=meeting_dir
+                )
+            )
         activity.append(
-            config.base_dir, job, "summarize_started", params={"model": claude_model}
+            config.base_dir,
+            job,
+            "summarize_started",
+            params={"model": claude_model, "profile": profile},
         )
         try:
             summary_markdown = summarize_transcript(
-                transcript_markdown, model=claude_model
+                corrected_markdown,
+                model=claude_model,
+                glossary_text=glossary_text,
+                profile=profile,
+                carryover_text=carryover_text,
+                chunk_overlap_tokens=config.chunk_overlap_tokens,
             )
         except Exception as e:
             activity.append(
@@ -306,7 +362,14 @@ def _finish_meeting(
         # summary nobody asked for. Everything else below still runs: the meeting
         # is finished, just without that one file.
         if summary_markdown is not None:
-            save_summary(meeting_dir, summary_markdown, claude_model)
+            save_summary(
+                meeting_dir,
+                summary_markdown,
+                claude_model,
+                glossary_counts=glossary_counts,
+                fuzzy_seen=fuzzy_seen,
+                profile=profile,
+            )
         archive_audio(meeting_dir, audio_path)
         discard_job(audio_path)
     except Exception as e:

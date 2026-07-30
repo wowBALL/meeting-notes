@@ -54,6 +54,12 @@ const UI = {
       ["claude-sonnet-5", "Sonnet 5", "ประหยัด · $3/$15 ต่อ MTok"],
       ["transcript-only", "ถอดเสียงอย่างเดียว", "ไม่สรุป · ไม่เสียเงิน"],
     ],
+    kind: "ประเภทประชุม",
+    // id ต้องตรงกับชื่อไฟล์ใน prompts/profiles/ และกับ prompts.KNOWN_PROFILES
+    profiles: [
+      ["dev", "dev ล้วน", "ศัพท์เทคนิคตรงๆ"],
+      ["cross", "Business + dev", 'แยก "ทำได้" ออกจาก "จะทำ" · ขยายศัพท์ให้คนนอกทีม'],
+    ],
   },
   en: {
     title: "Meeting recorder",
@@ -104,6 +110,15 @@ const UI = {
       ["claude-sonnet-5", "Sonnet 5", "Cheaper · $3/$15 per MTok"],
       ["transcript-only", "Transcript only", "No summary · no cost"],
     ],
+    kind: "Meeting type",
+    profiles: [
+      ["dev", "dev only", "Technical terms as-is"],
+      [
+        "cross",
+        "Business + dev",
+        'Separates "can be done" from "will be done" · expands jargon',
+      ],
+    ],
   },
 };
 
@@ -124,6 +139,9 @@ const STAGE_OF = {
 // อ่านภาษาก่อน render ครั้งแรกเสมอ ไม่งั้นหน้าจอจะกระพริบสลับภาษาตอนโหลด
 let lang = localStorage.getItem("runnerLang") === "en" ? "en" : "th";
 let model = "GLM-5.2";
+// dev เป็นค่าเริ่มต้นเพราะเป็น 3 ใน 4 ครั้งของสัปดาห์ และการเผลอเลือก cross ในประชุม
+// dev ล้วนทำให้โมเดล qualify คำพูดปกติเกินจำเป็นจนสรุปอ่านแล้วอ้อมค้อม
+let profile = "dev";
 let roomDraft = "";
 let stopping = false;
 let offline = false;
@@ -365,6 +383,21 @@ function viewIdle(state) {
       </div>`
     )
     .join("");
+  // ซ่อนตอนถอดเสียงอย่างเดียว: profile เลือกแค่ว่าจะใช้กฎสรุปชุดไหน โหมดนี้ไม่มีสรุป
+  // ให้ใช้กฎกับมันเลย ถามไปก็เป็นคำถามที่คำตอบไม่เปลี่ยนอะไร (เหมือน start-meeting.bat)
+  const profileOptions =
+    model === NO_SUMMARY_MODEL
+      ? ""
+      : `<label class="field" style="margin-top:14px">${esc(x.kind)}</label>` +
+        x.profiles
+          .map(
+            ([id, title, desc]) => `
+      <div class="opt ${profile === id ? "on" : ""}" data-profile="${id}">
+        <span class="tick">✓</span>
+        <span><span class="t">${esc(title)}</span><br><span class="d">${esc(desc)}</span></span>
+      </div>`
+          )
+          .join("");
   // จุดสถานะดับไม่ปิดปุ่ม: การอัดไม่ได้พึ่ง GPU เลย ไฟล์รอในคิวได้ ถ้าบล็อกตรงนี้
   // เท่ากับทำให้พลาดประชุมด้วยเหตุผลที่รอทีหลังได้
   const workerNote =
@@ -374,6 +407,7 @@ function viewIdle(state) {
   return `${warningsHtml(state)}${workerNote}${pendingHtml()}
     <label class="field">${esc(x.mode)}</label>
     ${options}
+    ${profileOptions}
     <label class="field" style="margin-top:14px">${esc(x.room)}</label>
     <input type="text" id="room" placeholder="${esc(x.roomPh)}" value="${esc(roomDraft)}" />
     <button class="primary" id="go" style="margin-top:14px">${esc(x.open)}</button>`;
@@ -468,6 +502,10 @@ function signatureOf(state, view, progress) {
     JSON.stringify(state.devices || {}),
     state.mic_muted,
     model,
+    // ต้องอยู่ในลายเซ็นคู่กับ model: render() วาด body ใหม่เฉพาะเมื่อลายเซ็นเปลี่ยน
+    // ถ้าไม่มีค่านี้ การกดเลือกประเภทประชุมจะเปลี่ยนตัวแปรจริงแต่เครื่องหมายถูก
+    // ไม่ขยับ ผู้ใช้เห็นว่ากดไม่ติดแล้วกดซ้ำ หรือเริ่มอัดด้วยประเภทที่ไม่ได้ตั้งใจ
+    profile,
     lang,
     stopping,
     progress ? `${progress.stage}:${progress.failed}` : "",
@@ -541,9 +579,17 @@ function renderLog(state) {
 }
 
 function wire() {
-  document.querySelectorAll(".opt").forEach((o) => {
+  // ต้องเจาะจง [data-model] ไม่ใช่ .opt เฉยๆ: ตัวเลือกประเภทประชุมใช้คลาส .opt
+  // เหมือนกัน ถ้าจับด้วย .opt การกดเลือกประเภทจะตั้ง model = undefined ไปด้วย
+  document.querySelectorAll("[data-model]").forEach((o) => {
     o.onclick = () => {
       model = o.dataset.model;
+      render(lastState);
+    };
+  });
+  document.querySelectorAll("[data-profile]").forEach((o) => {
+    o.onclick = () => {
+      profile = o.dataset.profile;
       render(lastState);
     };
   });
@@ -589,7 +635,7 @@ async function openRoom() {
     const response = await fetch("/api/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, name: roomDraft }),
+      body: JSON.stringify({ model, profile, name: roomDraft }),
     });
     // 409 = มีห้องเปิดอยู่แล้ว ให้สถานะจริงชนะ ไม่ต้องเดา
     if (response.status === 201) {

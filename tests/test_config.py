@@ -1,6 +1,10 @@
+import logging
+
 import pytest
 
 from src.config import (
+    DEFAULT_CHUNK_MAX_TOKENS,
+    DEFAULT_CHUNK_OVERLAP_TOKENS,
     DEFAULT_DIARIZATION_MODEL,
     DEFAULT_SPEAKER_MATCH_HIGH,
     DEFAULT_SPEAKER_MATCH_LOW,
@@ -65,6 +69,167 @@ def test_load_config_reads_claude_model_override(tmp_path, monkeypatch):
     config = load_config(base_dir=tmp_path)
 
     assert config.claude_model == "claude-sonnet-5"
+
+
+def test_meeting_profile_defaults_to_dev(tmp_path, monkeypatch):
+    """dev ล้วนเป็น 3 ใน 4 ครั้งของสัปดาห์ ค่าเริ่มต้นจึงต้องเป็นตัวนั้น"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("MEETING_PROFILE", raising=False)
+
+    assert load_config(base_dir=tmp_path).meeting_profile == "dev"
+
+
+def test_load_config_reads_the_meeting_profile_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MEETING_PROFILE", "cross")
+
+    assert load_config(base_dir=tmp_path).meeting_profile == "cross"
+
+
+def test_an_unknown_meeting_profile_warns_and_falls_back_to_dev(
+    tmp_path, monkeypatch, caplog
+):
+    """พิมพ์ผิดใน .env ต้องไม่ทำให้เปิดโปรแกรมไม่ได้ -- แบบเดียวกับ UI_PORT
+    และต้องรู้ตัวตอนโหลด config ไม่ใช่ไปเจอตอนสรุปเสร็จแล้วสงสัยว่าทำไมสรุปหน้าตาแปลก"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MEETING_PROFILE", "crss")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.meeting_profile == "dev"
+    assert "crss" in caplog.text
+
+
+def test_an_empty_meeting_profile_falls_back_to_dev(tmp_path, monkeypatch):
+    """`MEETING_PROFILE=` ที่ลืมเติมค่า -- แบบเดียวกับ DIARIZATION_MODEL"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MEETING_PROFILE", "   ")
+
+    assert load_config(base_dir=tmp_path).meeting_profile == "dev"
+
+
+def test_carryover_is_enabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("CARRYOVER_ENABLED", raising=False)
+
+    assert load_config(base_dir=tmp_path).carryover_enabled is True
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "off"])
+def test_carryover_can_be_switched_off(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CARRYOVER_ENABLED", value)
+
+    assert load_config(base_dir=tmp_path).carryover_enabled is False
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on"])
+def test_carryover_can_be_switched_on_explicitly(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CARRYOVER_ENABLED", value)
+
+    assert load_config(base_dir=tmp_path).carryover_enabled is True
+
+
+def test_an_unreadable_carryover_value_warns_and_keeps_the_default(
+    tmp_path, monkeypatch, caplog
+):
+    """คนที่พิมพ์ CARRYOVER_ENABLED=flase กำลังพยายาม "ปิด" อยู่ ถ้าเงียบแล้วเปิดต่อ
+    เขาจะไม่รู้ว่ามันยังทำงาน -- ซึ่งเป็นฝั่งที่เสียหายกว่า เพราะเหตุผลที่คนอยากปิดคือ
+    สรุปครั้งก่อนเพี้ยนแล้วไม่อยากให้ส่งต่อ"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CARRYOVER_ENABLED", "flase")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.carryover_enabled is True
+    assert "flase" in caplog.text
+
+
+def test_chunk_overlap_defaults_to_ten_percent_of_a_chunk(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("CHUNK_OVERLAP_TOKENS", raising=False)
+
+    config = load_config(base_dir=tmp_path)
+
+    assert config.chunk_overlap_tokens == DEFAULT_CHUNK_OVERLAP_TOKENS
+    assert config.chunk_overlap_tokens * 10 == DEFAULT_CHUNK_MAX_TOKENS
+
+
+def test_chunk_overlap_can_be_tuned_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", "2250")
+
+    assert load_config(base_dir=tmp_path).chunk_overlap_tokens == 2250
+
+
+def test_zero_overlap_is_allowed(tmp_path, monkeypatch):
+    """0 = ไม่ให้ chunk คาบเกี่ยวกันเลย เป็นค่าที่ตั้งใจตั้งได้ ไม่ใช่ค่าผิด"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", "0")
+
+    assert load_config(base_dir=tmp_path).chunk_overlap_tokens == 0
+
+
+@pytest.mark.parametrize("value", ["ไม่ใช่เลข", "-100", "15000", "99999"])
+def test_an_unusable_overlap_warns_and_falls_back(tmp_path, monkeypatch, caplog, value):
+    """overlap ที่ >= ขนาด chunk ทำให้ split_into_chunks raise ValueError ซึ่งจะทำให้
+    ประชุมนั้นตกไป failed/ ทั้งที่ถอดเสียงด้วย GPU เสร็จไปแล้ว -- ต้องดักที่นี่
+    ไม่ใช่ปล่อยให้ไประเบิดตอนสรุป (แบบเดียวกับ UI_PORT และ SPEAKER_MATCH_*)"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", value)
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.chunk_overlap_tokens == DEFAULT_CHUNK_OVERLAP_TOKENS
+    assert value in caplog.text
+
+
+def test_a_very_large_overlap_is_honoured_but_warned_about(tmp_path, monkeypatch, caplog):
+    """วัดแล้ว: overlap 14999 (ต่ำกว่าเพดานแค่ 1) ทำให้ transcript เดียวกันแตกจาก
+    13 chunk เป็น 277 chunk = ค่า API 21 เท่าแบบเงียบๆ ค่านี้ "ถูกต้อง" ตามกฎ
+    overlap < max จึงไม่ปฏิเสธ แต่ต้องเตือน ไม่ใช่ปล่อยให้บิลมาเซอร์ไพรส์"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", "12000")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.chunk_overlap_tokens == 12000, "ต้องเคารพค่าที่ผู้ใช้ตั้ง"
+    assert "12000" in caplog.text
+
+
+def test_a_normal_overlap_produces_no_warning(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("CHUNK_OVERLAP_TOKENS", "3000")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.chunk_overlap_tokens == 3000
+    assert "CHUNK_OVERLAP_TOKENS" not in caplog.text
+
+
+def test_batched_whisper_is_off_by_default(tmp_path, monkeypatch):
+    """วัดกับเสียงประชุมจริง (4:41 นาที, 2026-07-30): BatchedInferencePipeline ทำให้
+    faster-whisper วนซ้ำคำเดิม -- โทเคนที่ซ้ำมากสุดกินพื้นที่ 31.6% ของ transcript
+    ("ทํา" 24 ครั้ง, "ปลอดภัณฑ์" 7 ครั้ง) และได้ 76 คำ
+    แบบ sequential ได้ 96 คำ (+26%) และโทเคนซ้ำเหลือ 3.1% แลกกับ 61s แทน 15s
+    คุณภาพ transcript สำคัญกว่า 46 วินาทีในงานที่รันเป็น background"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("WHISPER_BATCHED", raising=False)
+
+    assert load_config(base_dir=tmp_path).whisper_batched is False
+
+
+def test_batched_whisper_can_be_turned_back_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_BATCHED", "true")
+
+    assert load_config(base_dir=tmp_path).whisper_batched is True
 
 
 def test_load_config_reads_whisper_model_override(tmp_path, monkeypatch):
