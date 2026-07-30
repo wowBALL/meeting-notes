@@ -45,11 +45,36 @@ def _is_map(system: str) -> bool:
 
 
 def _is_reduce(system: str) -> bool:
-    return "สรุปย่อยของการประชุมเดียวกัน" in system
+    return "รวมทั้งหมดเป็นสรุปฉบับเดียว" in system
 
 
 def _is_single(system: str) -> bool:
-    return "อ่าน transcript ที่ให้มาแล้วสรุป" in system
+    """นิยามด้วยการตัดออก ไม่ใช่ด้วยวลีของตัวเอง -- ถ้อยคำใน single.md เปลี่ยนได้
+    ตอนจูน แต่ "ไม่ใช่ map และไม่ใช่ reduce" เป็นจริงตลอด
+    (test_the_stage_markers_stay_mutually_exclusive ล็อกสมบัติข้อนี้ไว้)"""
+    return not _is_map(system) and not _is_reduce(system)
+
+
+def test_the_stage_markers_stay_mutually_exclusive():
+    """ตัวแยกขั้นตอนด้านบนคือฐานของเทสต์อีกสิบกว่าตัวในไฟล์นี้ ถ้ามันแยกผิด
+    fake client จะตอบผิดสาขาแล้วเทสต์พวกนั้นล้มแบบชี้สาเหตุไม่ได้
+    ตรวจทั้ง prompt จากไฟล์จริงและ prompt สำรองที่ฝังในโค้ด"""
+    from src.prompts import FALLBACKS, render
+
+    for name in ("map", "reduce", "single"):
+        for source, system in (
+            ("file", render(name)),
+            ("fallback", FALLBACKS[name]),
+        ):
+            flags = {
+                "map": _is_map(system),
+                "reduce": _is_reduce(system),
+                "single": _is_single(system),
+            }
+            matched = [stage for stage, hit in flags.items() if hit]
+            assert matched == [name], (
+                f"{name}.md ({source}) ถูกแยกเป็น {matched} ควรเป็น ['{name}']"
+            )
 
 
 def _response(text: str, stop_reason: str = "end_turn"):
@@ -187,8 +212,8 @@ def test_short_transcript_uses_given_model_and_original_prompt():
     assert "transcript" in kwargs["messages"][0]["content"]
     # prompt ย้ายไปอยู่ prompts/single.md แล้ว ไม่ใช่ค่าคงที่ในโค้ด -- ค่าคงที่เหลือ
     # ไว้เป็นตัวสำรองเมื่อไฟล์หายเท่านั้น จึงเทียบว่าเนื้อหาหลักยังอยู่ ไม่เทียบเท่ากันเป๊ะ
-    assert "## ประเด็นสำคัญ" in kwargs["system"]
-    assert "## Action Items" in kwargs["system"]
+    assert "## ตกลงแล้ว" in kwargs["system"]
+    assert "## Action items" in kwargs["system"]
     assert kwargs["max_tokens"] == CLAUDE_MAP_MAX_TOKENS
 
 
