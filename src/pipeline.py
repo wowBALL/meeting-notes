@@ -80,10 +80,15 @@ def _match_known_speakers(
     -- watcher ถือโมเดลค้างในหน่วยความจำข้าม .env ที่ผู้ใช้แก้ระหว่างนั้นได้ ป้ายที่ผิดแปลว่า
     เทียบข้ามพื้นที่เวกเตอร์โดยไม่มีอะไรเตือน (ดู speakers.match_known)
 
-    ไม่มีทางเรียก match_known ด้วย embedding_model ว่างเปล่า: voiceprints ที่ไม่ว่างเป็น
-    หลักฐานว่า extract_voiceprints เพิ่งใช้ embedder ตัวจริงไปคำนวณมันสำเร็จ (ดูท่อหลักใน
-    process_file) ซึ่งแปลว่ามี embedder อยู่แน่ ๆ ณ จุดนี้ -- เช็ค `if not voiceprints`
-    ด้านล่างจึงกันพารามิเตอร์นี้ว่างเปล่าไปในตัวโดยไม่ต้องเช็คซ้ำ
+    embedding_model ว่างเปล่าพร้อมกับ voiceprints ไม่ว่างเป็นไปไม่ได้ -- แต่ไม่ใช่เพราะ
+    embedder ตัวจริงมีอยู่แล้วรับประกัน .checkpoint เสมอ (ไม่มีอะไรบังคับแบบนั้น
+    embedder เป็นแค่ Any ที่สนองสัญญา embed() เท่านั้น) กรณีนี้เคยหลุดผ่านมาได้จริง: ตอน
+    checkpoint ว่างเปล่า _record_pending_speakers เขียน embedding_model="" ลงคิวรอตั้งชื่อ
+    ซึ่ง speakers.add_sample ปฏิเสธถาวรทีหลัง (Minor 1 รีวิวรอบสอง) -- ที่ตอนนี้เป็นไปไม่ได้
+    จริง เพราะจุดที่คำนวณ voiceprints (ท่อหลักใน process_file) เช็ค checkpoint ว่างเปล่า
+    แล้วล้าง voiceprints ทิ้งพร้อมกันเป็น voiceprint_failed โดยตั้งใจ ไม่ใช่เพราะว่างเปล่า
+    ไม่มีทางเกิดขึ้นได้ตั้งแต่ต้น เช็ค `if not voiceprints` ด้านล่างจึงยังกันพารามิเตอร์นี้
+    ว่างเปล่าไปในตัวโดยไม่ต้องเช็คซ้ำ แต่กันได้เพราะมีการล้างไว้ต้นทาง ไม่ใช่กันได้ฟรี ๆ
     """
     if not voiceprints:
         return {}
@@ -257,13 +262,39 @@ def process_file(
                     # ไม่ได้ถือโมเดลไว้เอง (เทสต์/สคริปต์แยก)
                     embedder = load_embedder(config.hf_token, config.embedding_model)
                 voiceprints = extract_voiceprints(wav_path, speaker_turns, embedder)
-                # getattr, not embedder.checkpoint: process_file's own docstring only
-                # requires embedder to satisfy extract_voiceprints's `embed` contract, a
-                # bare callable of (waveform, intervals) -> list, not to carry
-                # .checkpoint. A caller passing such a callable must not crash here --
-                # this whole block exists so a voiceprint failure degrades to
-                # "ผู้พูด N" instead of throwing away a completed transcription pass.
+                # getattr, not embedder.checkpoint: docstring ของ process_file เองผูก
+                # พารามิเตอร์ embedder ไว้แค่สัญญา embed(waveform, intervals) -> list
+                # ของ extract_voiceprints เท่านั้น ไม่ได้บังคับว่าต้องมี .checkpoint
+                # ผู้เรียกที่ทำตามสัญญานั้นแต่ไม่มี attribute นี้ต้องไม่พังตรงนี้ -- ทั้ง
+                # บล็อกนี้มีไว้เพื่อให้ voiceprint ที่ล้มเหลวลดขั้นเหลือ "ผู้พูด N" แทนที่จะ
+                # ทิ้งรอบถอดเสียงที่เสร็จไปแล้วทั้งหมด
                 embedding_model = getattr(embedder, "checkpoint", "")
+                if not embedding_model or not embedding_model.strip():
+                    # Minor 1 ของรีวิวรอบสอง: embedder ที่มี .checkpoint อยู่จริงแต่เป็น
+                    # ค่าว่างเปล่า (หรือมีแต่ช่องว่างล้วน) ไม่ raise ตรง getattr ข้างบน --
+                    # voiceprints ที่คำนวณสำเร็จแล้วยังไม่ว่างเปล่า ถ้าปล่อยผ่านไปแบบนั้น
+                    # embedding_model="" จะหลุดไปถึง match_known ซึ่ง validate พารามิเตอร์
+                    # นี้แล้ว raise ValueError -- _match_known_speakers กลืน exception นั้น
+                    # เงียบ ๆ ไป (ไม่มีชื่อโผล่ในทรานสคริปต์ ปลอดภัยแค่ชั้นนั้น) แต่
+                    # embedding_model ว่างเปล่ายังเดินทางต่อไปถึง _record_pending_speakers
+                    # และถูกเขียนลง speakers/pending/<meeting>.json ค้างไว้ถาวร เพราะ
+                    # speakers.add_sample ปฏิเสธ embedding_model ว่างเปล่าเสมอ คนที่มา
+                    # กดยืนยันชื่อทีหลังจะเจอ error ที่แก้ไม่ได้เลยไม่ว่าจะลองกี่ครั้ง --
+                    # ล้าง voiceprints ทิ้งตรงนี้แทน ให้เดินเข้าท่อ "voiceprint ล้มเหลว"
+                    # เส้นทางเดียวกับข้างล่าง (except Exception) ไม่สร้างท่อล้มเหลวใหม่
+                    logger.warning(
+                        "embedder คืน checkpoint ว่างเปล่า ถือว่า voiceprint ล้มเหลว "
+                        "ไปต่อโดยไม่จำเสียง"
+                    )
+                    activity.append(
+                        config.base_dir,
+                        job,
+                        "voiceprint_failed",
+                        "warn",
+                        {"error": "embedder คืน checkpoint ว่างเปล่า"},
+                    )
+                    voiceprints = {}
+                    embedding_model = ""
             except Exception as e:
                 logger.warning("สร้าง voiceprint ไม่สำเร็จ ไปต่อโดยไม่จำเสียง: %s", e)
                 activity.append(

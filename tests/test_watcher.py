@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from src import enroll
 from src.config import Config
-from src.watcher import is_file_stable, scan_inbox, watch_loop
+from src.watcher import is_file_stable, process_enroll_requests, scan_inbox, watch_loop
 
 
 def make_config(tmp_path) -> Config:
@@ -460,3 +460,48 @@ def test_the_inbox_is_processed_before_any_enroll_work(tmp_path):
 
     # ลำดับนี้ load-bearing: การประชุมที่อัดซ้ำไม่ได้ต้องได้ GPU ก่อนงานที่ทำใหม่ได้
     assert order == ["inbox", "enroll"]
+
+
+def test_process_enroll_requests_does_not_load_the_fallback_embedder_when_the_queue_is_empty(
+    tmp_path,
+):
+    """Minor 2 ของรีวิวรอบสอง: การแก้รอบก่อนย้าย load_embedder() สำรองให้รันเฉพาะตอนมี
+    ใบสั่งงานค้างจริงเท่านั้น (ดูคอมเมนต์เรื่อง hf_token/EMBEDDING_MODEL ที่ผิดยิง
+    traceback ทุก poll ใน src/watcher.py) แต่ยังไม่มีเทสต์ตรึงพฤติกรรมนี้ไว้เลย -- ถ้ามีคน
+    ย้ายการเรียกกลับไปไว้ก่อนเช็คคิวว่างในอนาคต ชุดเทสต์จะยังเขียวอยู่เหมือนเดิม
+    """
+    config = make_config(tmp_path)
+
+    with patch("src.watcher.load_embedder") as mock_load_embedder:
+        process_enroll_requests(config)
+
+    mock_load_embedder.assert_not_called()
+
+
+def test_process_enroll_requests_loads_the_fallback_embedder_once_for_several_pending_files(
+    tmp_path,
+):
+    """Minor 2 ของรีวิวรอบสอง: อีกครึ่งของการแก้รอบก่อน -- load_embedder() สำรองต้องโหลด
+    ครั้งเดียวก่อนวนลูปไฟล์ในคิว ไม่ใช่โหลดใหม่ทุกไฟล์ (ดูเหตุผลเต็มใน docstring ของ
+    process_enroll_requests: คิวมีได้หลายไฟล์ต่อรอบ poll เดียว) ไม่มีเทสต์ตรึงไว้เลย --
+    ถ้ามีคนย้ายการเรียกเข้าไปอยู่ใน for loop ในอนาคต ชุดเทสต์จะยังเขียวอยู่เหมือนเดิม
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    make_enroll_audio(tmp_path, "สมชาย.ogg")
+    make_enroll_audio(tmp_path, "สมหญิง.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมหญิง.ogg")
+
+    with (
+        patch(
+            "src.watcher.load_embedder", return_value=_FakeEmbedder()
+        ) as mock_load_embedder,
+        patch(
+            "src.watcher.enroll.analyze",
+            return_value={"status": "ok", "embedding": [0.5]},
+        ),
+    ):
+        process_enroll_requests(config)
+
+    assert mock_load_embedder.call_count == 1

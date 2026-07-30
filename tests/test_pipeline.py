@@ -890,6 +890,60 @@ def test_process_file_completes_when_embedder_has_no_checkpoint_attribute(tmp_pa
     assert transcript  # completed instead of raising AttributeError on .checkpoint
 
 
+def test_process_file_treats_a_blank_checkpoint_as_a_voiceprint_failure(tmp_path):
+    """embedder ที่มี .checkpoint แต่เป็นค่าว่างเปล่าต้องถูกปฏิบัติเหมือน voiceprint ล้มเหลว
+
+    Minor 1 ของรีวิวรอบสอง: getattr(embedder, "checkpoint", "") กันแค่กรณีไม่มี
+    attribute เลย (เทสต์ข้างบน) ไม่กันกรณีที่ attribute มีอยู่จริงแต่ว่างเปล่า --
+    embedding_model="" หลุดผ่าน _match_known_speakers ไปได้เพราะ voiceprints ที่ได้มา
+    ไม่ว่าง ด่าน `if not voiceprints` จึงไม่จับ แล้ว match_known validate ค่าว่างแล้ว
+    raise ValueError ซึ่งถูก try ของ _match_known_speakers กลืนเงียบ ๆ -- แต่
+    embedding_model ว่างเปล่ายังหลุดรอดต่อไปถึง _record_pending_speakers และถูกเขียน
+    ลง speakers/pending/<meeting>.json ทำให้คนที่มายืนยันชื่อทีหลังเจอ
+    speakers.add_sample raise ValueError ถาวร แก้ไม่ได้เลย
+    """
+    from src.pending import load_all_pending
+
+    class _BlankCheckpointEmbedder:
+        checkpoint = ""
+
+        def __call__(self, waveform, intervals):
+            return [[1.0, 0.0] for _ in intervals]
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 30.0, "text": "สวัสดีครับ ผมขอเริ่มเลยนะครับ"}
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}]
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(
+            audio_path, config, embedder=_BlankCheckpointEmbedder()
+        )
+
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "ผู้พูด 1" in transcript  # ลดขั้นเป็นป้ายทั่วไป ไม่มีชื่อที่ยืนยันแล้ว
+    # ไม่มีไฟล์คิวรอตั้งชื่อสำหรับการประชุมนี้เลย: voiceprints ที่มีต้องถูกล้างทิ้งไปพร้อม
+    # กับ embedding_model ว่างเปล่า ไม่งั้น pending.json จะติด embedding_model="" ซึ่ง
+    # speakers.add_sample ปฏิเสธถาวร
+    assert load_all_pending(tmp_path) == []
+
+
 def test_process_file_uses_the_model_from_the_job_file(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
