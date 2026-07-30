@@ -153,6 +153,11 @@ def average_unit_vectors(vectors: list) -> list[float] | None:
     ตัดเวกเตอร์ที่ยาวไม่เท่าเสียงส่วนใหญ่ทิ้ง: ความยาวต่างกันแปลว่ามาจากคนละโมเดล การ
     เฉลี่ยรวมกันจะได้ตัวเลขที่ไม่ได้อยู่ในพื้นที่ไหนเลย (แบบเดียวกับที่ cosine_similarity
     คืน 0.0 เมื่อความยาวไม่ตรง แทนที่จะ raise)
+
+    ความยาวที่เลือกคือความยาวที่พบมากที่สุด และเมื่อเสมอกันจะใช้ตัวที่เวกเตอร์แรกของมัน
+    โผล่ก่อนในอินพุต -- "เสียงข้างมาก" ไม่ได้มีอยู่จริงเสมอไปเมื่อเสมอกัน (เช่น 3 ท่อนจาก
+    embedding รุ่นเก่ากับ 3 ท่อนจากรุ่นใหม่พอดีหลังสลับ EMBEDDING_MODEL) กติกาข้อนี้จึงต้อง
+    ระบุไว้ตรง ๆ ไม่ใช่ปล่อยให้เป็นผลพลอยได้ของ hash
     """
     usable = [
         [float(value) for value in vector]
@@ -161,10 +166,20 @@ def average_unit_vectors(vectors: list) -> list[float] | None:
     ]
     if not usable:
         return None
-    dimension = max(
-        {len(vector) for vector in usable},
-        key=lambda size: sum(1 for vector in usable if len(vector) == size),
-    )
+
+    # เลือกความยาวที่พบมากที่สุด และเมื่อเสมอกันให้ใช้ตัวที่โผล่ก่อนในอินพุต -- เดิมโค้ด
+    # ตรงนี้เป็น max() บน set ของความยาว ซึ่งตอนเสมอกันคืนตัวที่ set iterate เจอก่อน
+    # ผลคือ 256 กับ 512 (ทั้งคู่ ≡ 0 mod 8 จึงชนกันใน hash table) สลับผู้ชนะตามลำดับของ
+    # อินพุต -- voiceprint ของคนคนหนึ่งจะมีมิติต่างกันแล้วแต่ว่าเวกเตอร์ตัวไหนมาก่อน
+    # ซึ่งเป็นอันตรายตัวเดียวกับที่ select_intervals ใส่ start ในกุญแจการเรียงเพื่อกัน
+    counts: dict[int, int] = {}
+    first_seen: dict[int, int] = {}
+    for index, vector in enumerate(usable):
+        size = len(vector)
+        counts[size] = counts.get(size, 0) + 1
+        first_seen.setdefault(size, index)
+    dimension = min(counts, key=lambda size: (-counts[size], first_seen[size]))
+
     usable = [vector for vector in usable if len(vector) == dimension]
 
     total = [0.0] * dimension

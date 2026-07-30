@@ -198,3 +198,27 @@ def test_average_unit_vectors_returns_none_when_directions_cancel_out():
 def test_average_unit_vectors_ignores_vectors_of_a_different_length():
     # ความยาวไม่เท่ากันแปลว่ามาจากคนละโมเดล เอามาเฉลี่ยรวมกันไม่ได้เลย
     assert average_unit_vectors([[0.0, 3.0], [1.0, 2.0, 3.0]]) == pytest.approx([0.0, 1.0])
+
+
+def test_average_unit_vectors_breaks_a_length_tie_by_first_appearance_not_hash_order():
+    # 3 ท่อนจาก embedding รุ่นเก่า (256 มิติ) เจอ 3 ท่อนจากรุ่นใหม่ (512 มิติ) พอดี --
+    # เกิดได้จริงหลังสลับ EMBEDDING_MODEL แล้วทะเบียนมีทั้งสองรุ่นปนกันชั่วคราว "เสียงข้าง
+    # มาก" ไม่มีอยู่จริงตอนเสมอกันแบบนี้ กติกาที่ประกาศไว้ (เอกสารของฟังก์ชันนี้) คือใช้ตัว
+    # ที่เวกเตอร์แรกของมันโผล่ก่อนในอินพุต
+    #
+    # โค้ดเดิมเลือกด้วย max() บน set ของความยาว ซึ่งพอเสมอกันจะคืนตัวที่ set เจอก่อนตามผัง
+    # hash table ไม่ใช่ตามลำดับอินพุต -- 256 กับ 512 ที่ไม่มีท่อนแปลกปนเลยบังเอิญให้ผลตรง
+    # กับลำดับอินพุตพอดี (ชนกันใน hash table แบบที่ insertion order ยังกำหนดผลได้) จึงต้อง
+    # ผสมเวกเตอร์ความยาวอื่นที่ใช้ได้ (แต่ไม่ใช่ผู้ชนะ) ปนเข้าไปด้วยเพื่อบังคับให้ hash table
+    # ขยาย/จัดเรียงใหม่จนลำดับ iterate ไม่ตรงกับลำดับอินพุตอีกต่อไป -- ค่าความยาว 1, 6, 8
+    # นี้ทดสอบแล้วว่าทำให้โค้ดเดิมเลือก "ผิด" กติกาของตัวเอง (ได้ 512 ตอนที่ 256 มาก่อน และ
+    # ได้ 256 ตอนที่ 512 มาก่อน คือสลับกันหมด) พิสูจน์ว่าพึ่ง set iteration order ไม่ได้เลย
+    old_model = [[1.0] * 256] * 3
+    new_model = [[1.0] * 512] * 3
+    other_stray_lengths = [[1.0] * 1, [1.0] * 6, [1.0] * 8]
+
+    old_first = other_stray_lengths + old_model + new_model
+    new_first = other_stray_lengths + new_model + old_model
+
+    assert len(average_unit_vectors(old_first)) == 256
+    assert len(average_unit_vectors(new_first)) == 512
