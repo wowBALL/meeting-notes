@@ -139,6 +139,27 @@ def _public_speaker(speaker: dict) -> dict:
     }
 
 
+def _public_pending_meeting(meeting: dict) -> dict:
+    """การประชุมหนึ่งรายการในคิว ในรูปที่ส่งออกหน้าเว็บได้ (finding ที่สามของรีวิวรอบนี้)
+
+    allowlist ไม่ใช่ {**meeting, ...}: จุดที่แก้ไปแล้วสองจุด (_public_speaker ข้างบน กับ
+    list_entries ใน enroll.py) เป็น allowlist แล้ว แต่ list_pending_speakers ยังสเปรดคีย์
+    ระดับการประชุมทุกตัวตรง ๆ ผ่าน {**meeting, "speakers": ...} อยู่ดี -- ชั้นนี้อยู่เหนือ
+    _public_speaker หนึ่งชั้น (มันกรอง speaker แต่ละคนแล้ว แต่ dict การประชุมที่ห่อ list
+    นั้นไว้ไม่ถูกกรองเลย) _read_pending_file คืน JSON ดิบของไฟล์คิวทั้งก้อนไม่กรองคีย์อะไร
+    เลย และไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้ -- ใครใส่ "embedding"/"voiceprint" ไว้
+    ระดับบนสุดของ record (นอก speakers[]) จะหลุดออก endpoint ไปเงียบ ๆ
+
+    รายการข้างล่างคือทุกคีย์ระดับการประชุมที่ web/app.js อ่านจริง (ดู pendingHtml/speakerAt
+    ใน app.js: meeting.meeting_dir, meeting.speakers) คีย์อื่น (audio_file, created) เป็น
+    ของฝั่งเซิร์ฟเวอร์ล้วน ไม่มีเหตุผลต้องออกไปเลย
+    """
+    return {
+        "meeting_dir": meeting.get("meeting_dir"),
+        "speakers": [_public_speaker(s) for s in meeting.get("speakers", [])],
+    }
+
+
 def _speaker_summary(speaker: dict) -> dict:
     """คนหนึ่งคนในทะเบียน ในรูปสรุปที่ /api/speakers และ /api/enroll ใช้ร่วมกัน (finding C
     ของรีวิวรอบสุดท้าย -- คนละรอบกับ finding 1-6 ที่แก้ไปก่อนหน้านี้)
@@ -286,7 +307,7 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
     @app.get("/api/speakers/pending")
     def list_pending_speakers():
         meetings = [
-            {**meeting, "speakers": [_public_speaker(s) for s in meeting["speakers"]]}
+            _public_pending_meeting(meeting)
             for meeting in pending.load_all_pending(config.base_dir)
         ]
         return jsonify({"meetings": meetings})

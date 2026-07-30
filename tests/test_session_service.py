@@ -439,7 +439,10 @@ def test_pending_speakers_endpoint_lists_the_queue(client, config):
 
     assert len(body["meetings"]) == 1
     assert body["meetings"][0]["meeting_dir"] == meeting
-    assert body["meetings"][0]["audio_file"] == "standup.ogg"
+    # audio_file ไม่อยู่ใน allowlist ระดับการประชุม (_public_pending_meeting) อีกต่อไป --
+    # web/app.js ไม่เคยอ่าน meeting.audio_file เลย (ดู pendingHtml/speakerAt ใน app.js ซึ่ง
+    # ใช้แค่ meeting.meeting_dir กับ meeting.speakers) จึงไม่มีเหตุผลให้มันหลุดออก endpoint
+    assert "audio_file" not in body["meetings"][0]
     labels = [entry["label"] for entry in body["meetings"][0]["speakers"]]
     assert labels == ["ผู้พูด 1", "ผู้พูด 2"]
 
@@ -456,12 +459,26 @@ def test_pending_speakers_endpoint_never_ships_the_voice_vectors(client, config)
     path = pending_dir(config.base_dir) / f"{meeting}.json"
     record = json.loads(path.read_text(encoding="utf-8"))
     record["speakers"][0]["raw_embedding"] = [1.0, 0.0]
+    # finding ที่สามของรีวิวรอบนี้: ชั้นบนสุดของ record (นอก speakers[]) รั่วได้เหมือนกัน --
+    # list_pending_speakers เดิมประกอบด้วย {**meeting, "speakers": ...} ซึ่งสเปรดคีย์ระดับ
+    # การประชุมทุกตัวตรง ๆ โดยไม่กรองเลย (ต่างจาก _public_speaker ที่กรอง speaker แต่ละคน
+    # แล้ว) วางทั้งคีย์ที่มีคำว่า "embedding" (regex ของ _assert_no_embedding_vector_leaks
+    # จับได้) และคีย์ที่ไม่มีคำนั้นเลย เช่น "voiceprint" (regex จับไม่ได้ -- ต้องเช็คตรง ๆ
+    # ว่าหลุดออกมาไหม เพื่อพิสูจน์ว่า allowlist เป็นตัวกันจริง ไม่ใช่แค่ regex ของการ์ดข้างล่าง)
+    record["raw_embedding"] = [1.0, 0.0]
+    record["voiceprint"] = [0.0, 1.0]
     path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
 
     body = client.get("/api/speakers/pending").get_json()
 
-    for speaker in body["meetings"][0]["speakers"]:
+    meeting_body = body["meetings"][0]
+    for speaker in meeting_body["speakers"]:
         assert "embedding" not in speaker
+    # allowlist ระดับการประชุมต้องคุมคีย์ที่ออกไปทั้งหมด ไม่ใช่แค่ตัดคีย์ต้องสงสัยทีละชื่อ --
+    # เช็คว่า "voiceprint" หายไปตรง ๆ เพราะ regex ของ _assert_no_embedding_vector_leaks
+    # ด้านล่างจับไม่ได้ (ไม่มีคำว่า embedding อยู่ในชื่อคีย์เลย)
+    assert "voiceprint" not in meeting_body
+    assert "raw_embedding" not in meeting_body
     # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้ (เช่น raw_embedding
     # ข้างบน) -- จับที่รูปทรงของค่า (array ต่อท้ายคีย์ที่มีคำว่า embedding) ไม่ใช่คีย์ตายตัว
     # เดียว เพราะทุกคนในคิววันนี้มีคีย์ embedding_model ติดมาด้วยโดยตั้งใจ (ป้ายพื้นที่เวกเตอร์
