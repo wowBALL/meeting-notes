@@ -295,7 +295,9 @@ def test_match_known_ignores_a_poisoned_sample_and_still_finds_the_person():
     # ที่มีตัวอย่างพิษปนอยู่หนึ่งตัวต้องยังใช้งานได้ ไม่ใช่ตายทั้งโปรไฟล์
     registry = [_person("สมหญิง็ม", [[float("inf"), 0.0], [1.0, 0.0]])]
 
-    matches = match_known({"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, model=MODEL)
+    matches = match_known(
+        {"SPEAKER_00": [1.0, 0.0]}, registry, high=0.7, low=0.5, embedding_model=EMBED
+    )
 
     assert matches["SPEAKER_00"].name == "สมหญิง็ม"
     assert matches["SPEAKER_00"].score == pytest.approx(1.0)
