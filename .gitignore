@@ -37,3 +37,10 @@ enroll-mock.html
 # config ของเครื่องมือฝั่ง dev ไม่ใช่ของโปรเจกต์ -- เคยหลุดเข้า commit มาแล้วครั้งหนึ่ง
 # เพราะ git add -A ในสคริปต์เขียนประวัติ
 .claude/
+
+# ของที่ tools/calibrate_voiceprints.py กินและคาย -- ไฟล์เฉลยจับป้าย SPEAKER_xx เข้ากับ
+# ชื่อคนจริงตรง ๆ (อ่อนไหวแบบเดียวกับ teams.md) ส่วนอีกสองโฟลเดอร์คือเสียงพูดดิบของคน
+# จริงกับผลที่ผูกกับมัน อ่อนไหวแบบเดียวกับ enroll/ -- ดูรูปแบบไฟล์ที่ tools/README.md
+speakers-truth.json
+.calib-cache/
+.calib-clips/
