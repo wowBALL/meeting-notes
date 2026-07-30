@@ -80,15 +80,21 @@ def _match_known_speakers(
     -- watcher ถือโมเดลค้างในหน่วยความจำข้าม .env ที่ผู้ใช้แก้ระหว่างนั้นได้ ป้ายที่ผิดแปลว่า
     เทียบข้ามพื้นที่เวกเตอร์โดยไม่มีอะไรเตือน (ดู speakers.match_known)
 
-    embedding_model ว่างเปล่าพร้อมกับ voiceprints ไม่ว่างเป็นไปไม่ได้ -- แต่ไม่ใช่เพราะ
+    embedding_model ว่างเปล่าพร้อมกับ voiceprints ไม่ว่างเป็นไปไม่ได้ -- ไม่ใช่เพราะ
     embedder ตัวจริงมีอยู่แล้วรับประกัน .checkpoint เสมอ (ไม่มีอะไรบังคับแบบนั้น
-    embedder เป็นแค่ Any ที่สนองสัญญา embed() เท่านั้น) กรณีนี้เคยหลุดผ่านมาได้จริง: ตอน
-    checkpoint ว่างเปล่า _record_pending_speakers เขียน embedding_model="" ลงคิวรอตั้งชื่อ
-    ซึ่ง speakers.add_sample ปฏิเสธถาวรทีหลัง (Minor 1 รีวิวรอบสอง) -- ที่ตอนนี้เป็นไปไม่ได้
-    จริง เพราะจุดที่คำนวณ voiceprints (ท่อหลักใน process_file) เช็ค checkpoint ว่างเปล่า
-    แล้วล้าง voiceprints ทิ้งพร้อมกันเป็น voiceprint_failed โดยตั้งใจ ไม่ใช่เพราะว่างเปล่า
-    ไม่มีทางเกิดขึ้นได้ตั้งแต่ต้น เช็ค `if not voiceprints` ด้านล่างจึงยังกันพารามิเตอร์นี้
-    ว่างเปล่าไปในตัวโดยไม่ต้องเช็คซ้ำ แต่กันได้เพราะมีการล้างไว้ต้นทาง ไม่ใช่กันได้ฟรี ๆ
+    embedder เป็นแค่ Any ที่สนองสัญญา embed() เท่านั้น) กรณีนี้เคยหลุดผ่านมาได้จริงสองทาง:
+    ทาง checkpoint ว่างเปล่า/ไม่ใช่สตริง (_record_pending_speakers เขียน embedding_model=""
+    ลงคิวรอตั้งชื่อ ซึ่ง speakers.add_sample ปฏิเสธถาวรทีหลัง -- Minor 1 รีวิวรอบสอง) และทาง
+    except Exception ตัวนอกสุดของบล็อกที่คำนวณ voiceprints ซึ่งเดิมจับได้แค่ AttributeError
+    จาก getattr(embedder, "checkpoint", "") แต่ปล่อย exception ชนิดอื่นให้หลุดผ่านไปโดยไม่
+    ล้าง voiceprints/embedding_model เลย เช่น .checkpoint เป็น property ที่ raise
+    RuntimeError เวลาอ่าน (รีวิวรอบสี่) ทั้งสองทางตอนนี้เป็นไปไม่ได้จริง เพราะจุดที่คำนวณ
+    voiceprints (ท่อหลักใน process_file) ล้าง voiceprints ทิ้งพร้อมกับ embedding_model เป็น
+    "" ทุกครั้งที่มีอะไรผิดพลาดระหว่างคำนวณหรือตรวจสอบ checkpoint -- ทั้งกรณี checkpoint
+    ที่ใช้ไม่ได้โดยเฉพาะ (ว่างเปล่า/ไม่ใช่สตริง) และกรณี exception อื่นใดก็ตามที่หลุดออกมา
+    จาก try ทั้งก้อน ไม่ใช่เฉพาะ AttributeError เช็ค `if not voiceprints` ด้านล่างจึงยังกัน
+    พารามิเตอร์นี้ว่างเปล่าไปในตัวโดยไม่ต้องเช็คซ้ำ แต่กันได้เพราะมีการล้างไว้ต้นทางครอบ
+    ทุกเส้นทางความล้มเหลว ไม่ใช่กันได้ฟรี ๆ
     """
     if not voiceprints:
         return {}
@@ -300,6 +306,8 @@ def process_file(
                         {"error": "embedder คืน checkpoint ที่ใช้ไม่ได้"},
                     )
             except Exception as e:
+                voiceprints = {}
+                embedding_model = ""
                 logger.warning("สร้าง voiceprint ไม่สำเร็จ ไปต่อโดยไม่จำเสียง: %s", e)
                 activity.append(
                     config.base_dir, job, "voiceprint_failed", "warn", {"error": str(e)}

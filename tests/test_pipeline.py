@@ -1093,6 +1093,73 @@ def test_process_file_clears_voiceprints_before_logging_an_unusable_checkpoint(
     )
 
 
+def test_process_file_clears_state_when_reading_checkpoint_raises(tmp_path, monkeypatch):
+    """embedder.checkpoint ที่เป็น property ซึ่ง raise เวลาอ่าน (ไม่ใช่แค่ค่าผิดชนิด/ว่างเปล่า)
+    ต้องถูกปฏิบัติเหมือน voiceprint ล้มเหลวเช่นกัน -- ล้าง voiceprints/embedding_model ทิ้ง
+
+    รีวิวรอบสี่: `getattr(embedder, "checkpoint", "")` ที่ pipeline.py:271 กันได้แค่
+    AttributeError เท่านั้น embedder ที่ .checkpoint เป็น property แล้ว raise ด้วย
+    exception ชนิดอื่น (เทสต์นี้ใช้ RuntimeError) หลุดผ่าน getattr ไปถึง except Exception
+    ตัวนอกสุดของบล็อกที่คำนวณ voiceprints (เดิมอยู่ที่บรรทัด ~302) ซึ่ง log
+    voiceprint_failed เหมือนทุกเทสต์ข้างบน แต่เดิม "ไม่" ล้าง voiceprints/embedding_model
+    เลย -- ผลคือ match_known ถูกเรียกด้วย embedding_model="" และ/หรือ pending.json ติด
+    embedding_model="" แบบเดียวกับ Minor 1 รีวิวรอบสอง เพียงแต่ทางเข้าคือ exception จาก
+    การอ่าน .checkpoint เอง ไม่ใช่ค่าที่อ่านได้แต่ผิดชนิด/ว่างเปล่า
+    """
+    from src.pending import load_all_pending
+
+    class _RaisingCheckpointEmbedder:
+        def __call__(self, waveform, intervals):
+            return [[1.0, 0.0] for _ in intervals]
+
+        @property
+        def checkpoint(self):
+            raise RuntimeError("checkpoint พังตอนอ่าน แบบไม่ใช่ AttributeError โดยตั้งใจ")
+
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    match_known_calls = []
+
+    def fake_match_known(embeddings, speakers, high, low, *, embedding_model):
+        match_known_calls.append(embedding_model)
+        return {}
+
+    monkeypatch.setattr("src.pipeline.match_known", fake_match_known)
+
+    with (
+        _mock_convert_to_wav(),
+        _stub_voiceprints({"SPEAKER_00": [1.0, 0.0]}),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[
+                {"start": 0.0, "end": 30.0, "text": "สวัสดีครับ ผมขอเริ่มเลยนะครับ"}
+            ],
+        ),
+        patch(
+            "src.pipeline.diarize_audio",
+            return_value=_diarization(
+                [{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}]
+            ),
+        ),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        meeting_dir = process_file(
+            audio_path, config, embedder=_RaisingCheckpointEmbedder()
+        )
+
+    transcript = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "ผู้พูด 1" in transcript  # การประชุมยังจบสมบูรณ์ ไม่ใช่ทั้งงานพัง
+    assert match_known_calls == [], (
+        "checkpoint ที่ raise ตอนอ่านต้องไม่หลุดไปถึง match_known เลย"
+    )
+    assert load_all_pending(tmp_path) == [], (
+        "checkpoint ที่ raise ตอนอ่านต้องไม่ทิ้งไฟล์คิวรอตั้งชื่อที่มี embedding_model พัง"
+    )
+
+
 def test_process_file_uses_the_model_from_the_job_file(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)
