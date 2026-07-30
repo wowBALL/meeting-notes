@@ -181,7 +181,21 @@ def match_known(
     เป็นรูปทรงที่สลับตำแหน่งกันได้เงียบ ๆ การสลับ embedding_model กับพารามิเตอร์อื่นทำให้
     ทั้งทะเบียนถูกเทียบข้ามพื้นที่โดยไม่มีอะไรพังตอนเขียนโค้ด -- ผู้เรียกที่ลืมส่งหรือส่ง
     ผิดตำแหน่งต้องพังตอนนั้น ไม่ใช่ตอนที่ชื่อผิดคนไปโผล่ใน transcript แล้ว
+
+    ต้องเป็น str ที่ไม่ว่างเปล่าหลัง strip เท่านั้น -- ผู้เรียกจริงสองราย (Task 11, 12)
+    อ่านค่านี้มาจาก payload ที่เก็บไว้ก่อนฟีเจอร์นี้ ผ่าน sample_embedding_model() ซึ่งคืน
+    None ให้ทุก sample ที่ไม่มีป้าย ถ้าปล่อยให้ None ไหลเข้ามาถึงตรงนี้ `stamp != None`
+    จะเป็นเท็จพอดีกับ sample ที่ไม่มีป้ายเช่นกัน (stamp เป็น None ด้วย) -- ทุก legacy sample
+    จะกลายเป็นจับคู่ได้หมด ซึ่งเป็นช่องโหว่เดียวกับที่ฟีเจอร์นี้ทั้งฟีเจอร์มีไว้ปิด จุดนี้เป็น
+    fail-closed component ที่ถูกออกแบบไว้ที่เดียว การเช็คจึงอยู่ตรงนี้ ไม่ใช่ให้ผู้เรียก
+    แต่ละรายเช็คเอง ค่าที่รับมาถูก strip ก่อนเทียบเช่นเดียวกับค่าที่เก็บไว้ (ผ่าน
+    sample_embedding_model) -- ไม่งั้นตัวอย่างที่ถูกต้องแต่ผู้เรียกส่งมาพร้อมช่องว่างรอบ ๆ
+    จะไม่ถูกจับคู่กับใครในทะเบียนเลยทั้งชุด
     """
+    if not isinstance(embedding_model, str) or not embedding_model.strip():
+        raise ValueError("embedding_model ต้องเป็น string ที่ไม่ว่างเปล่า")
+    wanted_model = embedding_model.strip()
+
     matches: dict[str, Match] = {}
     skipped_models: set[str] = set()
     for label, embedding in embeddings.items():
@@ -191,7 +205,7 @@ def match_known(
         for speaker in speakers:
             for sample in speaker.get("samples", []):
                 stamp = sample_embedding_model(sample)
-                if stamp != embedding_model:
+                if stamp != wanted_model:
                     skipped_models.add(stamp or "(ไม่มีป้าย)")
                     continue
                 vector = sample.get("embedding")
@@ -214,13 +228,12 @@ def match_known(
             "ข้ามตัวอย่างเสียงจาก %d พื้นที่เวกเตอร์ที่ไม่ใช่ %s (%s) -- คนที่ลงทะเบียนไว้"
             "ก่อนหน้านี้จะยังไม่ถูกจำจนกว่าจะ enroll ใหม่ (ตัวอย่างเดิมไม่หาย)",
             len(skipped_models),
-            embedding_model,
+            wanted_model,
             ", ".join(sorted(skipped_models)),
         )
     return matches
 
 
-_REQUIRED_SAMPLE_KEYS = ("embedding", "embedding_model")
 _OPTIONAL_SAMPLE_KEYS = ("embedding_seconds", "segment_count", "model")
 
 
@@ -239,7 +252,18 @@ def add_sample(
 
     `embedding_model` บังคับ: sample ที่ไม่มีป้ายจะถูก match_known ข้ามตลอดกาล การเขียนมัน
     ลงไปเงียบ ๆ คือการสร้างความจำที่ไม่มีวันถูกใช้ ซึ่งผู้ใช้จะเห็นเป็น "ลงทะเบียนแล้วแต่
-    ระบบไม่จำ" โดยไม่มีอะไรอธิบาย
+    ระบบไม่จำ" โดยไม่มีอะไรอธิบาย ตรวจผ่าน sample_embedding_model() ตัวเดียวกับที่
+    match_known ใช้อ่าน -- ไม่ใช่เช็ค truthiness ของตัวเอง เพราะ `if not sample.get(key)`
+    จับได้แค่ key หายกับ "" ส่วนค่าอย่าง "   ", 42, True, ["x"] ผ่าน truthiness สบาย ๆ
+    แต่ sample_embedding_model คืน None ให้ทุกตัว ผลคือ sample ถูกเขียนลงทะเบียนสำเร็จ
+    แต่ match_known ข้ามมันตลอดกาลอย่างเงียบ ๆ -- ตัวเขียนกับตัวอ่านต้องเห็นตรงกันว่าอะไร
+    ใช้ได้ จึงเรียกตัวอ่านตัวเดียวกันแทนที่จะมีกฎสองชุด ค่าที่เก็บเป็นค่าที่ strip แล้ว
+    ไม่ใช่ค่าดิบจาก payload
+
+    `embedding` ต้องผ่าน is_usable_embedding เช่นกัน -- เวกเตอร์ศูนย์ล้วน (cosine ไม่นิยาม)
+    หรือ dict ที่ [float(v) for v in sample["embedding"]] จะแปลงเงียบ ๆ เป็นลิสต์ของ key
+    (เช่น {"1": 2} กลายเป็น [1.0]) ต้องถูกปฏิเสธตั้งแต่ตรงนี้ ไม่ใช่กลายเป็น sample
+    ที่เก็บสำเร็จแต่ใช้เทียบไม่ได้จริง
 
     `model` (โมเดลแยกผู้พูด) ไม่บังคับและ *ไม่มีใครใช้ตัดสินใจอะไรแล้ว* -- เก็บไว้เพราะมัน
     กำหนดขอบท่อน ซึ่งกำหนดว่าเสียงช่วงไหนเข้าไปอยู่ในเวกเตอร์ เป็น provenance ที่มีค่าตอน
@@ -250,13 +274,15 @@ def add_sample(
     cleaned = clean_name(name)
     if not cleaned:
         raise ValueError("ชื่อผู้พูดว่างเปล่าหลังตัดอักขระที่ใช้ไม่ได้ออก")
-    for key in _REQUIRED_SAMPLE_KEYS:
-        if not sample.get(key):
-            raise ValueError(f"ตัวอย่างเสียงไม่มี {key}")
+    stamp = sample_embedding_model(sample)
+    if stamp is None:
+        raise ValueError("ตัวอย่างเสียงไม่มี embedding_model ที่ใช้ได้")
+    if not is_usable_embedding(sample.get("embedding")):
+        raise ValueError("ตัวอย่างเสียงไม่มี embedding ที่ใช้ได้")
 
     stored = {
         "embedding": [float(value) for value in sample["embedding"]],
-        "embedding_model": sample["embedding_model"],
+        "embedding_model": stamp,
         "source": source,
         "added": (today or date.today()).isoformat(),
     }

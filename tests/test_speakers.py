@@ -522,6 +522,34 @@ def test_match_known_requires_the_embedding_model_by_keyword():
         match_known({}, [], 0.6, 0.4, EMBED)
 
 
+def test_match_known_rejects_embedding_model_none():
+    # None ทำให้ stamp is None ของ sample ที่ไม่มีป้ายผ่านเงื่อนไข `!=` ไปเทียบได้ --
+    # เปิดช่องโหว่เดิมที่ฟีเจอร์นี้ปิดกลับมา ต้องพังตรงนี้ ไม่ใช่คืน match ที่ไม่มีความหมาย
+    registry = [_speaker("legacy", [_registry_sample([1.0, 0.0], embedding_model=None)])]
+
+    with pytest.raises(ValueError):
+        match_known({"S": [1.0, 0.0]}, registry, 0.6, 0.4, embedding_model=None)
+
+
+def test_match_known_rejects_blank_embedding_model():
+    with pytest.raises(ValueError):
+        match_known({}, [], 0.6, 0.4, embedding_model="")
+    with pytest.raises(ValueError):
+        match_known({}, [], 0.6, 0.4, embedding_model="   ")
+
+
+def test_match_known_tolerates_surrounding_whitespace_on_a_valid_stamp():
+    # ค่าที่เก็บถูก strip โดย sample_embedding_model อยู่แล้ว -- พารามิเตอร์ที่รับมาก็ต้อง
+    # strip เหมือนกัน ไม่งั้นตัวอย่างที่ถูกต้องกลับไม่ถูกจับคู่เพราะช่องว่างรอบ ๆ ไม่ตรงเป๊ะ
+    registry = [_speaker("satit", [_registry_sample([1.0, 0.0], embedding_model="embedA")])]
+
+    matches = match_known(
+        {"SPEAKER_00": [1.0, 0.0]}, registry, high=0.6, low=0.4, embedding_model=" embedA "
+    )
+
+    assert matches["SPEAKER_00"].name == "satit"
+
+
 def test_add_sample_stores_the_stamp_and_the_evidence():
     updated = add_sample(
         [],
@@ -555,6 +583,40 @@ def test_add_sample_refuses_a_payload_with_no_embedding_model():
 def test_add_sample_refuses_a_payload_with_no_embedding():
     with pytest.raises(ValueError):
         add_sample([], "satit", {"embedding_model": EMBED}, source="meeting")
+
+
+@pytest.mark.parametrize("bad_model", ["   ", 42, True, ["x"]])
+def test_add_sample_refuses_values_the_reader_would_treat_as_unstamped(bad_model):
+    # ตรวจผ่าน sample_embedding_model เอง: ตัวเขียนกับตัวอ่านต้องเห็นตรงกันว่าอะไรใช้ได้
+    # ค่าพวกนี้ผ่าน `if not sample.get(key)` (truthiness) แต่ sample_embedding_model คืน
+    # None ให้ทุกตัว -- ถ้า add_sample ยอมรับ จะได้ sample ที่ match_known ข้ามตลอดกาล
+    with pytest.raises(ValueError):
+        add_sample(
+            [], "satit", {"embedding": [1.0, 0.0], "embedding_model": bad_model}, source="meeting"
+        )
+
+
+def test_add_sample_refuses_a_zero_vector_embedding():
+    # เวกเตอร์ศูนย์ล้วนไม่มีทิศทาง cosine ไม่นิยาม -- เก็บเข้าทะเบียนแล้วจะกลายเป็น
+    # ตัวอย่างที่ match กับ "ศูนย์" อื่นทุกตัวและไม่ match กับใครที่มีทิศทางจริงเลย
+    with pytest.raises(ValueError):
+        add_sample(
+            [],
+            "satit",
+            {"embedding": [0.0, 0.0], "embedding_model": EMBED},
+            source="meeting",
+        )
+
+
+def test_add_sample_stores_the_stripped_stamp_not_the_raw_payload_value():
+    updated = add_sample(
+        [],
+        "satit",
+        {"embedding": [1.0, 0.0], "embedding_model": "  " + EMBED + "  "},
+        source="meeting",
+    )
+
+    assert updated[0]["samples"][0]["embedding_model"] == EMBED
 
 
 def test_add_sample_omits_optional_evidence_that_was_not_given():
