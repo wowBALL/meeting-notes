@@ -13,8 +13,11 @@ DIARIZATION_MODEL ทำให้ทุกคนในทะเบียนต�
 
 import logging
 import math
+from dataclasses import dataclass
+from pathlib import Path
 
 from src.speakers import is_usable_embedding
+from src.waveform import load_waveform
 
 logger = logging.getLogger(__name__)
 
@@ -191,3 +194,68 @@ def average_unit_vectors(vectors: list) -> list[float] | None:
     if mean_norm == 0.0:
         return None
     return [value / mean_norm for value in total]
+
+
+@dataclass(frozen=True)
+class Voiceprint:
+    """เวกเตอร์เสียงหนึ่งตัวของคนหนึ่งคน พร้อมหลักฐานว่ามันมาจากเสียงเท่าไหร่
+
+    `seconds` กับ `segment_count` ไม่ใช่ของประดับ: ทั้งคู่ถูกเขียนลงทะเบียนถาวร และเป็น
+    สิ่งเดียวที่ตอบได้ทีหลังว่า sample ที่จับคู่พลาดบ่อยตัวหนึ่งมาจากเสียง 3 วินาทีหรือ 20
+    """
+
+    embedding: list[float]
+    seconds: float
+    segment_count: int
+
+
+def extract_voiceprints(audio_path, turns: list[dict], embed) -> dict[str, Voiceprint]:
+    """voiceprint ต่อผู้พูดหนึ่งคน คีย์ด้วย label -- ไม่ raise ไม่ว่าเกิดอะไรขึ้น
+
+    ผู้เรียกคือ pipeline.process_file ซึ่งกำลังบันทึกการประชุมที่อัดซ้ำไม่ได้ กฎเดิมของ
+    repo นี้คือความล้มเหลวของ "การจำเสียง" ต้องไม่ทำลาย "การแยกผู้พูด" -- ฟังก์ชันนี้จึง
+    กลืนทุกอย่างไว้ที่ตัวเอง เหมือนที่ diarize._speaker_embeddings เคยทำก่อนถูกลบ
+
+    clamp ช่วงให้อยู่ในความยาวไฟล์ก่อนส่งเข้าโมเดลเสมอ: ขอบท่อนของ pyannote เกินความยาว
+    ไฟล์ได้จากการ pad ของ segmentation และ Inference.crop โยน ValueError ทันทีเมื่อเจอ
+    (วัดจริง 2026-07-30: end time 25.053s บนไฟล์ยาว 20.053s) ถ้าไม่ clamp ผู้พูดคนสุดท้าย
+    ของทุกไฟล์มีโอกาสเสีย voiceprint ด้วยเหตุผลที่ไม่เกี่ยวกับเสียงของเขาเลย
+
+    นับ `seconds`/`segment_count` จากท่อนที่ extract *สำเร็จ* เท่านั้น ไม่ใช่ท่อนที่ขอไป --
+    ตัวเลขที่นับท่อนที่พังด้วยจะโกหกตลอดอายุของ sample นั้นในทะเบียน
+    """
+    try:
+        waveform = load_waveform(Path(audio_path))
+        duration = waveform["waveform"].shape[1] / waveform["sample_rate"]
+        selected = select_intervals(clean_intervals(turns))
+
+        prints: dict[str, Voiceprint] = {}
+        for label, intervals in selected.items():
+            clamped = []
+            for start, end in intervals:
+                start = max(0.0, start)
+                end = min(end, duration)
+                if end - start >= MIN_SEGMENT_SECONDS:
+                    clamped.append((start, end))
+            if not clamped:
+                continue
+            vectors = embed(waveform, clamped)
+            kept = [
+                (span, vector)
+                for span, vector in zip(clamped, vectors)
+                if is_usable_embedding(vector)
+            ]
+            embedding = average_unit_vectors([vector for _, vector in kept])
+            if embedding is None:
+                continue
+            prints[label] = Voiceprint(
+                embedding=embedding,
+                seconds=round(sum(end - start for (start, end), _ in kept), 1),
+                segment_count=len(kept),
+            )
+        return prints
+    except Exception as e:
+        # กว้างโดยตั้งใจ: soundfile/torch/pyannote โยนอะไรออกมาก็ได้ และ exception ที่หลุด
+        # ออกไปจะไปโดน except กว้างของ pipeline ซึ่งทิ้ง speaker_turns ทั้งชุด
+        logger.warning("สร้าง voiceprint ไม่ได้ ไปต่อโดยไม่จำเสียง: %s", e)
+        return {}

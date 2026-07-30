@@ -1,13 +1,17 @@
 import math
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from src.voiceprint import (
     MAX_SEGMENTS_PER_SPEAKER,
     MIN_SEGMENT_SECONDS,
     TARGET_SECONDS,
+    Voiceprint,
     average_unit_vectors,
     clean_intervals,
+    extract_voiceprints,
     select_intervals,
 )
 
@@ -222,3 +226,120 @@ def test_average_unit_vectors_breaks_a_length_tie_by_first_appearance_not_hash_o
 
     assert len(average_unit_vectors(old_first)) == 256
     assert len(average_unit_vectors(new_first)) == 512
+
+
+def _write_wav(path, seconds, sample_rate=16000):
+    frames = int(seconds * sample_rate)
+    sf.write(path, np.sin(np.linspace(0.0, 400.0, frames, dtype="float32")), sample_rate)
+    return path
+
+
+class _RecordingEmbedder:
+    """embed ปลอมที่จดว่าถูกถามด้วยช่วงไหน แล้วคืนเวกเตอร์ที่เดาผลได้"""
+
+    def __init__(self, vector_for=None, fail_on=None, raises=False):
+        self.calls = []
+        self._vector_for = vector_for or (lambda start, end: [end - start, 1.0])
+        self._fail_on = fail_on or set()
+        self._raises = raises
+
+    def __call__(self, waveform, intervals):
+        if self._raises:
+            raise RuntimeError("boom")
+        self.calls.append(list(intervals))
+        return [
+            None if (start, end) in self._fail_on else self._vector_for(start, end)
+            for start, end in intervals
+        ]
+
+
+def test_extract_voiceprints_returns_one_print_per_speaker(tmp_path):
+    audio = _write_wav(tmp_path / "a.wav", 40.0)
+    turns = [_turn(0.0, 12.0, "A"), _turn(14.0, 24.0, "B")]
+
+    result = extract_voiceprints(audio, turns, _RecordingEmbedder())
+
+    assert sorted(result) == ["A", "B"]
+    assert isinstance(result["A"], Voiceprint)
+    assert result["A"].seconds == pytest.approx(12.0)
+    assert result["A"].segment_count == 1
+
+
+def test_extract_voiceprints_clamps_intervals_to_the_end_of_the_audio(tmp_path):
+    # pyannote คืนขอบท่อนที่เกินความยาวไฟล์ได้ และ Inference.crop โยน ValueError ทันที
+    # (วัดจริง: "end time (t=25.053s) greater than waveform file duration (20.053s)")
+    audio = _write_wav(tmp_path / "a.wav", 20.0)
+    turns = [_turn(10.0, 25.0, "A")]
+    embedder = _RecordingEmbedder()
+
+    result = extract_voiceprints(audio, turns, embedder)
+
+    assert embedder.calls == [[(10.0, 20.0)]]
+    assert result["A"].seconds == pytest.approx(10.0)
+
+
+def test_extract_voiceprints_drops_an_interval_clamping_made_too_short(tmp_path):
+    # ท่อนที่เหลือ 0.5 วิหลัง clamp สั้นกว่าเกณฑ์ -- ต้องไม่ถูกส่งไปให้โมเดล
+    audio = _write_wav(tmp_path / "a.wav", 20.0)
+    turns = [_turn(2.0, 8.0, "A"), _turn(19.5, 24.0, "A")]
+    embedder = _RecordingEmbedder()
+
+    extract_voiceprints(audio, turns, embedder)
+
+    assert embedder.calls == [[(2.0, 8.0)]]
+
+
+def test_extract_voiceprints_has_no_key_for_a_speaker_with_only_short_turns(tmp_path):
+    audio = _write_wav(tmp_path / "a.wav", 40.0)
+    turns = [_turn(0.0, 12.0, "A"), _turn(20.0, 21.0, "B")]
+
+    result = extract_voiceprints(audio, turns, _RecordingEmbedder())
+
+    assert "B" not in result
+
+
+def test_extract_voiceprints_survives_one_failed_segment(tmp_path):
+    # ท่อนเดียวที่พังต้องไม่ทำให้คนทั้งคนหาย -- กฎ "ความล้มเหลวของการจำเสียงต้องไม่ทำลาย
+    # ของที่ใหญ่กว่า" ขยายลงมาถึงระดับท่อน
+    audio = _write_wav(tmp_path / "a.wav", 60.0)
+    turns = [_turn(0.0, 10.0, "A"), _turn(20.0, 28.0, "A")]
+    embedder = _RecordingEmbedder(fail_on={(0.0, 10.0)})
+
+    result = extract_voiceprints(audio, turns, embedder)
+
+    assert result["A"].segment_count == 1
+    assert result["A"].seconds == pytest.approx(8.0)
+
+
+def test_extract_voiceprints_never_raises_when_the_embedder_explodes(tmp_path):
+    # ผู้เรียกคือ pipeline.process_file ซึ่งกำลังบันทึกประชุมที่อัดซ้ำไม่ได้
+    audio = _write_wav(tmp_path / "a.wav", 40.0)
+    turns = [_turn(0.0, 12.0, "A")]
+
+    assert extract_voiceprints(audio, turns, _RecordingEmbedder(raises=True)) == {}
+
+
+def test_extract_voiceprints_never_raises_when_the_audio_cannot_be_read(tmp_path):
+    broken = tmp_path / "broken.wav"
+    broken.write_bytes(b"fake audio data")
+
+    assert extract_voiceprints(broken, [_turn(0.0, 12.0, "A")], _RecordingEmbedder()) == {}
+
+
+def test_extract_voiceprints_returns_nothing_for_no_turns(tmp_path):
+    audio = _write_wav(tmp_path / "a.wav", 10.0)
+
+    assert extract_voiceprints(audio, [], _RecordingEmbedder()) == {}
+
+
+def test_extract_voiceprints_counts_only_the_segments_it_actually_used(tmp_path):
+    # seconds/segment_count ถูกเขียนลงทะเบียนถาวร ถ้ามันนับท่อนที่ extract ไม่สำเร็จด้วย
+    # การสืบย้อนว่า "sample นี้มาจากเสียงกี่วินาที" จะโกหกตลอดอายุของ sample นั้น
+    audio = _write_wav(tmp_path / "a.wav", 60.0)
+    turns = [_turn(0.0, 10.0, "A"), _turn(15.0, 21.0, "A"), _turn(30.0, 34.0, "A")]
+    embedder = _RecordingEmbedder(fail_on={(15.0, 21.0)})
+
+    result = extract_voiceprints(audio, turns, embedder)
+
+    assert result["A"].segment_count == 2
+    assert result["A"].seconds == pytest.approx(14.0)
