@@ -19,7 +19,13 @@ from typing import Any
 
 from src.audio_convert import convert_to_wav
 from src.diarize import diarize_audio
-from src.speakers import MIN_SPEAKING_SECONDS, clean_name, drop_numeric_vectors
+from src.speakers import (
+    MIN_SPEAKING_SECONDS,
+    as_number,
+    as_str,
+    clean_name,
+    drop_numeric_vectors,
+)
 from src.storage import replace_with_retry
 from src.voiceprint import clean_intervals, extract_voiceprints, select_intervals
 
@@ -816,26 +822,49 @@ def archive(base_dir: Path, audio_file: str) -> Path | None:
     return candidate
 
 
-_RESULT_ALLOWED_KEYS = {
-    "status",
-    "reason",
-    "speaking_seconds",
-    "speaker_count",
-    "suggested_name",
+_RESULT_LEAF_TYPES = {
+    "status": as_str,
+    "reason": as_str,
+    "speaking_seconds": as_number,
+    "speaker_count": as_number,
+    "suggested_name": as_str,
 }
-"""allowlist ไม่ใช่ denylist: เดิม list_entries ตัดแค่คีย์ "embedding" ทิ้ง (denylist ตัวเดียว)
+"""ชื่อคีย์ที่ยอมให้ออกจาก result.json *และ* ชนิดของค่าที่แต่ละคีย์ประกาศไว้
+
+allowlist ไม่ใช่ denylist: เดิม list_entries ตัดแค่คีย์ "embedding" ทิ้ง (denylist ตัวเดียว)
 ซึ่งเป็นรูรั่วเมื่อ result.json (แก้มือได้ตามดีไซน์ของโปรเจกต์นี้) มีเวกเตอร์แอบอยู่ใต้ชื่อคีย์
 อื่น (เช่น "embedding_backup") -- คีย์นั้นจะหลุดผ่าน denylist ไปเงียบ ๆ รายการข้างบนคือทุกคีย์
 ของ result ที่ web/enroll.js อ่านจริง (ดู renderFile/chipFor ใน enroll.js) คีย์อื่นของ analyze()
 (model, embedding_model, embedding, embedding_seconds, segment_count, detail,
 ignored_short_labels) เป็นของฝั่งเซิร์ฟเวอร์ล้วน ไม่มีเหตุผลต้องออกไปเลย
+
+รีวิวรอบที่หก: allowlist ชื่อคีย์ยังอยู่ครบ (มันคือชุดคีย์ของ dict นี้) แต่ตอนนี้แต่ละคีย์
+พก *ชนิดของค่า* มาด้วย และค่าที่ไม่ใช่ชนิดนั้นถูกทิ้ง ไม่ใช่ปล่อยผ่าน -- ห้ารอบก่อนหน้าไล่ปิด
+ทีละแกน (ชื่อคีย์ -> ความลึก -> ค่าของคีย์ใน allowlist -> รูปทรง) แล้วโดนแกนใหม่ทุกครั้ง
+รูปทรงก็เป็นแกนที่ห้าเช่นกัน ไม่ใช่ค่าคงที่ของข้อมูล (ดู docstring ของ
+speakers.drop_numeric_vectors สำหรับหกรูปแบบที่ทำซ้ำได้จริง) การประกาศชนิดของใบเป็นแกนเดียว
+ที่คนแก้ไฟล์เลือกไม่ได้ เพราะเวกเตอร์ไม่ใช่ str และไม่ใช่ตัวเลขเดี่ยว ไม่ว่าจะห่อมาแบบไหน
+
+*ทิ้ง* คีย์ทิ้งเมื่อชนิดไม่ตรง ไม่ใช่ส่ง None ออกไป -- ต่างจากฝั่งคิวใน session_service ที่
+เลือก None เพราะ enroll.js เช็คด้วย `!== undefined` ตรง ๆ สองที่ (speaking_seconds และ
+speaker_count ดู renderFile) การส่ง null ออกไปจะทำให้หน้าเว็บพิมพ์ "พูดไป null วินาที" แทนที่
+จะข้ามบรรทัดนั้นไปเงียบ ๆ ซึ่งเป็นทางที่หน้านั้นรองรับอยู่แล้วสำหรับผลที่ยังไม่มีค่านั้น
+เช่นเดียวกับ status/reason ที่ chipFor/renderFile ถือว่า "ไม่มี" = ยังไม่ผ่าน และ
+suggested_name ที่ถ้าทิ้งของปลอมไป ค่าที่เซิร์ฟเวอร์คำนวณจากชื่อไฟล์เองจะรอดไม่ถูกทับ
 """
+
+_RESULT_ALLOWED_KEYS = frozenset(_RESULT_LEAF_TYPES)
 
 
 def list_entries(base_dir: Path) -> list[dict]:
     """ทุกไฟล์ที่รอลงทะเบียน พร้อมสถานะ ในรูปที่ส่งออกหน้าเว็บได้
 
-    ผลจาก result.json ถูกกรองผ่าน _RESULT_ALLOWED_KEYS (allowlist) ก่อนออกไปเสมอ --
+    รีวิวรอบที่หก: allowlist ยังอยู่ แต่ตอนนี้ทุกใบ *ประกาศชนิด* ไว้แล้วบังคับตามนั้น
+    (ดู _RESULT_LEAF_TYPES ด้านบน) -- การกรองด้วยรูปทรงของรอบที่ห้าแพ้ให้รูปทรงที่ไม่ใช่
+    "list ตัวเลขล้วน" ตั้งแต่ตัวแปรที่สองที่ลอง เพราะรูปทรงเป็นแกนที่คนแก้ result.json
+    เลือกได้ ไม่ใช่ค่าคงที่ของข้อมูล drop_numeric_vectors ยังถูกเรียกอยู่ในฐานะชั้นรอง
+
+    ผลจาก result.json ถูกกรองผ่าน _RESULT_LEAF_TYPES (allowlist) ก่อนออกไปเสมอ --
     หน้าเว็บไม่ได้ใช้เวกเตอร์เสียง และมันเป็นข้อมูล biometric ที่ไม่ควรมีสำเนาเพิ่มในที่ที่
     ไม่จำเป็น เดิมใช้ denylist (ตัดแค่คีย์ "embedding" ทิ้ง) ซึ่งกันได้แค่คีย์ชื่อนั้นเป๊ะ ๆ
 
@@ -896,6 +925,11 @@ def list_entries(base_dir: Path) -> list[dict]:
             state = "queued"
         else:
             state = "idle"
+        # สี่ใบนี้ประกอบขึ้นบนเซิร์ฟเวอร์ล้วน ไม่ได้มาจากไฟล์ที่แก้มือได้: audio_file คือ
+        # path.name (str) state เป็นสตริงคงที่สามค่า size_bytes คือ st_size (int) และ
+        # suggested_name มาจาก suggested_name_from() ชนิดของทั้งสี่จึงถูกการันตีตั้งแต่ตอน
+        # สร้าง ไม่ต้องมีตัวบังคับซ้ำ -- เขียนไว้ให้ชัดเพื่อไม่ให้อ่านเหมือนว่ามันหลุดการ
+        # ตรวจไป (ต่างจากค่าที่มาจาก result.json ด้านล่างซึ่งต้องบังคับชนิดจริง ๆ)
         entry = {
             "audio_file": audio_file,
             "state": state,
@@ -903,11 +937,20 @@ def list_entries(base_dir: Path) -> list[dict]:
             "suggested_name": suggested_name_from(audio_file),
         }
         if _consume_changed_marker(base_dir, audio_file):
+            # ธงนี้ enroll.js อ่านด้วย `if (file.changed_during_analysis)` และเซิร์ฟเวอร์
+            # ใส่คีย์นี้เฉพาะตอนเป็นจริงเท่านั้นมาแต่ไหนแต่ไร -- ค่าเป็น bool ตายตัวตรงนี้
             entry["changed_during_analysis"] = True
         if result is not None:
-            entry.update(
-                {key: value for key, value in result.items() if key in _RESULT_ALLOWED_KEYS}
-            )
+            # allowlist ชื่อคีย์ + บังคับชนิดของค่า ในลูปเดียวกัน (ดู _RESULT_LEAF_TYPES)
+            # ชนิดไม่ตรง = ไม่มีคีย์นั้นเลย ซึ่งเป็นรูปร่างเดียวกับ "ผลยังไม่มีค่านี้" ที่
+            # enroll.js รองรับอยู่แล้ว -- ไม่ใช่ None ที่หน้าเว็บจะพิมพ์ออกมาตรง ๆ
+            for key, declared in _RESULT_LEAF_TYPES.items():
+                if key not in result:
+                    continue
+                value = declared(result[key])
+                if value is None:
+                    continue
+                entry[key] = value
         # ตาข่ายชั้นล่างอีกครั้งบน entry ทั้งก้อน ไม่ใช่แค่ result: คีย์ที่ใครเพิ่มเข้า
         # _RESULT_ALLOWED_KEYS ทีหลัง (หรือคีย์ใหม่ที่ประกอบขึ้นตรงนี้) ต้องปลอดภัยเองตั้งแต่
         # ต้น ไม่ต้องรอให้มีคนมาเขียนชั้นของมันเป็นรีวิวรอบที่หก

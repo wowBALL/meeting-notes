@@ -10,6 +10,7 @@ from src.speakers import (
     add_sample,
     clean_name,
     cosine_similarity,
+    drop_numeric_vectors,
     is_usable_embedding,
     load_registry,
     match_known,
@@ -712,3 +713,24 @@ def test_remove_speaker_drops_only_the_matching_id():
 
     assert remove_speaker(speakers, "id-1") == [speakers[1]]
     assert remove_speaker(speakers, "ไม่มีจริง") == speakers
+
+
+def test_drop_numeric_vectors_also_catches_numpy_floats():
+    """_is_numeric_vector เดิมเช็ค isinstance(item, (int, float)) ตรง ๆ -- list ของ
+    numpy.float32 จึงหลุดผ่านไปทั้งก้อน (numpy.float64 ไม่หลุดเพราะมันสืบทอด float ของ
+    Python มาโดยตรง แต่ float32 ไม่ได้สืบทอด)
+
+    วันนี้ยัง latent เพราะ src/voiceprint.py แปลงเป็น float() ก่อนบันทึกลงไฟล์เสมอ แต่มันคือ
+    การเดาชนิดแบบเดียวกับที่ทำให้บั๊กนี้กลับมาห้ารอบ ในของที่เรียกตัวเองว่า "กรองด้วยรูปทรง"
+    """
+    numpy = pytest.importorskip("numpy")
+
+    dropped = drop_numeric_vectors(
+        {
+            "float32": [numpy.float32(0.1), numpy.float32(0.2)],
+            "float64": [numpy.float64(0.1), numpy.float64(0.2)],
+            "int32": [numpy.int32(1), numpy.int32(2)],
+        }
+    )
+
+    assert dropped == {}

@@ -93,6 +93,98 @@ def _assert_no_numeric_vector_leaks(body):
     walk(body, "$")
 
 
+# ชนิดของ "ใบ" ทุกใบที่ endpoint ในไฟล์นี้ประกาศว่าจะส่งออก -- ตรงกับที่ web/app.js,
+# web/enroll.js และ D:\COWORK\COWORK Desktop\meetingrun.js อ่านจริง
+#
+# รอบที่หกของบั๊กนี้: ห้ารอบก่อนหน้าไล่ปิด "แกน" ทีละแกน (ชื่อคีย์ -> ความลึก -> ค่าของ
+# คีย์ใน allowlist -> รูปทรง) แล้วรอบถัดไปก็โดนแกนใหม่ทุกครั้ง รูปทรงก็เป็นแค่แกนที่ห้า
+# ไม่ใช่ค่าคงที่ของข้อมูล (ดู _PLANTED_VECTOR_SHAPES ด้านล่าง -- หกรูปทรงที่ทำซ้ำได้จริง
+# บน endpoint ที่รันอยู่ ทุกตัวเลี่ยง "list ตัวเลขล้วน" ได้หมด) การ์ดที่ปิดทุกแกนพร้อมกัน
+# คือการประกาศชนิดของใบ แล้วบังคับว่าไม่ใช่ชนิดนั้น = ออกไม่ได้ ไม่ว่าคนแก้ไฟล์จะเลือก
+# ชื่อคีย์ ความลึก หรือรูปทรงอะไรก็ตาม เพราะไม่มีรูปทรงเหลือให้เลือกอีกแล้ว
+_DECLARED_LEAF_TYPES = {
+    # สตริง
+    "meeting_dir": str,
+    "label": str,
+    "name": str,
+    "evidence": str,
+    "text": str,
+    "audio_file": str,
+    "state": str,
+    "status": str,
+    "reason": str,
+    "suggested_name": str,
+    "ts": str,
+    "code": str,
+    "level": str,
+    "job": str,
+    "path": str,
+    # ตัวเลข
+    "speaking_seconds": "number",
+    "start": "number",
+    "end": "number",
+    "speaker_count": "number",
+    "size_bytes": "number",
+    "min_speaking_seconds": "number",
+    "sample_count": "number",
+    "score": "number",
+    # bool
+    "changed_during_analysis": bool,
+    "confident": bool,
+}
+
+
+def _assert_declared_leaf_types(body):
+    """ทุกใบที่ประกาศชนิดไว้ ต้องเป็นชนิดนั้นหรือ None เท่านั้น -- ไม่มีทางที่สาม
+
+    _assert_no_numeric_vector_leaks ด้านบนถูกต้องแต่ตาบอดกับทุกอย่างที่ไม่ใช่ "list ที่
+    สมาชิกเป็นตัวเลขล้วน" -- [0.11, 0.12, "x"] / ["x", 0.11, 0.12] / {"0": 0.11} /
+    ["0.11", "0.12"] / [0.11, None, 0.12] / [{"v": 0.11}] ผ่านมันไปได้ทุกตัวทั้งที่ขน
+    เวกเตอร์เต็ม ๆ ออกไปแบบกู้คืนได้ ตัวนี้จึงไม่ถามว่า "หน้าตาเหมือนเวกเตอร์ไหม" แต่ถาม
+    ว่า "เป็นชนิดที่ endpoint สัญญาไว้หรือเปล่า" ซึ่งเป็นคำถามที่คนวางเวกเตอร์ตอบเลี่ยง
+    ไม่ได้ เพราะเวกเตอร์ไม่ใช่ str ไม่ใช่ตัวเลขเดี่ยว และไม่ใช่ bool ไม่ว่าจะห่อมาแบบไหน
+    """
+
+    def check(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                declared = _DECLARED_LEAF_TYPES.get(key)
+                here = f"{path}.{key}"
+                if declared is not None and value is not None:
+                    if declared == "number":
+                        ok = isinstance(value, (int, float)) and not isinstance(
+                            value, bool
+                        )
+                    else:
+                        ok = isinstance(value, declared)
+                    if not ok:
+                        pytest.fail(
+                            f"ใบ {here} ประกาศไว้เป็น {declared} แต่ส่งออก "
+                            f"{type(value).__name__}: {value!r}"
+                        )
+                check(value, here)
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                check(item, f"{path}[{index}]")
+
+    check(body, "$")
+
+
+# หกรูปทรงที่ทำซ้ำได้จริงบน endpoint ที่รันอยู่ ทุกตัวขนเวกเตอร์เดียวกันออกไปแบบกู้คืนได้
+# และทุกตัวเลี่ยง _is_numeric_vector (ตาข่ายชั้นล่างของรอบที่ห้า) ได้หมด -- นี่คือหลักฐาน
+# ว่า "รูปทรง" ไม่ใช่สิ่งที่คนวางเวกเตอร์เลือกไม่ได้ แต่เป็นแกนที่ห้าเหมือนชื่อคีย์และความลึก
+_PLANTED_VECTOR = [0.1111111, 0.2222222, 0.3333333, 0.4444444]
+_PLANT_MARK = "1111111"
+_PLANTED_VECTOR_SHAPES = {
+    "trailing_string": _PLANTED_VECTOR + ["x"],
+    "leading_string": ["x"] + _PLANTED_VECTOR,
+    "index_keyed_dict": {str(i): v for i, v in enumerate(_PLANTED_VECTOR)},
+    "string_floats": [str(v) for v in _PLANTED_VECTOR],
+    "null_padded": [_PLANTED_VECTOR[0], None, _PLANTED_VECTOR[1], None],
+    "wrapped_objects": [{"v": v} for v in _PLANTED_VECTOR],
+}
+
+
 def make_config(tmp_path):
     return Config(
         base_dir=tmp_path,
@@ -595,6 +687,65 @@ def test_pending_speakers_endpoint_drops_vectors_planted_as_values_of_allowliste
     _assert_no_numeric_vector_leaks(body)
 
 
+@pytest.mark.parametrize("shape_name", sorted(_PLANTED_VECTOR_SHAPES))
+def test_pending_speakers_endpoint_drops_every_planted_vector_shape(
+    client, config, shape_name
+):
+    """finding ของรีวิวรอบที่หก: "รูปทรง" ไม่ใช่สิ่งที่คนวางเวกเตอร์เลือกไม่ได้
+
+    docstring ของ drop_numeric_vectors (รอบที่ห้า) อ้างว่า "สิ่งเดียวที่คนวางเวกเตอร์
+    เลือกไม่ได้คือรูปทรงของเวกเตอร์เอง" ซึ่งไม่จริง และเป็นข้ออ้างที่ค้ำดีไซน์ทั้งรอบนั้นไว้
+    -- หกรูปทรงใน _PLANTED_VECTOR_SHAPES ทำซ้ำได้จริงบน endpoint ที่รันอยู่ ทุกตัวไม่ใช่
+    "list ตัวเลขล้วน" จึงผ่านตาข่ายรูปทรงไปได้หมด และทุกตัวขนเวกเตอร์เดียวกันออกไปแบบ
+    กู้คืนได้ครบ
+
+    ปลูกที่ทั้งหกตำแหน่งที่รอบที่ห้าเคยพิสูจน์ไว้พร้อมกัน (meeting_dir, label,
+    speaking_seconds, guess.evidence, samples[].start, suggested.name) เพราะเป็นบั๊ก
+    เดียวกันซ้ำหกที่ ไม่ใช่หกบั๊ก
+    """
+    shape = _PLANTED_VECTOR_SHAPES[shape_name]
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["meeting_dir"] = shape
+    speaker = record["speakers"][0]
+    speaker["label"] = shape
+    speaker["speaking_seconds"] = shape
+    speaker["guess"] = {"name": "สมชาย", "evidence": shape}
+    speaker["samples"][0]["start"] = shape
+    speaker["suggested"] = {"name": shape}
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    _assert_declared_leaf_types(body)
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+    # เข้มกว่าการ์ดข้างบน: ตัวเลขของเวกเตอร์ต้องไม่ปรากฏใน body เลยไม่ว่าในรูปใด
+    assert _PLANT_MARK not in json.dumps(body)
+
+
+def test_pending_speakers_endpoint_still_serves_every_field_the_ui_reads(client, config):
+    """การ์ดชนิดของใบต้องไม่กินของจริงไปด้วย -- ทุกฟิลด์ที่ web/app.js อ่านต้องยังมาครบ
+
+    รอบที่สี่เคยแก้บั๊กนี้ด้วยการตัดฟิลด์ทิ้ง แล้วทำให้คิวตั้งชื่อผู้พูดเข้าไม่ถึงทั้งฟีเจอร์
+    -- เทสต์นี้ตรึงฝั่งตรงข้ามของการ์ดไว้ ไม่ให้รอบนี้ซ้ำรอยเดิม
+    """
+    meeting = _queue_two_speakers(config)
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    found = next(m for m in body["meetings"] if m["meeting_dir"] == meeting)
+    speaker = found["speakers"][0]
+    assert isinstance(speaker["label"], str) and speaker["label"]
+    assert isinstance(speaker["speaking_seconds"], (int, float))
+    sample = speaker["samples"][0]
+    assert isinstance(sample["text"], str) and sample["text"]
+    assert isinstance(sample["start"], (int, float))
+    assert isinstance(sample["end"], (int, float))
+    _assert_declared_leaf_types(body)
+
+
 def test_state_activity_never_ships_a_vector_hidden_in_params(client, config):
     """finding 2 ของรีวิวรอบที่สี่: get_state ประกอบ {**e, "text": ...} จาก entry ที่อ่าน
     ตรงจาก state/activity.jsonl (ดู activity.tail) -- ไฟล์นี้แก้มือได้ตามดีไซน์เดียวกับ
@@ -650,6 +801,95 @@ def test_state_activity_still_serves_job_and_params_path(client, config):
     assert entry["level"] == "info"
     assert entry["ts"]
     assert entry["text"]
+
+
+@pytest.mark.parametrize("shape_name", sorted(_PLANTED_VECTOR_SHAPES))
+def test_state_activity_drops_every_planted_vector_shape(client, config, shape_name):
+    """หกรูปทรงเดียวกัน ฝั่ง /api/state -- ปลูกทั้งใน params และในใบระดับบรรทัด
+
+    ts/job/code/level เป็นสตริงทั้งหมดตามที่ renderLog (app.js), logHtml (meetingrun.js),
+    jobProgress() และ progressOf() อ่านจริง -- เวกเตอร์ที่ถูกวางแทนที่ค่าเหล่านั้นต้องไม่
+    ออกไปไม่ว่าจะห่อมาในรูปทรงไหน
+    """
+    shape = _PLANTED_VECTOR_SHAPES[shape_name]
+    append(config.base_dir, "meet-1", "meeting_done", params={"path": shape})
+    log = config.base_dir / "state" / "activity.jsonl"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    planted = json.loads(lines[-1])
+    planted.update({"ts": shape, "job": shape, "code": shape, "level": shape})
+    lines[-1] = json.dumps(planted, ensure_ascii=False)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    body = client.get("/api/state").get_json()
+
+    _assert_declared_leaf_types(body)
+    _assert_no_numeric_vector_leaks(body)
+    assert _PLANT_MARK not in json.dumps(body)
+
+
+def test_state_activity_text_cannot_carry_a_serialized_vector(client, config):
+    """render() เอา params ไปเติมลงเทมเพลตข้อความ -- เวกเตอร์ที่วางไว้ใต้ {path} จะออกไป
+    เป็น *สตริง* ในคีย์ text ซึ่งการ์ดรูปทรงและการ์ดชนิดของใบจับไม่ได้ทั้งคู่ เพราะปลายทาง
+    เป็น str จริง ๆ ตามที่ประกาศไว้
+
+    ปิดด้วยสองอย่างพร้อมกัน: (1) ค่าที่ไม่ใช่ scalar ไม่ถูกเอาไปเติมเลย (2) ค่าที่เป็นสตริง
+    อยู่แล้วถูกตัดความยาว -- เวกเตอร์ 256 มิติที่ serialize แล้วยาวเกินสองพันตัวอักษร ส่วน
+    param จริงในโปรเจกต์นี้เป็นชื่องาน พาธไฟล์ และตัวนับเล็ก ๆ เท่านั้น
+    """
+    vector = [1 / (index + 3) for index in range(256)]
+    serialized = json.dumps(vector)
+    # เวกเตอร์ 256 มิติที่ความละเอียดของ float จริง serialize แล้วยาวราวห้าพันตัวอักษร
+    assert len(serialized) > 2000
+    append(config.base_dir, "meet-1", "meeting_done", params={"path": serialized})
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    # ตัวสุดท้ายของเวกเตอร์คือหลักฐานว่ามันออกไปครบทั้งก้อน -- ต้องไม่มีทั้งใน text และ params
+    tail = str(vector[-1])
+    assert tail not in entry["text"]
+    assert tail not in entry["params"]["path"]
+    assert len(entry["params"]["path"]) <= session_service.PARAM_VALUE_MAX_CHARS
+    assert len(entry["text"]) <= len("เสร็จแล้ว: ") + session_service.PARAM_VALUE_MAX_CHARS
+    _assert_declared_leaf_types(body)
+
+
+def test_state_activity_text_never_renders_a_non_scalar_param(client, config):
+    """params ที่ไม่ใช่ scalar ต้องไม่ไปโผล่ในข้อความที่ render ออกมา"""
+    append(
+        config.base_dir,
+        "meet-1",
+        "meeting_done",
+        params={"path": {"0": 0.1111111, "1": 0.2222222}},
+    )
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    assert _PLANT_MARK not in entry["text"]
+    assert _PLANT_MARK not in json.dumps(body)
+    _assert_declared_leaf_types(body)
+
+
+def test_state_activity_ships_only_the_one_param_the_consumers_read(client, config):
+    """params เป็นฟิลด์ปลายเปิดฟิลด์เดียวที่เหลือ -- ตรวจแล้วทั้ง app.js, enroll.js และ
+    meetingrun.js ว่าไม่มีใครอ่านอะไรนอกจาก params.path (ซึ่งเป็นสตริง) การส่ง params
+    ทั้งก้อนออกไปจึงเป็นการเปิดแกนที่หกไว้เปล่า ๆ ให้รอบที่เจ็ด
+    """
+    append(
+        config.base_dir,
+        "meet-1",
+        "meeting_done",
+        params={"path": "meetings/m1", "voiceprint": [0.11, 0.12], "extra": "x"},
+    )
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    assert entry["params"] == {"path": "meetings/m1"}
+    # แต่ข้อความยังต้องเติม {path} ได้เหมือนเดิม
+    assert entry["text"].endswith("meetings/m1")
+    _assert_declared_leaf_types(body)
 
 
 def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
@@ -1337,6 +1577,81 @@ def test_get_enroll_drops_vectors_planted_as_values_of_allowlisted_keys(tmp_path
     # (suggested_name_from) และถูกทับด้วยของปลอมจาก result.json -- ตัดของปลอมทิ้งแล้ว
     # ของจริงต้องยังอยู่ ไม่ใช่กลายเป็นช่องว่าง
     assert body["files"][0]["suggested_name"] == "สมชาย"
+
+
+@pytest.mark.parametrize("shape_name", sorted(_PLANTED_VECTOR_SHAPES))
+def test_get_enroll_drops_every_planted_vector_shape(tmp_path, shape_name):
+    """หกรูปทรงเดียวกัน ฝั่ง /api/enroll -- คู่แฝดของเทสต์ชื่อเดียวกันฝั่งคิว
+
+    ปลูกที่ทุกใบที่มาจาก result.json (ซึ่งแก้มือได้ตามดีไซน์ของโปรเจกต์นี้) พร้อมกัน:
+    status/reason เป็นสตริง speaking_seconds/speaker_count เป็นตัวเลข suggested_name
+    เป็นสตริง -- ตรงกับที่ web/enroll.js อ่านจริง (chipFor/renderFile)
+    """
+    shape = _PLANTED_VECTOR_SHAPES[shape_name]
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {
+            "status": shape,
+            "reason": shape,
+            "speaking_seconds": shape,
+            "speaker_count": shape,
+            "suggested_name": shape,
+        },
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    _assert_declared_leaf_types(body)
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+    assert _PLANT_MARK not in json.dumps(body)
+    # ค่าที่เซิร์ฟเวอร์คำนวณเองต้องรอด ไม่ถูกของปลอมทับ
+    assert body["files"][0]["suggested_name"] == "สมชาย"
+    assert body["files"][0]["audio_file"] == "สมชาย.ogg"
+    assert body["files"][0]["state"] == "done"
+
+
+def test_get_enroll_still_serves_every_field_the_ui_reads(tmp_path):
+    """ฝั่งตรงข้ามของการ์ด: ทุกฟิลด์ที่ web/enroll.js อ่านต้องยังมาครบและเป็นชนิดที่ประกาศไว้"""
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
+    )
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {
+            "status": "ok",
+            "model": MODEL,
+            "embedding_model": EMBED,
+            "embedding": [1.0, 0.0],
+            "speaking_seconds": 68.5,
+            "speaker_count": 1,
+        },
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    entry = body["files"][0]
+    assert entry["audio_file"] == "สมชาย.ogg"
+    assert entry["state"] == "done"
+    assert entry["status"] == "ok"
+    assert entry["speaking_seconds"] == 68.5
+    assert entry["speaker_count"] == 1
+    assert isinstance(entry["size_bytes"], int)
+    assert entry["suggested_name"] == "สมชาย"
+    assert isinstance(entry["match"]["score"], float)
+    assert isinstance(entry["match"]["name"], str)
+    assert isinstance(entry["match"]["confident"], bool)
+    assert isinstance(body["min_speaking_seconds"], (int, float))
+    assert isinstance(body["speakers"][0]["sample_count"], int)
+    _assert_declared_leaf_types(body)
 
 
 def test_enroll_similarity_uses_the_stamp_recorded_in_the_result_not_the_current_config(

@@ -117,19 +117,34 @@ class RecorderState:
 
 
 def _public_sample(sample) -> dict | None:
+    """ตัวอย่างเสียงหนึ่งช่วง -- ทุกใบประกาศชนิดไว้แล้วบังคับตามนั้น
+
+    text เป็นสตริงที่ผู้ใช้อ่าน (app.js pendingHtml: esc(sample.text)) ส่วน start/end เป็น
+    วินาทีตัวเลขเดี่ยวที่ app.js playSample() เอาไปตั้ง audioEl.currentTime ตรง ๆ
+
+    ใช้ None ไม่ใช่การทิ้งคีย์: audioEl.currentTime = undefined โยน TypeError ("non-finite")
+    ทั้งการ์ด ส่วน = null กลายเป็น 0 ซึ่งเป็นค่าที่ปุ่มเล่นเสียงรับได้ -- ทั้งไฟล์นี้เลือก
+    None เป็นค่าปริยายด้วยเหตุผลเดียวกัน: หน้าเว็บถูกเขียนบนสัญญาที่ว่าคีย์เหล่านี้มีเสมอ
+    (esc(x), x || 0, x || "") การหายไปของคีย์เป็นรูปร่างที่ยังไม่เคยมีใครทดสอบ
+    """
     if not isinstance(sample, dict):
         return None
     return {
-        "text": sample.get("text"),
-        "start": sample.get("start"),
-        "end": sample.get("end"),
+        "text": speakers.as_str(sample.get("text")),
+        "start": speakers.as_number(sample.get("start")),
+        "end": speakers.as_number(sample.get("end")),
     }
 
 
 def _public_guess(guess) -> dict | None:
     if not isinstance(guess, dict):
         return None
-    return {"name": guess.get("name"), "evidence": guess.get("evidence")}
+    # ทั้งคู่เป็นสตริงที่ app.js เอาไปใส่ esc() ตรง ๆ (pendingHtml) -- evidence คือเหตุผล
+    # ที่โมเดลเดาชื่อนี้ ซึ่งเป็นข้อความให้คนอ่าน ไม่ใช่โครงสร้างข้อมูล
+    return {
+        "name": speakers.as_str(guess.get("name")),
+        "evidence": speakers.as_str(guess.get("evidence")),
+    }
 
 
 def _public_suggested(suggested) -> dict | None:
@@ -139,7 +154,7 @@ def _public_suggested(suggested) -> dict | None:
     # pending.build_pending_speakers ติดมาด้วยเป็นของฝั่งเซิร์ฟเวอร์ล้วน (ใช้ match_known
     # ตอนสร้างคิวเท่านั้น) จึงไม่มีเหตุผลต้องออกไปเลย ต่างจาก _public_guess ตรงนี้ที่ guess
     # ยังมี evidence ให้ผู้ใช้อ่านจริง
-    return {"name": suggested.get("name")}
+    return {"name": speakers.as_str(suggested.get("name"))}
 
 
 def _public_speaker(speaker: dict) -> dict:
@@ -166,11 +181,19 @@ def _public_speaker(speaker: dict) -> dict:
     samples[].start / suggested.name (ห้าจุดที่ทำซ้ำได้จริงบน endpoint ที่รันอยู่) หลุดออกไป
     ได้ทั้งที่ทุกคีย์อยู่ใน allowlist ถูกต้องแล้ว การแจกแจงชื่อคีย์เพิ่มอีกชั้นกันกรณีนี้ไม่ได้
     ไม่ว่าจะไล่ไปกี่ชั้น (ดู docstring ของ drop_numeric_vectors)
+
+    รีวิวรอบที่หก: การกรองด้วยรูปทรงของรอบที่ห้าก็แพ้เหมือนกัน เพราะ "รูปทรง" เป็นแกนที่ห้า
+    ที่คนแก้ไฟล์เลือกได้ ไม่ใช่ค่าคงที่ของข้อมูล (หกรูปแบบที่ทำซ้ำได้จริง ดู docstring ของ
+    drop_numeric_vectors) ตอนนี้ทุกใบที่ออกจากฟังก์ชันนี้ *ประกาศชนิด* ไว้แล้วบังคับตามนั้น:
+    label เป็น str, speaking_seconds เป็นตัวเลขเดี่ยว, ที่เหลืออยู่ใน _public_guess/
+    _public_sample/_public_suggested -- ค่าที่ไม่ใช่ชนิดที่ประกาศไว้กลายเป็น None ทั้งหมด
+    ตรงกับที่ app.js รับได้อยู่แล้ว (esc(speaker.label), speaker.speaking_seconds || 0)
+    allowlist ชื่อคีย์และ drop_numeric_vectors ยังอยู่ครบทั้งคู่ในฐานะชั้นรอง ไม่ใช่ด่านหลัก
     """
     samples = speaker.get("samples")
     return speakers.drop_numeric_vectors(
         {
-            "label": speaker.get("label"),
+            "label": speakers.as_str(speaker.get("label")),
             "guess": _public_guess(speaker.get("guess")),
             "samples": [
                 public_sample
@@ -181,7 +204,7 @@ def _public_speaker(speaker: dict) -> dict:
                 if public_sample is not None
             ],
             "suggested": _public_suggested(speaker.get("suggested")),
-            "speaking_seconds": speaker.get("speaking_seconds"),
+            "speaking_seconds": speakers.as_number(speaker.get("speaking_seconds")),
         }
     )
 
@@ -205,11 +228,16 @@ def _public_pending_meeting(meeting: dict) -> dict:
     แต่ตอนนี้ผลลัพธ์ผ่าน speakers.drop_numeric_vectors อีกชั้น -- เวกเตอร์ที่วางเป็น *ค่า*
     ของ meeting_dir เอง (ซึ่งอยู่ใน allowlist) ไม่มีทางถูกกันด้วยการแจกแจงชื่อคีย์เพิ่มอีกกี่
     ชั้นก็ตาม ดู docstring ของ drop_numeric_vectors สำหรับประวัติสี่รอบที่ผ่านมา
+
+    รีวิวรอบที่หก: meeting_dir ประกาศเป็น str แล้วบังคับตามนั้น -- app.js ใช้มันสามที่และ
+    เป็นสตริงทั้งสามที่ (speakerKey() ต่อสตริง, esc(meeting.meeting_dir), และ
+    encodeURIComponent(found.meeting) ตอนยิง /api/speakers/audio/) ไม่มีทางที่รูปทรงไหน
+    ของเวกเตอร์จะเป็น str ได้ จึงไม่เหลือรูปทรงให้เลือกอีก
     """
     queued = meeting.get("speakers")
     return speakers.drop_numeric_vectors(
         {
-            "meeting_dir": meeting.get("meeting_dir"),
+            "meeting_dir": speakers.as_str(meeting.get("meeting_dir")),
             "speakers": [
                 _public_speaker(s)
                 for s in (queued if isinstance(queued, list) else [])
@@ -217,6 +245,43 @@ def _public_pending_meeting(meeting: dict) -> dict:
             ],
         }
     )
+
+
+# ความยาวสูงสุดของค่า param หนึ่งตัวที่ยอมให้ไปโผล่ในข้อความที่ render ออกมา (และใน
+# params.path ที่ส่งออก)
+#
+# ทำไมต้องมีเพดาน: params เป็นฟิลด์ปลายเปิดฟิลด์เดียวที่เหลืออยู่ -- render() เอาค่าใน
+# params ไปเติมลงเทมเพลต ("เสร็จแล้ว: {path}") ผลลัพธ์จึงเป็น str จริง ๆ ตามชนิดที่ text
+# ประกาศไว้ การประกาศชนิดของใบจึงจับไม่ได้ตามนิยาม คนที่แก้ state/activity.jsonl ด้วยมือ
+# วางสตริงที่เป็นเวกเตอร์ serialize แล้วไว้ใต้ {path} ได้ตรง ๆ
+#
+# ทำไม 512: param จริงในโปรเจกต์นี้มีแค่ชื่องาน (~20 ตัวอักษร) พาธไฟล์ (MAX_PATH ของ
+# Windows คือ 260) ตัวนับเล็ก ๆ และข้อความ error จาก ffmpeg/OSError -- 512 กว้างพอสำหรับ
+# ทุกตัวโดยยังไม่ต้องตัดอะไรที่มีประโยชน์ทิ้ง ส่วนเวกเตอร์ 256 มิติที่ serialize แล้วยาว
+# เกินสองพันตัวอักษร (วัดแล้วที่ความละเอียดของ float จริง: 5,324) จึงถูกตัดจนกู้คืนไม่ได้
+# เสมอ -- ตัดได้ดีที่สุดราว 9% ของเวกเตอร์เท่านั้น เพดานนี้เป็นชั้นที่สอง
+# เท่านั้น -- ชั้นแรกคือ _render_param ที่ไม่ยอมให้ค่าที่ไม่ใช่ scalar ถูกเติมลงเทมเพลตเลย
+# (str([0.11, 0.12]) คือการขนเวกเตอร์ออกไปในรูปสตริง จึงห้ามเด็ดขาด)
+PARAM_VALUE_MAX_CHARS = 512
+
+
+def _render_param(value) -> str | None:
+    """ค่า param หนึ่งตัวในรูปสตริงที่เอาไปเติมเทมเพลตได้ -- None แปลว่าไม่เอาไปเติมเลย
+
+    รับเฉพาะ scalar: สตริง ตัวเลขเดี่ยว หรือ bool ไม่มี param จริงตัวไหนในโปรเจกต์นี้ที่
+    เป็น list หรือ dict (ดู activity.append/on_event ทุกจุดเรียก) ค่าที่ไม่ใช่ scalar จึง
+    ถูกทิ้ง ไม่ใช่ str() ทับ -- render() รับมือกับ param ที่หายไปได้อยู่แล้วโดยไม่ raise
+    (คืนเทมเพลตดิบกลับมาเมื่อ format() โยน KeyError ดู src/messages.py)
+    """
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    elif isinstance(value, str):
+        text = value
+    elif speakers.as_number(value) is not None:
+        text = str(speakers.as_number(value))
+    else:
+        return None
+    return text[:PARAM_VALUE_MAX_CHARS]
 
 
 def _public_activity(entry: dict, lang: str) -> dict:
@@ -247,19 +312,42 @@ def _public_activity(entry: dict, lang: str) -> dict:
     catalog.get(code) โยน TypeError (unhashable) และ params ที่ไม่ใช่ dict ทำให้
     format(**params) โยน TypeError ทั้งสองตัวหลุดออกไปเป็น 500 ทั้งหน้าจากบรรทัดเดียวที่ถูก
     แก้มือ ทั้งที่ฟังก์ชันนี้อ่านไฟล์ที่ "แก้มือได้ตามดีไซน์" อยู่แล้ว
+
+    รีวิวรอบที่หก -- สองการรั่วคนละทาง ต้องปิดคนละแบบ:
+
+    (1) params ที่ส่งออก: ตรวจครบทั้งสามฝั่งที่บริโภค /api/state แล้ว (web/app.js,
+        web/enroll.js, D:\\COWORK\\COWORK Desktop\\meetingrun.js) ไม่มีใครอ่านอะไรใน params
+        นอกจาก params.path ซึ่งเป็นสตริง (meetingrun.js finishedMeetingId: e.params &&
+        e.params.path แล้ว String(last.params.path).split(...)) การส่ง params ทั้งก้อนออกไป
+        จึงเป็นการเปิดฟิลด์ปลายเปิดไว้เปล่า ๆ -- ตอนนี้ออกไปแค่ path ตัวเดียวและเฉพาะเมื่อ
+        มันเป็นสตริงจริง params ที่ไม่มี path กลายเป็น {} ซึ่ง meetingrun.js กรองทิ้งเองอยู่แล้ว
+
+    (2) text: render() เอาค่าใน params ไปเติมลงเทมเพลต ผลลัพธ์จึงเป็น str ตามชนิดที่ text
+        ประกาศไว้เป๊ะ ๆ การประกาศชนิดของใบจับทางนี้ไม่ได้ตามนิยาม ต้องกรองที่ *ขาเข้า* ของ
+        render แทน: _render_param ทิ้งทุกค่าที่ไม่ใช่ scalar และตัดความยาวที่
+        PARAM_VALUE_MAX_CHARS (ดูเหตุผลของตัวเลขที่นั่น)
     """
     safe = speakers.drop_numeric_vectors(entry)
-    code = safe.get("code")
-    code = code if isinstance(code, str) else ""
-    params = safe.get("params")
-    params = params if isinstance(params, dict) else {}
+    code = speakers.as_str(safe.get("code")) or ""
+    raw_params = safe.get("params")
+    raw_params = raw_params if isinstance(raw_params, dict) else {}
+    render_params = {}
+    for key, value in raw_params.items():
+        # คีย์ที่ไม่ใช่สตริงทำให้ format(**params) โยน TypeError -- และไม่มีเทมเพลตไหน
+        # อ้างถึงมันได้อยู่แล้ว
+        if not isinstance(key, str):
+            continue
+        text = _render_param(value)
+        if text is not None:
+            render_params[key] = text
+    path = _render_param(speakers.as_str(raw_params.get("path")))
     return {
-        "ts": safe.get("ts"),
-        "job": safe.get("job"),
+        "ts": speakers.as_str(safe.get("ts")),
+        "job": speakers.as_str(safe.get("job")),
         "code": code,
-        "level": safe.get("level"),
-        "params": params,
-        "text": render(code, params, lang),
+        "level": speakers.as_str(safe.get("level")),
+        "params": {} if path is None else {"path": path},
+        "text": render(code, render_params, lang),
     }
 
 
@@ -274,14 +362,19 @@ def _speaker_summary(speaker: dict) -> dict:
     รูปของข้อมูล: ผู้พูดที่รอตั้งชื่อมีตัวอย่างเสียงเป็น samples[]{text,start,end} ที่ผู้ใช้
     ต้องอ่าน ส่วน entry ในทะเบียนมี samples[] เป็นเวกเตอร์เสียงล้วน (samples[].embedding)
     ซึ่งไม่มีอะไรให้ผู้ใช้อ่านเลยและเป็นข้อมูล biometric ทั้งก้อน -- ที่นี่จึงเหลือแค่จำนวน
+
+    ไม่มี drop_numeric_vectors ห่อไว้ (เอาออกในรีวิวรอบที่หก) เพราะมันไม่เคยกันอะไรได้ตรงนี้
+    เลยและการปล่อยไว้ทำให้รายงานอ่านเหมือนมีการป้องกันที่ไม่มีจริง: ทั้งสามค่าถูกกำหนดชนิด
+    ตั้งแต่ต้นทาง -- load_registry ปล่อยผ่านเฉพาะ entry ที่ id/name เป็น str และ samples
+    เป็น list (isinstance ครบทั้งสามคีย์) ส่วน sample_count คือ len() ซึ่งเป็น int เสมอ
+    นี่คือแพตเทิร์นเดียวกับที่ทำให้ /api/speakers เป็น endpoint เดียวที่ไม่เคยถูกเจาะเลย
+    ตลอดหกรอบ -- ประกาศชนิดที่ขอบแล้วบังคับตามนั้น ไม่ใช่ไล่เดาว่าค่าไหนหน้าตาเหมือนเวกเตอร์
     """
-    return speakers.drop_numeric_vectors(
-        {
-            "id": speaker["id"],
-            "name": speaker["name"],
-            "sample_count": len(speaker.get("samples", [])),
-        }
-    )
+    return {
+        "id": speaker["id"],
+        "name": speaker["name"],
+        "sample_count": len(speaker.get("samples", [])),
+    }
 
 
 def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Flask:
@@ -649,11 +742,20 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             )
             match = matches.get(entry["audio_file"])
             if match is not None:
-                entry["match"] = {
-                    "name": match.name,
-                    "score": round(match.score, 2),
-                    "confident": match.confident,
-                }
+                # ประกาศชนิดเหมือนทุกใบอื่น แม้ค่าทั้งสามจะมาจาก Match ที่ประกอบขึ้นบน
+                # เซิร์ฟเวอร์เอง (name มาจากทะเบียนซึ่ง load_registry การันตีว่าเป็น str
+                # แล้ว) -- score ต่างจากใบอื่นตรงที่ทิ้งทั้ง match ไม่ใช่ปล่อยเป็น None
+                # เพราะ enroll.js เรียก file.match.score.toFixed(2) โดยไม่มีการ์ด ทั้ง
+                # null และ undefined จะทำให้ทั้งหน้าพัง ส่วน "ไม่มี match" เป็นสถานะที่
+                # หน้านั้นรองรับอยู่แล้ว (if (file.match))
+                score = speakers.as_number(match.score)
+                name = speakers.as_str(match.name)
+                if score is not None and name is not None:
+                    entry["match"] = {
+                        "name": name,
+                        "score": round(score, 2),
+                        "confident": speakers.as_bool(match.confident),
+                    }
         return jsonify(
             {
                 "files": entries,
