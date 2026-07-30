@@ -1,4 +1,10 @@
-from src.voiceprint import clean_intervals
+from src.voiceprint import (
+    MAX_SEGMENTS_PER_SPEAKER,
+    MIN_SEGMENT_SECONDS,
+    TARGET_SECONDS,
+    clean_intervals,
+    select_intervals,
+)
 
 
 def _turn(start, end, speaker):
@@ -82,3 +88,63 @@ def test_clean_intervals_ignores_a_zero_length_turn():
     turns = [_turn(3.0, 3.0, "A"), _turn(0.0, 2.0, "B")]
 
     assert clean_intervals(turns) == {"B": [(0.0, 2.0)]}
+
+
+def test_select_intervals_drops_segments_shorter_than_the_minimum():
+    # ท่อน 1.2 วิของคนเดียวกันได้คะแนน 0.628 เทียบกับ 0.682 ของท่อน 4 วิ (วัด 2026-07-30)
+    clean = {"A": [(0.0, 1.4), (10.0, 13.0)]}
+
+    assert select_intervals(clean) == {"A": [(10.0, 13.0)]}
+
+
+def test_select_intervals_drops_a_label_with_no_long_enough_segment():
+    clean = {"A": [(0.0, 1.0), (2.0, 3.2)], "B": [(5.0, 9.0)]}
+
+    result = select_intervals(clean)
+
+    assert "A" not in result
+    assert result == {"B": [(5.0, 9.0)]}
+
+
+def test_select_intervals_takes_the_longest_segments_first():
+    clean = {"A": [(0.0, 2.0), (10.0, 20.0), (30.0, 35.0)]}
+
+    assert select_intervals(clean) == {"A": [(10.0, 20.0), (30.0, 35.0), (0.0, 2.0)]}
+
+
+def test_select_intervals_stops_once_it_has_enough_seconds():
+    # 3 ท่อน x 8 วิ = 24 วิ ผ่าน TARGET_SECONDS (20) ที่ท่อนที่สาม ท่อนที่สี่ไม่ถูกเก็บ
+    clean = {"A": [(0.0, 8.0), (10.0, 18.0), (20.0, 28.0), (30.0, 38.0)]}
+
+    result = select_intervals(clean)
+
+    assert result["A"] == [(0.0, 8.0), (10.0, 18.0), (20.0, 28.0)]
+    assert sum(end - start for start, end in result["A"]) >= TARGET_SECONDS
+
+
+def test_select_intervals_respects_the_segment_cap_when_turns_are_short():
+    # ท่อนสั้น ๆ จำนวนมาก: เพดานจำนวนท่อนต้องหยุดก่อนที่จะครบ 20 วิ
+    clean = {"A": [(i * 10.0, i * 10.0 + 1.6) for i in range(30)]}
+
+    result = select_intervals(clean)
+
+    assert len(result["A"]) == MAX_SEGMENTS_PER_SPEAKER
+    assert sum(end - start for start, end in result["A"]) < TARGET_SECONDS
+
+
+def test_select_intervals_is_deterministic_when_lengths_tie():
+    # ผลที่เรียงไม่นิ่งแปลว่ารันสองครั้งได้ voiceprint คนละตัวจากไฟล์เดียวกัน ซึ่งทำให้
+    # การ calibrate เกณฑ์ไม่มีความหมายเลย -- ตัดสินด้วย start เมื่อความยาวเท่ากัน
+    clean = {"A": [(30.0, 33.0), (10.0, 13.0), (20.0, 23.0)]}
+
+    assert select_intervals(clean)["A"] == [(10.0, 13.0), (20.0, 23.0), (30.0, 33.0)]
+
+
+def test_select_intervals_accepts_a_segment_exactly_at_the_minimum():
+    clean = {"A": [(0.0, MIN_SEGMENT_SECONDS)]}
+
+    assert select_intervals(clean) == {"A": [(0.0, MIN_SEGMENT_SECONDS)]}
+
+
+def test_select_intervals_returns_nothing_for_an_empty_input():
+    assert select_intervals({}) == {}

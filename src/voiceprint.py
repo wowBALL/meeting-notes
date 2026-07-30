@@ -98,3 +98,39 @@ def clean_intervals(turns: list[dict]) -> dict[str, list[tuple[float, float]]]:
         if remaining:
             clean[label] = sorted(remaining)
     return clean
+
+
+def select_intervals(
+    clean: dict[str, list[tuple[float, float]]],
+    min_seconds: float = MIN_SEGMENT_SECONDS,
+    target_seconds: float = TARGET_SECONDS,
+    max_segments: int = MAX_SEGMENTS_PER_SPEAKER,
+) -> dict[str, list[tuple[float, float]]]:
+    """ท่อนที่จะเอาไปเข้าโมเดล เรียงยาวไปสั้น -- label ที่ไม่มีท่อนผ่านเกณฑ์ไม่มีคีย์
+
+    เอาท่อนยาวก่อนเพราะเวกเตอร์จากท่อนยาวนิ่งกว่า และหยุดเมื่อครบ `target_seconds`
+    เพราะเสียงที่เกินจากนั้นแทบไม่ขยับค่าเฉลี่ยแล้ว แต่ยังจ่ายเวลา GPU เต็มราคา
+
+    `(-ความยาว, start)` เป็นกุญแจการเรียง ไม่ใช่ `-ความยาว` เดี่ยว ๆ: ท่อนที่ยาวเท่ากัน
+    ต้องมีลำดับที่แน่นอน ไม่งั้นรันสองครั้งกับไฟล์เดียวกันได้ voiceprint คนละตัว แล้วการ
+    calibrate เกณฑ์ (ซึ่งวัดคะแนนระหว่าง voiceprint) ก็ไม่มีความหมาย
+
+    เช็คเงื่อนไขหยุด *ก่อน* เก็บท่อน ไม่ใช่หลัง -- เก็บก่อนแล้วเช็คจะทำให้ได้เกิน
+    max_segments มาหนึ่งท่อนเสมอ
+    """
+    selected: dict[str, list[tuple[float, float]]] = {}
+    for label, intervals in clean.items():
+        long_enough = [
+            (start, end) for start, end in intervals if end - start >= min_seconds
+        ]
+        long_enough.sort(key=lambda span: (-(span[1] - span[0]), span[0]))
+        chosen: list[tuple[float, float]] = []
+        total = 0.0
+        for start, end in long_enough:
+            if total >= target_seconds or len(chosen) >= max_segments:
+                break
+            chosen.append((start, end))
+            total += end - start
+        if chosen:
+            selected[label] = chosen
+    return selected
