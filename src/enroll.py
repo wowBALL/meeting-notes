@@ -228,24 +228,65 @@ def analyze(audio_path: Path, pipeline: Any, model: str, embedder) -> dict:
     # ต้องขยายอายุของ TemporaryDirectory ให้ครอบทั้งฟังก์ชัน ซึ่งจะทำให้ path การ reject
     # ทุกทางด้านบน (multiple_speakers/too_short/unusable_embedding) ถือ temp dir ไว้โดย
     # ไม่จำเป็น -- ถ้าวัดแล้วช้าจริงค่อยรวมทีหลัง
-    try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
+        try:
             convert_to_wav(audio_path, wav_path)
+        except Exception as e:
+            # finding 4 ของรีวิวรอบนี้: การแปลงรอบสองนี้คือ convert_to_wav ตัวเดียวกับรอบแรก
+            # เป๊ะ ๆ (ถอดรหัส container เดิมด้วย ffmpeg ตัวเดียวกัน) ต่างกันแค่เวลาที่เรียก --
+            # สาเหตุที่มันพังจึงเป็นสาเหตุเดียวกับตอนพังรอบแรกทุกประการ (ffmpeg ถอดรหัสไม่ได้/
+            # ไฟล์เสีย) เดิมโค้ดตรงนี้ปนอยู่ในบล็อกเดียวกับ extract_voiceprints แล้วรายงาน
+            # "unusable_embedding" ซึ่งบอกผู้ใช้ผิด ๆ ว่า "ลองอัดใหม่ให้เสียงชัดกว่านี้" ทั้งที่
+            # ปัญหาคือแปลงไฟล์ไม่ได้ เหมือนรอบแรกที่รายงาน "analysis_failed" -- เหตุเดียวกัน
+            # ต้องได้เหตุผลเดียวกัน แยก try นี้ออกมาต่างหากจาก extract_voiceprints ด้านล่าง
+            logger.warning(
+                "แปลงเสียงของ %s เป็น wav ไม่สำเร็จ (รอบที่สอง ก่อนสร้าง voiceprint): %s",
+                audio_path.name,
+                e,
+            )
+            return {
+                **base,
+                "status": "rejected",
+                "reason": "analysis_failed",
+                "detail": str(e),
+            }
+        try:
             voiceprints = extract_voiceprints(wav_path, result.turns, embedder)
-    except Exception as e:
-        logger.warning("สร้าง voiceprint ของ %s ไม่สำเร็จ: %s", audio_path.name, e)
-        return {**base, "status": "rejected", "reason": "unusable_embedding"}
+            # finding 3 ของรีวิวรอบนี้: เดิม embedder.checkpoint ถูกอ่านนอก try ทั้งหมด (ตอน
+            # ประกอบผล "ok" ด้านล่าง) -- embedder ที่ใช้งานได้ปกติทุกอย่างแต่ไม่มี attribute นี้
+            # ทำให้ analyze() raise AttributeError หลุดออกไปตรง ๆ ทั้งที่ docstring ของ
+            # ฟังก์ชันนี้เองสัญญาไว้ว่าไม่ raise ไม่ว่าเกิดอะไรขึ้น เพราะผู้เรียกคือ watcher ที่
+            # ไม่มีมนุษย์นั่งดูอยู่ -- ไฟล์ผลที่ไม่ถูกเขียนเลยคือหน้าเว็บค้างที่ "กำลังวิเคราะห์"
+            # ตลอดกาล อ่านมันไว้ในนี้ ในโซนที่มี except คุ้มกันอยู่แล้ว แทนที่จะอ่านทีหลังตอน
+            # ไม่มีการ์ดอะไรคุ้มกันเลย
+            embedding_model = embedder.checkpoint
+        except Exception as e:
+            logger.warning("สร้าง voiceprint ของ %s ไม่สำเร็จ: %s", audio_path.name, e)
+            return {**base, "status": "rejected", "reason": "unusable_embedding"}
 
     voiceprint = voiceprints.get(next(iter(usable_labels)))
     if voiceprint is None:
         return {**base, "status": "rejected", "reason": "unusable_embedding"}
 
+    # finding 1 (ตัดสินใจแล้วโดยเจ้าของโปรเจกต์): MIN_SPEAKING_SECONDS เดิมผูกกับเวลาพูด
+    # ทั้งหมดได้จริง เพราะเวกเตอร์เคยมาจาก centroid ที่ครอบคลุมเสียงพูดทั้งหมดของคนคนนั้น --
+    # ตอนนี้เวกเตอร์มาจากเฉพาะช่วงสะอาดที่ select_intervals คัดแล้วเท่านั้น ซึ่งเป็นเซตย่อย
+    # ของเวลาพูดทั้งหมดเสมอ ไฟล์ที่มี speaking_seconds ผ่านด่านข้างบน (>=10) จึงยังมีทางได้
+    # เวกเตอร์จากเสียงแค่ไม่กี่วินาที (ทำซ้ำจาก: turns เก้าท่อน 1.0 วิ บวกอีกหนึ่งท่อน 2.0 วิ
+    # -- speaking_seconds 11.0 ผ่านด่าน แต่ embedding_seconds เหลือแค่ 2.0) กฎ 10 วินาทีเดิม
+    # จึงต้องถูกนำมาใช้กับเสียงที่ *เข้าไปในเวกเตอร์จริง* (voiceprint.seconds) ด้วย ไม่ใช่แค่
+    # เวลาพูดทั้งหมดอีกต่อไป -- นี่คือสิ่งที่กฎ 10 วินาทีพยายามพูดมาตลอด ใช้ค่าคงที่ตัวเดิม
+    # ไม่เพิ่มตัวที่สอง สำหรับคลิปพูดคนเดียว เสียงสะอาดกับเวลาพูดทั้งหมดใกล้เคียงกันจนแทบไม่
+    # กระทบ ส่วนคลิปที่ส่วนใหญ่พูดทับกัน ด่านนี้จะปฏิเสธถูกต้อง
+    if voiceprint.seconds < MIN_SPEAKING_SECONDS:
+        return {**base, "status": "rejected", "reason": "too_short"}
+
     return {
         **base,
         "status": "ok",
         "model": model,
-        "embedding_model": embedder.checkpoint,
+        "embedding_model": embedding_model,
         "embedding": list(voiceprint.embedding),
         "embedding_seconds": voiceprint.seconds,
         "segment_count": voiceprint.segment_count,

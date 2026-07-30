@@ -409,6 +409,139 @@ def test_analyze_turns_a_conversion_failure_into_a_rejected_result(tmp_path, mon
     assert diarize_calls == []
 
 
+# --- รีวิวรอบนี้: finding 1/2/3 ---
+
+
+def test_analyze_rejects_when_the_embedding_rests_on_less_than_the_minimum(
+    tmp_path, monkeypatch
+):
+    """finding 1 (ตัดสินใจแล้วโดยเจ้าของโปรเจกต์): เวกเตอร์มาจากเฉพาะช่วงเสียงสะอาดที่
+    select_intervals คัดแล้วเท่านั้น ซึ่งเป็นเซตย่อยของเวลาพูดทั้งหมด -- ก่อนหน้านี้เวกเตอร์
+    มาจาก centroid ที่ครอบคลุมเสียงพูดทั้งหมดของคน ๆ นั้น MIN_SPEAKING_SECONDS จึงเคยผูกกับ
+    เวกเตอร์ได้จริง ตอนนี้ไฟล์ที่มี speaking_seconds ผ่านด่าน (>=10) แต่เวกเตอร์จริงมาจาก
+    เสียงแค่ไม่กี่วินาทีต้องยังถูกปฏิเสธ (ทำซ้ำจาก: turns เก้าท่อน 1.0 วิ บวกอีกหนึ่งท่อน 2.0
+    วิ -- speaking_seconds 11.0 ผ่านด่าน แต่ embedding_seconds เหลือแค่ 2.0)
+    """
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    turns = [{"start": float(i), "end": float(i) + 1.0, "speaker": "SPEAKER_00"} for i in range(9)]
+    turns.append({"start": 20.0, "end": 22.0, "speaker": "SPEAKER_00"})
+    result = DiarizationResult(turns=turns)
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+    _stub_extract_voiceprints(
+        monkeypatch,
+        {"SPEAKER_00": Voiceprint(embedding=[0.1, 0.2], seconds=2.0, segment_count=1)},
+    )
+
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "too_short"
+    # ผลนี้ต้องยังมีคีย์ base ครบเหมือนการปฏิเสธอื่นทุกครั้ง
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["speaking_seconds"] == 11.0
+    assert analyzed["suggested_name"] == "สมชาย"
+    assert "embedding" not in analyzed
+
+
+def test_analyze_reports_unusable_embedding_when_extraction_omits_the_counted_label(
+    tmp_path, monkeypatch
+):
+    """finding 2: บรานช์ "extraction สำเร็จแต่ไม่มี voiceprint ของป้ายที่นับเป็นคน" (เดิม
+    ไม่มีเทสต์ตรวจเลย) -- ป้ายเดียวพูดยาวพอผ่านทั้งด่านนับคนและด่าน speaking_seconds แต่
+    extract_voiceprints (จำลองว่าทำงานจบแล้ว) ไม่มี key ของป้ายนั้นใน dict ที่คืนมา (เช่น
+    ทุกช่วงของป้ายนั้นคำนวณเวกเตอร์ไม่ได้จริง) ไฟล์ 45 วินาทีที่ extract ไม่สำเร็จต้องไม่
+    ถูกรายงานเป็น 0.0 วิแล้วปฏิเสธว่า "สั้นเกินไป" (ดู docstring ของ analyze()) --
+    speaking_seconds/speaker_count ต้องยังเป็นค่าจริง
+    """
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[{"start": 0.0, "end": 45.0, "speaker": "SPEAKER_00"}],
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+    _stub_extract_voiceprints(monkeypatch, {})  # extraction จบแล้ว แต่ไม่มี voiceprint ให้ป้ายนี้
+
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "unusable_embedding"
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["speaking_seconds"] == 45.0
+    assert "embedding" not in analyzed
+
+
+def test_analyze_reports_unusable_embedding_when_extraction_raises(tmp_path, monkeypatch):
+    """finding 2: บรานช์ "extraction raise" (เดิมไม่มีเทสต์ตรวจเลย) -- ไฟล์ 45 วินาทีที่
+    extract_voiceprints พังทั้งฟังก์ชัน (เช่น torch/pyannote โยน exception ที่ไม่ได้ถูก
+    กลืนไว้เอง) ต้องยังรายงาน speaking_seconds/speaker_count เป็นค่าจริง ไม่ใช่ 0.0 แล้ว
+    ปฏิเสธผิดเหตุผลเป็น "สั้นเกินไป"
+    """
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[{"start": 0.0, "end": 45.0, "speaker": "SPEAKER_00"}],
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("cuda oom")
+
+    monkeypatch.setattr("src.enroll.extract_voiceprints", _raise)
+
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "unusable_embedding"
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["speaking_seconds"] == 45.0
+    assert "embedding" not in analyzed
+
+
+def test_analyze_does_not_raise_when_the_embedder_has_no_checkpoint_attribute(
+    tmp_path, monkeypatch
+):
+    """finding 3: embedder.checkpoint เดิมถูกอ่านนอก try ทั้งหมด -- embedder ที่ทำงานได้ปกติ
+    ทุกอย่างแต่ไม่มี attribute นี้ (คนละกรณีกับ extract_voiceprints พัง) ทำให้ analyze()
+    raise AttributeError หลุดออกไปตรง ๆ analyze() สัญญาไว้ในชื่อฟังก์ชันของมันเองว่าไม่ raise
+    ไม่ว่าเกิดอะไรขึ้น เพราะผู้เรียกคือ watcher ที่ไม่มีมนุษย์นั่งดูอยู่ -- ไฟล์ผลที่ไม่ถูกเขียน
+    เลยคือหน้าเว็บค้างที่ "กำลังวิเคราะห์" ตลอดกาล
+    """
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[{"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"}],
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+    _stub_extract_voiceprints(
+        monkeypatch,
+        {"SPEAKER_00": Voiceprint(embedding=[0.1, 0.2], seconds=40.0, segment_count=1)},
+    )
+
+    class _EmbedderWithoutCheckpoint:
+        """embedder ที่ทำงานได้ปกติทุกอย่าง ยกเว้นไม่มี .checkpoint -- จงใจไม่สืบทอดจาก
+        _StubEmbedder เพื่อไม่ให้บังเอิญมี attribute นี้ติดมา"""
+
+    analyzed = enroll.analyze(
+        audio_path,
+        pipeline=object(),
+        model=MODEL,
+        embedder=_EmbedderWithoutCheckpoint(),
+    )
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "unusable_embedding"
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["speaking_seconds"] == 40.0
+    assert "embedding" not in analyzed
+
+
 # --- Task 10: เกณฑ์ใหม่ที่นับ "กี่คน" จาก select_intervals(clean_intervals(turns)) ---
 # เทสต์กลุ่มนี้ (จาก task-10-brief.md) ใช้ไฟล์เสียงจริง (_write_enroll_wav) กับ pipeline
 # ปลอมแทน diarize_audio ปลอม -- ปล่อยให้ diarize_audio/extract_voiceprints ตัวจริงทำงาน
