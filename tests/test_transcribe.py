@@ -43,7 +43,10 @@ def test_transcribe_audio_calls_model_with_thai_language(tmp_path):
     assert call_args.kwargs["language"] == "th"
 
 
-def test_transcribe_audio_requests_batched_inference(tmp_path):
+def test_transcribe_audio_does_not_batch_by_default(tmp_path):
+    """วัดกับเสียงประชุมจริงแล้ว batched ทำให้ faster-whisper วนซ้ำคำเดิมหนัก
+    (โทเคนซ้ำมากสุดกิน 31.6% ของ transcript, ได้ 76 คำ) แบบ sequential ได้ 96 คำ
+    และซ้ำเหลือ 3.1% -- ห้ามส่ง batch_size เมื่อไม่ได้เปิด batched"""
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"fake audio data")
 
@@ -51,6 +54,18 @@ def test_transcribe_audio_requests_batched_inference(tmp_path):
     mock_model.transcribe.return_value = ([], SimpleNamespace(language="th"))
 
     transcribe_audio(audio_path, model=mock_model)
+
+    assert "batch_size" not in mock_model.transcribe.call_args.kwargs
+
+
+def test_transcribe_audio_requests_batched_inference_when_asked(tmp_path):
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake audio data")
+
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([], SimpleNamespace(language="th"))
+
+    transcribe_audio(audio_path, model=mock_model, batched=True)
 
     call_args = mock_model.transcribe.call_args
     assert call_args.kwargs["batch_size"] == transcribe_module.BATCH_SIZE
@@ -69,7 +84,7 @@ def test_transcribe_audio_loads_model_by_size_when_none_given(tmp_path):
     ) as mock_load:
         transcribe_audio(audio_path, model_size="medium")
 
-    mock_load.assert_called_once_with("medium")
+    mock_load.assert_called_once_with("medium", batched=False)
     mock_model.transcribe.assert_called_once()
 
 
@@ -102,9 +117,8 @@ def _fake_faster_whisper(ctor):
     return fake_fw
 
 
-def test_load_whisper_model_returns_a_batched_pipeline_and_caches_it(monkeypatch):
+def _load_with_fakes(monkeypatch, *args, **kwargs):
     monkeypatch.setattr(transcribe_module, "_MODEL_CACHE", {})
-
     constructed = []
 
     def fake_ctor(size, device=None, compute_type=None):
@@ -112,20 +126,37 @@ def test_load_whisper_model_returns_a_batched_pipeline_and_caches_it(monkeypatch
         return f"model-{size}-{device}-{compute_type}"
 
     fake_fw = _fake_faster_whisper(fake_ctor)
-
     with (
         patch.dict(sys.modules, {"faster_whisper": fake_fw}),
         patch.object(transcribe_module, "_register_cuda_dll_dirs"),
         patch.object(
-            transcribe_module, "_select_device_and_compute", return_value=("cuda", "int8_float16")
+            transcribe_module,
+            "_select_device_and_compute",
+            return_value=("cuda", "int8_float16"),
         ),
     ):
-        model1 = load_whisper_model("large-v3")
-        model2 = load_whisper_model("large-v3")
+        result = [load_whisper_model(*args, **kwargs) for _ in range(2)]
+    return result, constructed, fake_fw
+
+
+def test_load_whisper_model_returns_the_raw_model_by_default(monkeypatch):
+    """ไม่ห่อ BatchedInferencePipeline เว้นแต่สั่ง -- ตัวห่อทำให้วนซ้ำคำ (วัดแล้ว)"""
+    (model1, model2), constructed, fake_fw = _load_with_fakes(monkeypatch, "large-v3")
+
+    assert model1 == "model-large-v3-cuda-int8_float16"
+    assert model2 == model1  # cached
+    assert constructed == [("large-v3", "cuda", "int8_float16")]  # constructed once
+    fake_fw.BatchedInferencePipeline.assert_not_called()
+
+
+def test_load_whisper_model_wraps_in_a_batched_pipeline_when_asked(monkeypatch):
+    (model1, model2), constructed, fake_fw = _load_with_fakes(
+        monkeypatch, "large-v3", batched=True
+    )
 
     assert model1 == "batched(model-large-v3-cuda-int8_float16)"
     assert model2 == model1
-    assert constructed == [("large-v3", "cuda", "int8_float16")]  # constructed once
+    assert constructed == [("large-v3", "cuda", "int8_float16")]
     fake_fw.BatchedInferencePipeline.assert_called_once_with(
         model="model-large-v3-cuda-int8_float16"
     )

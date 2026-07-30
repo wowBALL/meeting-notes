@@ -50,7 +50,14 @@ def _section_body(summary_text: str, heading: str) -> str:
         # หัวข้อถัดไป หรือเส้นคั่นก่อน footer = จบหัวข้อนี้
         if stripped.startswith("## ") or stripped == "---":
             break
-        body.append(line.rstrip())
+        # เอาแต่ bullet ตามที่ template ใน prompt กำหนด (`- <เรื่องค้าง>`)
+        #
+        # เจอจากสรุปประชุมจริง: แม้ prompt สั่งให้ "เว้นว่าง" เมื่อไม่มีเนื้อหา โมเดลก็
+        # เขียนหมายเหตุอย่าง "(ไม่พบประเด็นที่เห็นไม่ตรงกันชัดเจน)" ลงไปแทน ถ้านับ
+        # บรรทัดนั้นเป็นเรื่องค้าง ประชุมครั้งถัดไปจะได้ "(ไม่มีเรื่องค้าง)" มาเป็น
+        # รายการ แล้วถูกสั่งให้รายงานความคืบหน้าของมัน -- สรุปจะเริ่มพูดถึงตัวเอง
+        if stripped.startswith("- "):
+            body.append(stripped)
     return "\n".join(body).strip()
 
 

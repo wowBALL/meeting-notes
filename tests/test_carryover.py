@@ -76,6 +76,38 @@ def test_a_summary_written_before_profiles_existed_is_skipped(tmp_path):
     assert previous_open_items(meetings, "dev") == ""
 
 
+def test_a_parenthetical_no_items_note_is_not_carried_over(tmp_path):
+    """เจอจากสรุปประชุมจริง (2026-07-30): แม้ prompt สั่งให้เว้นว่าง โมเดลก็เขียน
+    "(ไม่พบประเด็นที่เห็นไม่ตรงกันชัดเจน)" ใส่หัวข้อที่ไม่มีเนื้อหา ถ้าปล่อยไว้
+    ประชุมครั้งถัดไปจะได้ "(ไม่มีเรื่องค้าง)" มาเป็นเรื่องค้างแล้วเขียนความคืบหน้าของมัน
+
+    เรื่องค้างคือ bullet เท่านั้น (`- ...`) ตามที่ template ใน prompt กำหนด
+    บรรทัดที่ไม่ใช่ bullet จึงไม่ใช่รายการ ไม่ต้องยกไป
+    """
+    meetings = tmp_path / "meetings"
+    for name, body in (
+        ("2026-07-20_09-00-a", "(ไม่มีเรื่องค้าง)"),
+        ("2026-07-21_09-00-b", "ไม่มีเรื่องที่ต้องคุยต่อ"),
+        ("2026-07-22_09-00-c", "(ไม่พบ)\n(ไม่มีอะไรค้าง)"),
+    ):
+        d = meetings / name
+        d.mkdir(parents=True)
+        (d / "summary.md").write_text(_summary("dev", body), encoding="utf-8")
+        assert previous_open_items(meetings, "dev") == "", f"{name} ไม่ควรถูกยกไป"
+
+
+def test_a_real_bullet_next_to_a_note_still_carries_only_the_bullet(tmp_path):
+    meetings = tmp_path / "meetings"
+    _meeting(
+        meetings,
+        "2026-07-20_09-00-standup",
+        "dev",
+        "(ยังไม่ได้สะสาง)\n- เรื่องค้างจริง A\n- เรื่องค้างจริง B",
+    )
+
+    assert previous_open_items(meetings, "dev") == "- เรื่องค้างจริง A\n- เรื่องค้างจริง B"
+
+
 def test_an_empty_open_items_section_returns_nothing(tmp_path):
     meetings = tmp_path / "meetings"
     _meeting(meetings, "2026-07-20_09-00-standup", "dev", open_items="")

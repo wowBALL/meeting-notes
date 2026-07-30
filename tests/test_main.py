@@ -67,7 +67,9 @@ def test_main_loads_whisper_model_once_and_passes_to_watch_loop(tmp_path, monkey
     ):
         main(base_dir=tmp_path)
 
-    mock_load_whisper.assert_called_once_with("medium")
+    # batched=False คือค่าเริ่มต้นที่วัดแล้วว่าให้ transcript ดีกว่า -- watcher โหลด
+    # โมเดลครั้งเดียวตอนเริ่ม จึงต้องรู้ตั้งแต่ตรงนี้ว่าจะห่อ batched pipeline ไหม
+    mock_load_whisper.assert_called_once_with("medium", batched=False)
     assert mock_watch_loop.call_args.kwargs["whisper_model"] is loaded_whisper_model
 
 

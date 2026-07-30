@@ -42,7 +42,9 @@ def main(base_dir: Path = PROJECT_ROOT) -> None:
     )
 
     logging.info("Loading Whisper model (%s)...", config.whisper_model)
-    whisper_model = load_whisper_model(config.whisper_model)
+    whisper_model = load_whisper_model(
+        config.whisper_model, batched=config.whisper_batched
+    )
 
     logging.info("Watching %s for new audio files...", config.inbox_dir)
     watch_loop(

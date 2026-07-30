@@ -98,6 +98,14 @@ DEFAULT_CARRYOVER_ENABLED = True
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
+# ถอดเสียงแบบ batch (BatchedInferencePipeline) -- ปิดไว้เพราะวัดกับเสียงประชุมจริง
+# ของเครื่องนี้แล้วว่ามันทำให้ faster-whisper วนซ้ำคำเดิมจนเนื้อหาหาย (โทเคนที่ซ้ำ
+# มากสุดกินพื้นที่ 31.6% ของ transcript) ตัวเลขการวัดทั้งสี่ config อยู่ใต้ BATCH_SIZE
+# ใน src/transcribe.py
+#
+# เปิดกลับได้ด้วย WHISPER_BATCHED=true ถ้ายอมแลกคุณภาพกับความเร็ว ~4 เท่า
+DEFAULT_WHISPER_BATCHED = False
+
 # ขนาด chunk ตอนหั่น transcript ยาว และส่วนที่ให้ chunk คาบเกี่ยวกัน
 #
 # ค่าคู่นี้อยู่ที่นี่ไม่ใช่ใน summarize.py เพราะ summarize.py import config อยู่แล้ว
@@ -127,6 +135,7 @@ class Config:
     meeting_profile: str = DEFAULT_MEETING_PROFILE
     carryover_enabled: bool = DEFAULT_CARRYOVER_ENABLED
     chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS
+    whisper_batched: bool = DEFAULT_WHISPER_BATCHED
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -246,6 +255,7 @@ def load_config(base_dir: Path | None = None) -> Config:
         meeting_profile = DEFAULT_MEETING_PROFILE
     carryover_enabled = _read_bool("CARRYOVER_ENABLED", DEFAULT_CARRYOVER_ENABLED)
     chunk_overlap_tokens = _read_chunk_overlap()
+    whisper_batched = _read_bool("WHISPER_BATCHED", DEFAULT_WHISPER_BATCHED)
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -288,4 +298,5 @@ def load_config(base_dir: Path | None = None) -> Config:
         meeting_profile=meeting_profile,
         carryover_enabled=carryover_enabled,
         chunk_overlap_tokens=chunk_overlap_tokens,
+        whisper_batched=whisper_batched,
     )

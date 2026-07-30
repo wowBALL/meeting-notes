@@ -213,6 +213,25 @@ def test_a_normal_overlap_produces_no_warning(tmp_path, monkeypatch, caplog):
     assert "CHUNK_OVERLAP_TOKENS" not in caplog.text
 
 
+def test_batched_whisper_is_off_by_default(tmp_path, monkeypatch):
+    """วัดกับเสียงประชุมจริง (4:41 นาที, 2026-07-30): BatchedInferencePipeline ทำให้
+    faster-whisper วนซ้ำคำเดิม -- โทเคนที่ซ้ำมากสุดกินพื้นที่ 31.6% ของ transcript
+    ("ทํา" 24 ครั้ง, "ปลอดภัณฑ์" 7 ครั้ง) และได้ 76 คำ
+    แบบ sequential ได้ 96 คำ (+26%) และโทเคนซ้ำเหลือ 3.1% แลกกับ 61s แทน 15s
+    คุณภาพ transcript สำคัญกว่า 46 วินาทีในงานที่รันเป็น background"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("WHISPER_BATCHED", raising=False)
+
+    assert load_config(base_dir=tmp_path).whisper_batched is False
+
+
+def test_batched_whisper_can_be_turned_back_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_BATCHED", "true")
+
+    assert load_config(base_dir=tmp_path).whisper_batched is True
+
+
 def test_load_config_reads_whisper_model_override(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")

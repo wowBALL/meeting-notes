@@ -189,7 +189,10 @@ def process_file(
         try:
             whisper_segments = retry_with_backoff(
                 lambda: transcribe_audio(
-                    wav_path, model_size=config.whisper_model, model=whisper_model
+                    wav_path,
+                    model_size=config.whisper_model,
+                    model=whisper_model,
+                    batched=config.whisper_batched,
                 )
             )
         except Exception as e:
