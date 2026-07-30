@@ -16,14 +16,13 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from src.config import LEGACY_DIARIZATION_MODEL
 from src.storage import replace_with_retry
 
 logger = logging.getLogger(__name__)
 
 REGISTRY_DIRNAME = "speakers"
 REGISTRY_FILENAME = "registry.json"
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 2
 
 # เก็บหลายตัวอย่างต่อคน เพราะเสียงคนเดียวกันผ่านไมค์ตรงหน้ากับผ่าน codec ของแอป
 # ประชุมให้เวกเตอร์ต่างกันจริง -- ตัวอย่างเดียวจะจำได้เฉพาะทางที่เคยได้ยินมา
@@ -114,16 +113,19 @@ def is_usable_embedding(vector) -> bool:
     return math.sqrt(sum(float(value) ** 2 for value in vector)) > 0.0
 
 
-def sample_model(sample: dict) -> str:
-    """โมเดลที่สร้างเวกเตอร์ของตัวอย่างนี้
+def sample_embedding_model(sample: dict) -> str | None:
+    """โมเดลที่สร้างเวกเตอร์ของตัวอย่างนี้ -- None เมื่อไม่รู้
 
-    ตัวอย่างที่ไม่มีคีย์ "model" คือตัวอย่างที่ถูกเก็บก่อนที่ทะเบียนจะเริ่มติดป้าย ซึ่ง
-    ตอนนั้นโปรเจกต์นี้มีโมเดลเดียวคือ 3.1 -- เดาไม่ได้ก็จริงในทางทฤษฎี แต่ในทางประวัติ
-    ของ repo นี้มันเป็นข้อเท็จจริง การถือว่า "ไม่รู้" แล้วทิ้งไปจะลบความจำของผู้ใช้เดิม
-    ที่ยังใช้ 3.1 อยู่ทิ้งทั้งหมดโดยไม่มีเหตุผล
+    ไม่มี fallback โดยเจตนา ต่างจาก sample_model() เดิมที่เดาเป็น 3.1: ตอนนั้นการเดา
+    เป็นข้อเท็จจริงของประวัติ repo (มีโมเดลเดียว) แต่ตัวอย่างที่ไม่มีป้ายนี้มาจาก centroid
+    ของ diarization pipeline ซึ่งไม่ใช่พื้นที่นี้แน่นอนไม่ว่ากรณีใด การเดาว่า "น่าจะตรง"
+    แล้วเอาไปหา cosine จะได้ตัวเลขที่ไม่มีความหมาย ซึ่ง "บังเอิญสูง" ได้พอ ๆ กับ
+    "บังเอิญต่ำ" -- และค่าที่บังเอิญสูงคือชื่อผิดคนใน transcript ที่ไม่มีใครสังเกต
     """
-    model = sample.get("model")
-    return model if isinstance(model, str) and model else LEGACY_DIARIZATION_MODEL
+    model = sample.get("embedding_model")
+    if not isinstance(model, str):
+        return None
+    return model.strip() or None
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -162,18 +164,23 @@ def match_known(
     speakers: list[dict],
     high: float,
     low: float,
-    model: str,
+    *,
+    embedding_model: str,
 ) -> dict[str, Match]:
     """จับคู่ผู้พูดในไฟล์นี้กับคนในทะเบียน คีย์เป็น label ของ pyannote
 
     label ที่ไม่ถึงเกณฑ์ล่างจะไม่มีใน dict เลย (ไม่ใช่ค่า None) -- ผู้เรียกจึงเขียน
     `label in matches` ได้ตรงไปตรงมา
 
-    `model` คือโมเดลที่สร้าง `embeddings` ชุดที่ส่งเข้ามา ตัวอย่างในทะเบียนที่มาจาก
-    โมเดลอื่นถูกข้ามทิ้ง ไม่ใช่เอามาเทียบแล้วให้คะแนนต่ำ -- เวกเตอร์ข้ามพื้นที่ให้เลข
-    ที่ไม่มีความหมาย ซึ่ง "บังเอิญสูง" ได้พอ ๆ กับ "บังเอิญต่ำ" พารามิเตอร์นี้จึงบังคับ
-    (ไม่มี default) โดยเจตนา: ผู้เรียกที่ลืมส่งต้องพังตอนเขียนโค้ด ไม่ใช่ตอนที่ชื่อผิด
-    คนไปโผล่ใน transcript แล้ว
+    `embedding_model` คือโมเดลที่สร้าง `embeddings` ชุดที่ส่งเข้ามา ตัวอย่างในทะเบียนที่มา
+    จากโมเดลอื่น -- รวมถึงตัวอย่างที่ไม่มีป้ายเลย (มาจาก centroid ของ diarization pipeline
+    ยุคก่อนฟีเจอร์นี้) -- ถูกข้ามทิ้ง ไม่ใช่เอามาเทียบแล้วให้คะแนนต่ำ: เวกเตอร์ข้ามพื้นที่
+    ให้เลขที่ไม่มีความหมาย ซึ่ง "บังเอิญสูง" ได้พอ ๆ กับ "บังเอิญต่ำ"
+
+    พารามิเตอร์นี้เป็น keyword-only โดยเจตนา: หัวฟังก์ชันเดิมมี `str` ติดกันหลายตัว ซึ่ง
+    เป็นรูปทรงที่สลับตำแหน่งกันได้เงียบ ๆ การสลับ embedding_model กับพารามิเตอร์อื่นทำให้
+    ทั้งทะเบียนถูกเทียบข้ามพื้นที่โดยไม่มีอะไรพังตอนเขียนโค้ด -- ผู้เรียกที่ลืมส่งหรือส่ง
+    ผิดตำแหน่งต้องพังตอนนั้น ไม่ใช่ตอนที่ชื่อผิดคนไปโผล่ใน transcript แล้ว
     """
     matches: dict[str, Match] = {}
     skipped_models: set[str] = set()
@@ -183,8 +190,9 @@ def match_known(
         best: Match | None = None
         for speaker in speakers:
             for sample in speaker.get("samples", []):
-                if sample_model(sample) != model:
-                    skipped_models.add(sample_model(sample))
+                stamp = sample_embedding_model(sample)
+                if stamp != embedding_model:
+                    skipped_models.add(stamp or "(ไม่มีป้าย)")
                     continue
                 vector = sample.get("embedding")
                 if not is_usable_embedding(vector):
@@ -200,54 +208,68 @@ def match_known(
         if best is not None and best.score >= low:
             matches[label] = best
     if skipped_models:
-        # ผู้ใช้ที่เพิ่งสลับ DIARIZATION_MODEL จะเห็นคนที่เคยจำได้กลายเป็น "ผู้พูด N"
-        # เฉย ๆ -- ต้องมีบรรทัดเดียวใน log ที่อธิบายว่าเพราะอะไร ไม่งั้นดูเหมือนทะเบียนพัง
+        # ผู้ใช้ที่เพิ่งสลับโมเดล embedding จะเห็นคนที่เคยจำได้กลายเป็น "ผู้พูด N" เฉย ๆ
+        # -- ต้องมีบรรทัดเดียวใน log ที่อธิบายว่าเพราะอะไร ไม่งั้นดูเหมือนทะเบียนพัง
         logger.info(
-            "ข้ามตัวอย่างเสียง %d โมเดลในทะเบียนที่ไม่ใช่ %s (%s) -- คนที่ลงทะเบียนไว้ด้วย"
-            "โมเดลอื่นจะยังไม่ถูกจำจนกว่าจะ enroll ใหม่ หรือสลับ DIARIZATION_MODEL กลับ",
+            "ข้ามตัวอย่างเสียงจาก %d พื้นที่เวกเตอร์ที่ไม่ใช่ %s (%s) -- คนที่ลงทะเบียนไว้"
+            "ก่อนหน้านี้จะยังไม่ถูกจำจนกว่าจะ enroll ใหม่ (ตัวอย่างเดิมไม่หาย)",
             len(skipped_models),
-            model,
+            embedding_model,
             ", ".join(sorted(skipped_models)),
         )
     return matches
 
 
+_REQUIRED_SAMPLE_KEYS = ("embedding", "embedding_model")
+_OPTIONAL_SAMPLE_KEYS = ("embedding_seconds", "segment_count", "model")
+
+
 def add_sample(
     speakers: list[dict],
     name: str,
-    embedding: list[float],
+    sample: dict,
     source: str,
-    model: str,
     today: date | None = None,
 ) -> list[dict]:
     """ทะเบียนชุดใหม่ที่มีตัวอย่างเสียงนี้เพิ่มเข้าไป
 
-    ชื่อซ้ำ = คนเดิม ไม่ใช่คนใหม่ -- ผู้ใช้ที่พิมพ์ชื่อเดิมในการประชุมที่สองกำลังบอกว่า
-    "คนนี้แหละ" การสร้าง entry ที่สองจะทำให้โปรไฟล์แตกเป็นสองก้อนที่ต่างก็อ่อนแอ
+    รับ `sample` เป็น dict ก้อนเดียวแทนพารามิเตอร์เรียงกัน: เดิมเป็น
+    (embedding, source, model) ซึ่งเป็น str ติดกันสองตัว การสลับสองตัวนั้นจะติดป้ายพื้นที่
+    เวกเตอร์ผิดโดยไม่มีอะไรพัง -- ซึ่งเป็นอันตรายเดียวที่ป้ายนี้มีไว้กัน
 
-    คืนรายการชุดใหม่แทนการแก้ของเดิมในที่ ผู้เรียกจึงยังถือของเดิมไว้ได้ถ้าการเขียน
-    ไฟล์ล้มเหลว
+    `embedding_model` บังคับ: sample ที่ไม่มีป้ายจะถูก match_known ข้ามตลอดกาล การเขียนมัน
+    ลงไปเงียบ ๆ คือการสร้างความจำที่ไม่มีวันถูกใช้ ซึ่งผู้ใช้จะเห็นเป็น "ลงทะเบียนแล้วแต่
+    ระบบไม่จำ" โดยไม่มีอะไรอธิบาย
 
-    `model` ต้องเป็นโมเดลที่สร้าง `embedding` ตัวนี้จริง ๆ ไม่ใช่โมเดลที่ตั้งอยู่ใน
-    config ตอนกดยืนยัน -- สองอย่างนี้ต่างกันได้เมื่อผู้ใช้สลับโมเดลหลังประชุมเสร็จแต่
-    ก่อนกดตั้งชื่อ ป้ายที่ผิดแปลว่าเวกเตอร์จะถูกเอาไปเทียบข้ามพื้นที่ในภายหลัง (ดู
-    match_known) ซึ่งเป็นสิ่งเดียวที่ป้ายนี้มีไว้กัน
+    `model` (โมเดลแยกผู้พูด) ไม่บังคับและ *ไม่มีใครใช้ตัดสินใจอะไรแล้ว* -- เก็บไว้เพราะมัน
+    กำหนดขอบท่อน ซึ่งกำหนดว่าเสียงช่วงไหนเข้าไปอยู่ในเวกเตอร์ เป็น provenance ที่มีค่าตอน
+    ต้องสืบว่าทำไม sample ตัวหนึ่งแปลก ไม่ใช่ป้ายที่กันการเทียบข้ามพื้นที่อีกต่อไป
+
+    ชื่อซ้ำ = คนเดิม ไม่ใช่คนใหม่ (เหมือนเดิม) และคืนรายการชุดใหม่แทนการแก้ของเดิมในที่
     """
     cleaned = clean_name(name)
     if not cleaned:
         raise ValueError("ชื่อผู้พูดว่างเปล่าหลังตัดอักขระที่ใช้ไม่ได้ออก")
-    sample = {
-        "embedding": [float(value) for value in embedding],
+    for key in _REQUIRED_SAMPLE_KEYS:
+        if not sample.get(key):
+            raise ValueError(f"ตัวอย่างเสียงไม่มี {key}")
+
+    stored = {
+        "embedding": [float(value) for value in sample["embedding"]],
+        "embedding_model": sample["embedding_model"],
         "source": source,
-        "model": model,
         "added": (today or date.today()).isoformat(),
     }
+    for key in _OPTIONAL_SAMPLE_KEYS:
+        if sample.get(key) is not None:
+            stored[key] = sample[key]
+
     updated = [dict(speaker, samples=list(speaker.get("samples", []))) for speaker in speakers]
     for speaker in updated:
         if speaker.get("name") == cleaned:
-            speaker["samples"] = (speaker["samples"] + [sample])[-MAX_SAMPLES_PER_SPEAKER:]
+            speaker["samples"] = (speaker["samples"] + [stored])[-MAX_SAMPLES_PER_SPEAKER:]
             return updated
-    updated.append({"id": uuid.uuid4().hex, "name": cleaned, "samples": [sample]})
+    updated.append({"id": uuid.uuid4().hex, "name": cleaned, "samples": [stored]})
     return updated
 
 
