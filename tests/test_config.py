@@ -345,24 +345,24 @@ def test_load_config_uses_default_speaker_thresholds(tmp_path, monkeypatch):
 
     # ค่าตัวเลขเขียนตรง ๆ ที่นี่ที่เดียว: การขยับเกณฑ์ต้องเป็นการตัดสินใจที่มีคนแก้
     # เทสต์ตาม ไม่ใช่สิ่งที่เลื่อนไปเองเพราะทุกที่อ้างค่าคงที่ตัวเดียวกันหมด
-    assert config.speaker_match_high == 0.70
-    assert config.speaker_match_low == 0.45
+    assert config.speaker_match_high == 0.62
+    assert config.speaker_match_low == 0.58
 
 
-def test_high_sits_above_every_pair_measured_on_the_real_audio_path():
+def test_the_default_thresholds_bracket_the_measured_gap():
     # หลักฐาน 2026-07-31 วัดผ่านทางที่ระบบเดินจริง (แปลงเป็น wav 16k ก่อน diarize เหมือน
-    # pipeline.process_file/enroll.analyze) บน Meet1900 เต็มไฟล์ + คลิป enroll:
-    #   0.6679  คลิป enroll <-> SPEAKER_03 (ป้ายที่ใกล้ที่สุด แต่ยังไม่ยืนยันด้วยหูว่าคือใคร)
-    #   0.5711  คู่คนละคนในประชุมเดียวกัน สูงสุด
-    #   0.4288  คลิป enroll <-> ป้ายที่เหลือ สูงสุด
+    # pipeline.process_file/enroll.analyze) บน Meet1900 เต็มไฟล์ + คลิป enroll ทั้ง 6 ป้าย
+    # ยืนยันด้วยหูโดยเจ้าของเสียงเอง ไม่ใช่อนุมานจากคะแนน:
+    #   0.6679  คนเดียวกันข้ามการบันทึก (n=1)  <- ขอบบน
+    #   0.5711  คนละคน สูงสุดจาก 20 คู่          <- ขอบล่าง
     #
-    # ยังไม่มีคู่ "คนเดียวกันข้ามการบันทึก" ที่ยืนยันแล้วสักคู่ HIGH จึงต้องอยู่เหนือทุกคู่ที่
-    # วัดได้ -- ไม่ใส่ชื่อใครอัตโนมัติจนกว่าจะมีหลักฐาน ดีกว่าเดาจากคะแนนแล้วใส่ชื่อผิดคนลง
-    # สรุปที่ระบุผู้รับผิดชอบ เทสต์นี้จะแดงถ้ามีคนลดเกณฑ์ลงมาให้เคสใดเคสหนึ่งผ่านโดยไม่ได้
-    # วัดใหม่ ซึ่งคือวิธีที่ 0.80 กลายเป็นค่าที่ผิดมาแล้วครั้งหนึ่ง
-    assert DEFAULT_SPEAKER_MATCH_HIGH > 0.6679
-    # LOW เหนือ 0.4288 เพื่อไม่ให้คนไม่รู้จักโผล่ในโซน "เสนอให้ยืนยัน" แต่ต้องไม่เกิน HIGH
-    assert 0.4288 < DEFAULT_SPEAKER_MATCH_LOW < DEFAULT_SPEAKER_MATCH_HIGH
+    # HIGH ต้องอยู่ในหน้าต่างนี้ นอกหน้าต่างคือผิดแน่นอน ไม่ใช่แค่ไม่เหมาะ: สูงกว่า 0.6679
+    # = ไม่จำคนที่ลงทะเบียนไว้เลยสักคน ต่ำกว่า 0.5711 = ใส่ชื่อผิดคนที่คู่ซึ่งวัดได้จริงแล้ว
+    # เทสต์นี้จะแดงถ้ามีคนขยับค่าโดยไม่ได้วัดใหม่ ซึ่งคือวิธีที่ 0.80 กลายเป็นค่าที่ผิดมาแล้ว
+    assert 0.5711 < DEFAULT_SPEAKER_MATCH_HIGH <= 0.6679
+    # LOW เหนือเพดานของกองคนละคนเช่นกัน -- คนที่ไม่ใช่ต้องไม่โผล่แม้แต่ในโซน "เสนอให้ยืนยัน"
+    # ช่องระหว่างสองค่าจึงแคบโดยธรรมชาติ ไม่ใช่ความผิดพลาด
+    assert 0.5711 < DEFAULT_SPEAKER_MATCH_LOW < DEFAULT_SPEAKER_MATCH_HIGH
 
 
 def test_load_config_falls_back_when_a_threshold_is_not_a_number(tmp_path, monkeypatch):
