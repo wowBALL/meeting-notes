@@ -636,6 +636,54 @@ def test_run_recording_closes_the_streams_before_it_waits_for_the_drain(
     assert [s.closed for s in calls["streams"]] == [True, True]
 
 
+def test_run_recording_keeps_the_profile_when_a_part_closes(tmp_path, monkeypatch):
+    """ปิด part แล้ว manifest ต้องยังจดประเภทประชุมไว้ ไม่ใช่ถูกล้างเป็น None
+
+    on_part_closed เขียน manifest ทับทั้งไฟล์ ถ้าไม่ส่ง profile ไปด้วย ค่าที่เขียนไว้
+    ตอนเริ่มอัดจะหายไปเงียบๆ (write_manifest มี default เป็น None) แล้ว finish_session
+    ที่อ่านไฟล์นี้ต่อจะเขียน job.json โดยไม่มี profile -- ฝั่งสรุปจึงตกไปใช้ค่าจาก .env
+    ทุกครั้ง ไม่ว่าผู้ใช้จะเลือกอะไรไว้
+
+    ทุกการอัดปิด part อย่างน้อยหนึ่งครั้งตอนหยุด จึงไม่ใช่เคสมุม -- วัดจากของจริง
+    (activity.jsonl 2026-07-30 12:51:29) part_closed ยิงก่อน encode_started ทันที
+    """
+    _fake_audio(monkeypatch)
+    config = _config(tmp_path)
+
+    def fake_record(*a, **k):
+        # เลียนแบบของจริง: part แรกปิดก่อนตัวอัดจะคืนค่า
+        # on_part_closed ถูกส่งเป็น positional ตัวที่ 7 (ดู args= ของ recorder_thread)
+        on_part_closed = k.get("on_part_closed") or (a[6] if len(a) > 6 else None)
+        assert on_part_closed is not None, (
+            "ไม่ได้รับ on_part_closed -- เทสนี้จะไม่ได้พิสูจน์อะไรเลย"
+        )
+        on_part_closed(["part0001.wav"])
+        return ["part0001.wav"]
+
+    monkeypatch.setattr(record, "record_streams_to_session", fake_record)
+    # กันไม่ให้ finish_session กินโฟลเดอร์ทิ้งก่อนอ่าน manifest
+    monkeypatch.setattr(
+        record, "finish_or_discard", lambda s, i: config.inbox_dir / "meet.ogg"
+    )
+
+    stop_event = threading.Event()
+    stop_event.set()
+    record.run_recording(
+        "meet", "claude-opus-5", config, stop_event, profile="cross"
+    )
+
+    from src.segments import read_manifest
+
+    # stem มีเวลาต่อท้าย (build_output_filename) จึงหาโฟลเดอร์จาก prefix ไม่ใช่เดาชื่อ
+    sessions = list(config.inbox_dir.glob(".session-*"))
+    assert len(sessions) == 1, f"คาดว่าจะมี session เดียว ได้ {sessions}"
+    manifest = read_manifest(sessions[0])
+    assert manifest["profile"] == "cross"
+    # claude_model ผ่านมาได้อยู่แล้ว -- assert คู่กันไว้เพื่อให้เห็นว่าเทสนี้จับ
+    # การหายของ profile จริง ไม่ใช่ manifest ที่ว่างทั้งไฟล์
+    assert manifest["claude_model"] == "claude-opus-5"
+
+
 def test_parse_args_reads_the_name_and_the_model():
     assert parse_args(["weekly-standup", "--model", "claude-sonnet-5"]) == (
         "weekly-standup",
