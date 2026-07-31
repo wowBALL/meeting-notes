@@ -137,6 +137,78 @@ def test_save_summary_writes_the_model_to_a_separate_meta_file(tmp_path):
     assert meta == "สรุปด้วย claude-sonnet-5\n"
 
 
+_WITH_QUALITY = """## หัวข้อที่คุยกัน
+- เรื่องที่คุยกัน
+
+## ต้องคุยต่อครั้งหน้า
+- เรื่องค้าง
+
+## คำที่น่าจะถอดเพี้ยน (ยังไม่อยู่ใน glossary)
+- Payload → เดาว่าคือ Payroll (ได้ยิน 6 ครั้ง)
+
+## จุดที่ควรตรวจเอง
+- 08:00-16:20: เสียงทับกัน ควรฟังเอง
+"""
+
+
+def test_the_transcript_quality_sections_leave_the_summary(tmp_path):
+    """สองหัวข้อนี้เป็นรายงานคุณภาพการถอดเสียง ไม่ใช่เรื่องที่คนในห้องคุยกัน
+    คนที่เปิด summary.md เพื่อส่งต่อให้หัวหน้าไม่ควรต้องเลื่อนผ่านมันทุกครั้ง"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, _WITH_QUALITY, "GLM-5.2")
+
+    summary = path.read_text(encoding="utf-8")
+    assert "## คำที่น่าจะถอดเพี้ยน" not in summary
+    assert "## จุดที่ควรตรวจเอง" not in summary
+    assert "Payload" not in summary
+    assert "เสียงทับกัน" not in summary
+    # เนื้อหาการประชุมต้องอยู่ครบเหมือนเดิม
+    assert "## หัวข้อที่คุยกัน" in summary
+    assert "- เรื่องที่คุยกัน" in summary
+
+
+def test_the_transcript_quality_sections_land_in_the_meta_file(tmp_path):
+    """ย้ายที่เก็บ ไม่ใช่ทิ้ง -- ถ้าหายไปเลยจะไม่มีใครรู้ว่าตรงไหนฟังไม่ชัด"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    save_summary(meeting_dir, _WITH_QUALITY, "GLM-5.2")
+
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta.startswith("สรุปด้วย GLM-5.2")
+    assert "## คำที่น่าจะถอดเพี้ยน (ยังไม่อยู่ใน glossary)" in meta
+    assert "- Payload → เดาว่าคือ Payroll (ได้ยิน 6 ครั้ง)" in meta
+    assert "## จุดที่ควรตรวจเอง" in meta
+    assert "- 08:00-16:20: เสียงทับกัน ควรฟังเอง" in meta
+
+
+def test_carryover_still_finds_its_section_after_the_split(tmp_path):
+    """"ต้องคุยต่อครั้งหน้า" ต้องอยู่ใน summary.md ต่อไป -- carryover อ่านจากไฟล์นั้น
+    ถ้าเผลอย้ายไปด้วย ความต่อเนื่องข้ามประชุมจะขาดเงียบ ๆ"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, _WITH_QUALITY, "GLM-5.2", profile="dev")
+
+    summary = path.read_text(encoding="utf-8")
+    assert "## ต้องคุยต่อครั้งหน้า" in summary
+    assert "- เรื่องค้าง" in summary
+
+
+def test_a_summary_without_quality_sections_is_unchanged(tmp_path):
+    """สรุปจาก prompt รุ่นเก่าที่ไม่มีสองหัวข้อนี้ ต้องได้ไฟล์หน้าตาเดิมเป๊ะ"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, "## ประเด็นสำคัญ\n- ทดสอบ", "GLM-5.2")
+
+    assert path.read_text(encoding="utf-8") == "## ประเด็นสำคัญ\n- ทดสอบ\n"
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta == "สรุปด้วย GLM-5.2\n"
+
+
 def test_save_summary_records_glossary_corrections_per_term(tmp_path):
     """รายคำ ไม่ใช่ยอดรวม -- ยอดรวมบอกไม่ได้ว่าคำไหนแทนที่ผิดที่จนควรย้ายไป fuzzy"""
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"

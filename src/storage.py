@@ -87,6 +87,51 @@ def _busiest_first(counts: dict[str, int]) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
+# หัวข้อที่โมเดลเขียนไว้ใน summary แต่ไม่ใช่เนื้อหาการประชุม -- มันคือรายงานคุณภาพของ
+# การถอดเสียง (คำไหนน่าจะเพี้ยน ช่วงไหนควรย้อนไปฟังเอง) ซึ่งเป็นเรื่องของระบบ ไม่ใช่
+# เรื่องที่คนในห้องคุยกัน คนที่เปิด summary.md เพื่อส่งต่อให้หัวหน้าไม่ควรต้องเลื่อนผ่าน
+# สองหัวข้อนี้ทุกครั้ง -- เหตุผลเดียวกับที่ footer ถูกแยกออกมาก่อนหน้านี้
+#
+# ยังให้โมเดลเขียนต่อไปเหมือนเดิม (prompt ไม่เปลี่ยน) แค่ย้ายปลายทางตอนบันทึก:
+# ตัดขั้นตอนที่โมเดลเขียนออกไปเลยแปลว่าไม่มีใครรู้ว่าตรงไหนฟังไม่ชัด ซึ่งแย่กว่ามาก
+#
+# ต้องตรงกับหัวข้อใน prompts/single.md และ prompts/reduce.md เป๊ะ ๆ (ยึด prefix
+# เพราะอันแรกมีวงเล็บต่อท้ายที่โมเดลเขียนไม่เหมือนกันทุกครั้ง)
+TRANSCRIPT_QUALITY_HEADINGS = (
+    "## คำที่น่าจะถอดเพี้ยน",
+    "## จุดที่ควรตรวจเอง",
+)
+
+
+def _split_out_quality_sections(summary_markdown: str) -> tuple[str, list[str]]:
+    """(สรุปที่เหลือ, หัวข้อคุณภาพที่ถูกดึงออกมา)
+
+    เดินทีละบรรทัดแทน regex ด้วยเหตุผลเดียวกับ carryover._section_body: summary.md
+    บน Windows เป็น CRLF และการยึด `$` ทำให้ match พลาดแบบเงียบ ๆ
+
+    หัวข้อที่ไม่มีอยู่ = ข้ามไปเฉย ๆ ไม่ใช่ error: โมเดลอาจไม่เขียนมาให้ครบทุกครั้ง
+    และประชุมที่ถูกสรุปด้วย prompt รุ่นเก่ากว่านี้ก็ไม่มีหัวข้อพวกนี้เลย
+    """
+    lines = summary_markdown.splitlines()
+    kept: list[str] = []
+    pulled: list[str] = []
+    current: list[str] | None = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            # ปิดหัวข้อคุณภาพที่กำลังเก็บอยู่ (ถ้ามี) ก่อนตัดสินใจเรื่องหัวข้อใหม่
+            current = None
+            if any(stripped.startswith(h) for h in TRANSCRIPT_QUALITY_HEADINGS):
+                current = []
+                pulled.append(current)
+        if current is not None:
+            current.append(line)
+        else:
+            kept.append(line)
+    blocks = ["\n".join(block).strip() for block in pulled]
+    return "\n".join(kept).strip(), [b for b in blocks if b]
+
+
 def save_summary(
     meeting_dir: Path,
     summary_markdown: str,
@@ -108,7 +153,7 @@ def save_summary(
     # ที่อ่านค่า "ประเภทประชุม:" จากไฟล์นี้ (ตกกลับไปอ่านจาก summary.md เองถ้าเป็น
     # ประชุมเก่าก่อนมีไฟล์นี้)
     path = meeting_dir / "summary.md"
-    body = summary_markdown.rstrip("\n")
+    body, quality_sections = _split_out_quality_sections(summary_markdown)
     path.write_text(f"{body}\n", encoding="utf-8")
 
     footer = [f"สรุปด้วย {model}"]
@@ -132,7 +177,12 @@ def save_summary(
         )
         footer.append(f"คำ fuzzy ที่เจอในห้อง: {seen}")
     meta_path = meeting_dir / "summary.meta.md"
-    meta_path.write_text("\n".join(footer) + "\n", encoding="utf-8")
+    meta = "\n".join(footer)
+    if quality_sections:
+        # บรรทัดสรุปสั้น ๆ อยู่บน หัวข้อยาวอยู่ล่าง คนเปิดไฟล์นี้ส่วนใหญ่มาดูว่าใช้โมเดล
+        # อะไร ไม่ใช่มาอ่านรายงานคุณภาพ -- สิ่งที่ถูกถามบ่อยกว่าควรอยู่บรรทัดแรก
+        meta += "\n\n" + "\n\n".join(quality_sections)
+    meta_path.write_text(meta + "\n", encoding="utf-8")
 
     return path
 
