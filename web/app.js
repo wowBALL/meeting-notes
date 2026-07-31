@@ -55,6 +55,7 @@ const UI = {
       "อัดประชุมครั้งหน้าจะจำได้ตามปกติ",
     models: [
       ["GLM-5.2", "GLM 5.2", "ข้อมูลไม่ออกนอกบริษัท · ช้ากว่า"],
+      ["Qwen/Qwen3.6-35B-A3B", "Qwen 3.6", "ข้อมูลไม่ออกนอกบริษัท · เร็วที่สุด"],
       ["claude-opus-5", "Opus 5", "แม่นสุด · $5/$25 ต่อ MTok"],
       ["claude-sonnet-5", "Sonnet 5", "ประหยัด · $3/$15 ต่อ MTok"],
       ["transcript-only", "ถอดเสียงอย่างเดียว", "ไม่สรุป · ไม่เสียเงิน"],
@@ -116,6 +117,7 @@ const UI = {
       "-- you can skip it, the next recording will be recognized normally",
     models: [
       ["GLM-5.2", "GLM 5.2", "Stays in-house · slower"],
+      ["Qwen/Qwen3.6-35B-A3B", "Qwen 3.6", "Stays in-house · fastest"],
       ["claude-opus-5", "Opus 5", "Most accurate · $5/$25 per MTok"],
       ["claude-sonnet-5", "Sonnet 5", "Cheaper · $3/$15 per MTok"],
       ["transcript-only", "Transcript only", "No summary · no cost"],

@@ -183,6 +183,43 @@ def test_resolve_returns_the_glm_budgets():
     assert GLM_MAP_MAX_TOKENS > CLAUDE_MAP_MAX_TOKENS
 
 
+def test_resolve_returns_the_qwen_budgets():
+    """Qwen ใช้ endpoint เดียวกับ GLM แต่ไม่ใช่ reasoning model
+
+    งบจึงต้องเป็นชุดของ Claude ไม่ใช่ของ GLM ที่เผื่อไว้ให้ reasoning กินไปสี่เท่า
+    -- วัดจริงแล้วมันใช้ 602 token บน chunk ที่ใหญ่ที่สุดของประชุม 84 นาที
+    """
+    provider = resolve("Qwen/Qwen3.6-35B-A3B")
+
+    assert provider.model_id == "Qwen/Qwen3.6-35B-A3B"
+    assert provider.map_max_tokens == QWEN_MAP_MAX_TOKENS
+    assert provider.reduce_max_tokens == QWEN_REDUCE_MAX_TOKENS
+    assert QWEN_MAP_MAX_TOKENS < GLM_MAP_MAX_TOKENS
+
+
+def test_qwen_uses_the_same_endpoint_settings_as_glm():
+    """key และ base URL ตัวเดียวกัน -- ตั้ง .env เพิ่มไม่ต้องทำอะไรเลยเมื่อสลับมาใช้ตัวนี้"""
+    patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
+
+    with patcher, patch.dict(
+        "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+    ):
+        result = resolve("Qwen/Qwen3.6-35B-A3B").complete("ระบบ", "เนื้อหา", 999)
+
+    assert result == Completion(text="สรุป", truncated=False)
+    request = captured["request"]
+    assert request.full_url == f"{TEST_BASE_URL}/chat/completions"
+    assert request.headers["Authorization"] == "Bearer test-key"
+    # ชื่อรุ่นต้องออกไปเป๊ะ ๆ ทั้ง "Qwen/" และตัวพิมพ์ -- proxy ปฏิเสธชื่อที่ไม่ตรง
+    assert json.loads(request.data.decode("utf-8"))["model"] == "Qwen/Qwen3.6-35B-A3B"
+
+
+def test_qwen_without_the_llm_key_names_the_setting_to_fix():
+    with patch.dict("os.environ", {"LLM_API_KEY": "", "LLM_BASE_URL": TEST_BASE_URL}):
+        with pytest.raises(MissingSettingError, match="LLM_API_KEY"):
+            resolve("Qwen/Qwen3.6-35B-A3B").complete("ระบบ", "เนื้อหา", 999)
+
+
 def test_glm_sends_thai_as_utf8_not_escape_sequences():
     """จุดที่พังจริงตอนทดลอง: ถ้า json.dumps escape เป็น \\uXXXX ปลายทางจะได้ ????"""
     patcher, captured = _patch_urlopen(_llm_payload("สรุป"))

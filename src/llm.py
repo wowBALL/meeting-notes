@@ -28,6 +28,17 @@ CLAUDE_REDUCE_MAX_TOKENS = 8192
 GLM_MAP_MAX_TOKENS = 16384
 GLM_REDUCE_MAX_TOKENS = 24576
 
+# Qwen บน endpoint เดียวกับ GLM (key และ base URL ตัวเดียวกัน) แต่ไม่ใช่ reasoning model
+# -- วัดจริง 2026-07-31 บน chunk ที่ใหญ่ที่สุดของประชุม 84 นาที (16,288 ตัวอักษร) มันใช้
+# ไปแค่ 602 token และไม่มี reasoning_content เลย ค่าพวกนี้จึงเป็นชุดเดียวกับ Claude ไม่ใช่
+# ชุดของ GLM ที่ต้องเผื่อให้ reasoning กินไปสี่เท่า
+#
+# ทำไมต้องมีตัวนี้: วันที่ 2026-07-31 GLM-5.2 คืน content ว่างเปล่าทุกครั้งกับงานสรุป
+# (ใช้โควตาหมดไปกับ reasoning 10 ครั้งจาก 10 ครั้ง ทั้งก้อนใหญ่และก้อนเล็ก) ขณะที่ตัวนี้
+# สรุปก้อนเดียวกันเสร็จใน 4 วินาที -- มีไว้เป็นทางออกที่ข้อมูลยังไม่ออกนอกบริษัทเหมือนกัน
+QWEN_MAP_MAX_TOKENS = 4096
+QWEN_REDUCE_MAX_TOKENS = 8192
+
 # หนึ่ง call ของ GLM ใช้เวลาได้ถึง ~155 วินาทีที่ราว 53 token/วินาที เผื่อไว้มาก
 # เพราะการหมดเวลากลาง reduce แปลว่าเสียสรุปรายช่วงที่จ่ายไปแล้วทั้งหมด
 LLM_TIMEOUT_SECONDS = 900
@@ -335,9 +346,53 @@ PROVIDERS: dict[str, Provider] = {
         reduce_max_tokens=GLM_REDUCE_MAX_TOKENS,
         complete=_openai_compat_completer("GLM-5.2", "LLM_API_KEY", "LLM_BASE_URL"),
     ),
+    # ชื่อต้องตรงกับที่ endpoint รู้จักเป๊ะ รวมทั้ง "Qwen/" ข้างหน้าและตัวพิมพ์ใหญ่-เล็ก
+    # (ดูรายชื่อจาก GET /models) -- proxy ปฏิเสธชื่อที่ไม่ตรง
+    "Qwen/Qwen3.6-35B-A3B": Provider(
+        model_id="Qwen/Qwen3.6-35B-A3B",
+        map_max_tokens=QWEN_MAP_MAX_TOKENS,
+        reduce_max_tokens=QWEN_REDUCE_MAX_TOKENS,
+        complete=_openai_compat_completer(
+            "Qwen/Qwen3.6-35B-A3B", "LLM_API_KEY", "LLM_BASE_URL"
+        ),
+    ),
     "claude-opus-5": _claude("claude-opus-5"),
     "claude-sonnet-5": _claude("claude-sonnet-5"),
 }
+
+
+# คำขอที่เล็กที่สุดเท่าที่ยังเป็นคำขอจริง ใช้ตอบคำถามเดียว: "ตอนนี้ยิงถึงโมเดลไหม"
+# 30 วินาทีเพราะคำขอขนาดนี้ที่ endpoint ปกติใช้เวลา ~1 วินาที (วัดจริง 2026-07-31)
+# ถ้ามันเกิน 30 ก็ไม่มีเหตุผลให้เชื่อว่างานจริงที่ใหญ่กว่านี้ 1,000 เท่าจะรอด
+PROBE_TIMEOUT_SECONDS = 30
+PROBE_MAX_TOKENS = 16
+_PROBE_SYSTEM = "Reply with the single word OK."
+_PROBE_CONTENT = "OK"
+
+
+def check_reachable(provider: Provider) -> None:
+    """ยิงคำขอเล็ก ๆ หนึ่งครั้ง raise ถ้าไปไม่ถึงโมเดล คืน None ถ้าไปถึง
+
+    ตอบคำถามเดียวคือ "ยิงถึงไหม" ไม่ใช่ "คำตอบดีไหม" -- เจตนาคือกันงาน unattended
+    ที่กินเวลาเป็นชั่วโมงไม่ให้เริ่มทั้งที่ปลายทางไปไม่ถึงตั้งแต่แรก
+
+    *** UnusableAnswerError ต้องนับเป็น "ไปถึงแล้ว" ***
+    GLM-5.2 เป็น reasoning model ที่ max_tokens คุมผลรวมของ reasoning + คำตอบ
+    ที่ budget ระดับ PROBE_MAX_TOKENS มันใช้หมดไปกับ reasoning แล้วคืน content
+    ว่างเปล่าเป็นเรื่องปกติ ไม่ใช่ความผิดปกติ -- วัดจริง 2026-07-31 ด้วย max_tokens=32
+    ได้ content="" คู่กับ reasoning_content ยาวห้าย่อหน้า และ finish_reason="length"
+    ถ้านับกรณีนี้เป็นความล้มเหลว ทุกประชุมจะถูกปฏิเสธตั้งแต่ยังไม่เริ่มทั้งที่ endpoint
+    ปกติดีทุกอย่าง ซึ่งแย่กว่าปัญหาที่ฟังก์ชันนี้ถูกสร้างมาแก้เสียอีก
+
+    ส่วน MissingSettingError ปล่อยให้ทะลุขึ้นไป: ตั้งค่าไม่ครบคือความล้มเหลวจริงที่
+    ควรหยุดตั้งแต่ตรงนี้ ไม่ใช่ไปตายทีละ chunk
+    """
+    try:
+        provider.complete(
+            _PROBE_SYSTEM, _PROBE_CONTENT, PROBE_MAX_TOKENS, PROBE_TIMEOUT_SECONDS
+        )
+    except UnusableAnswerError:
+        return
 
 
 def resolve(model_id: str) -> Provider:
