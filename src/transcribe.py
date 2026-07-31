@@ -1,7 +1,11 @@
+import logging
 import os
 import pathlib
+import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _MODEL_CACHE: dict[str, Any] = {}
 
@@ -25,8 +29,30 @@ _MODEL_CACHE: dict[str, Any] = {}
 # quantization ไม่ใช่ต้นเหตุ: float16 ไม่ได้ดีกว่า int8_float16 เลย (และ batched
 # ที่ float16 ยังแย่กว่า int8 sequential) จึงคง int8_float16 ไว้ตามเดิม
 #
-# condition_on_previous_text=False ไม่ช่วยอะไร -- ทดลองแล้วได้ผลเท่ากันเป๊ะทุกไบต์
-# ทั้งที่มันอยู่ใน signature ของ BatchedInferencePipeline.transcribe (1.2.1)
+# condition_on_previous_text=False ไม่ช่วยอะไร *บน BatchedInferencePipeline* --
+# ทดลองแล้วได้ผลเท่ากันเป๊ะทุกไบต์ ทั้งที่มันอยู่ใน signature (1.2.1)
+#
+# *** ข้อสรุปนั้นใช้กับ path ที่ระบบใช้จริงไม่ได้ *** วัดใหม่บน WhisperModel แบบ
+# sequential (2026-07-31, ช่วง 80:00-90:00 ของประชุม 92 นาที, large-v3 int8_float16)
+# เทียบกับ hotwords สามขนาด -- คอลัมน์ "ถูก%" คืออัตราส่วนคำในตาราง glossary ที่ถอด
+# ถูก เทียบกับที่ถอดผิด:
+#
+#   hotwords   cond   segs   chars   ซ้ำสุด   ถูก%
+#   ปิด        เปิด    170    5325    3.5%    34.7%   <- ค่าที่ระบบใช้อยู่วันนี้
+#   ปิด        ปิด     112    5104    1.7%    41.2%
+#   14 คำ      เปิด    124    5109    2.3%    50.0%
+#   14 คำ      ปิด     105    5181    1.7%    44.2%
+#   54 คำ      เปิด     90    2139    5.8%      --    <- พัง เนื้อหาหาย 60%
+#   54 คำ      ปิด     108    5034    2.5%    56.1%
+#
+# แถว "54 คำ + cond เปิด" คือโมเดลตกวงวนซ้ำคำ ("PPU" 80 ครั้ง กินบรรทัด 58-132 จาก
+# ทั้งหมด 133) แล้วไม่กลับมาอีกเลย เพราะข้อความที่ซ้ำถูกป้อนกลับเป็น prompt ของ
+# หน้าต่างถัดไป -- ทำซ้ำได้สองรอบ (อีกรอบเหลือ 1685 chars, ซ้ำสุด 33.8%)
+# ปิด conditioning แล้วอาการหายไปทั้งหมด สองปุ่มนี้จึงแยกกันวัดไม่ได้
+#
+# ยังไม่พลิกค่าเริ่มต้นเพราะวัดจากหน้าต่างเดียว (คำในตารางโผล่ ~50-70 ครั้ง) และ
+# การถอดซ้ำ config เดิมให้ segment 220 กับ 170 -- ต่างกันพอที่จะยังไม่แยก 41% ออกจาก
+# 56% ได้อย่างมั่นใจ ต้องยืนยันด้วยหน้าต่างที่สองก่อน
 BATCH_SIZE = 4
 
 
@@ -91,16 +117,35 @@ def transcribe_audio(
     model_size: str = "large-v3",
     model: Any = None,
     batched: bool = False,
+    hotwords: str | None = None,
+    condition_on_previous_text: bool = True,
 ) -> list[dict]:
     if model is None:
         model = load_whisper_model(model_size, batched=batched)
     # batch_size ส่งได้เฉพาะกับ BatchedInferencePipeline -- WhisperModel.transcribe
     # ไม่รู้จักพารามิเตอร์นี้
-    extra = {"batch_size": BATCH_SIZE} if batched else {}
+    extra: dict[str, Any] = {"batch_size": BATCH_SIZE} if batched else {}
+    extra["hotwords"] = hotwords
+    # ค่าเริ่มต้น True ตรงกับ faster-whisper -- ปุ่มนี้มีไว้ตัดวงวนซ้ำคำ ซึ่งข้อความที่
+    # ซ้ำถูกป้อนกลับเป็น prompt ของหน้าต่างถัดไปจนออกไม่ได้ (ดูการวัดใต้ BATCH_SIZE)
+    extra["condition_on_previous_text"] = condition_on_previous_text
     segments, _info = model.transcribe(
         str(audio_path), language="th", vad_filter=True, **extra
     )
-    return [
-        {"start": seg.start, "end": seg.end, "text": seg.text}
-        for seg in segments
-    ]
+    # faster-whisper yields segments lazily as decoding proceeds -- logging as we
+    # consume the generator is the only way to see how far a long transcription
+    # has gotten (or whether it's stuck repeating the same point in the audio,
+    # a known failure mode on noisy/spliced recordings) without waiting for the
+    # whole call to return.
+    result = []
+    started = time.monotonic()
+    for i, seg in enumerate(segments, start=1):
+        result.append({"start": seg.start, "end": seg.end, "text": seg.text})
+        if i == 1 or i % 10 == 0:
+            logger.info(
+                "Transcribed segment %d, now at %.0fs of audio (%.0fs elapsed)",
+                i,
+                seg.end,
+                time.monotonic() - started,
+            )
+    return result

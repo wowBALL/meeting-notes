@@ -233,6 +233,26 @@ def test_batched_whisper_can_be_turned_back_on(tmp_path, monkeypatch):
     assert load_config(base_dir=tmp_path).whisper_batched is True
 
 
+def test_hotwords_are_off_until_measured_on_real_meeting_audio(tmp_path, monkeypatch):
+    """ยังไม่มีตัวเลขว่า hotwords ทำให้ transcript ดีขึ้นจริงบนเสียงประชุมของเครื่องนี้
+
+    ความเสี่ยงที่รู้กันของ hotwords คือโมเดลแต่งคำในลิสต์ขึ้นมาเองช่วงเงียบ ประชุมที่
+    อัดซ้ำไม่ได้จึงไม่ควรเป็นที่ทดลอง -- เปิดเมื่อวัดแล้วเท่านั้น แบบเดียวกับที่
+    WHISPER_BATCHED ถูกปิดหลังวัด
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("WHISPER_HOTWORDS", raising=False)
+
+    assert load_config(base_dir=tmp_path).whisper_hotwords is False
+
+
+def test_hotwords_can_be_turned_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_HOTWORDS", "true")
+
+    assert load_config(base_dir=tmp_path).whisper_hotwords is True
+
+
 def test_load_config_reads_whisper_model_override(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")

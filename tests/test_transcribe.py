@@ -72,6 +72,55 @@ def test_transcribe_audio_requests_batched_inference_when_asked(tmp_path):
     assert transcribe_module.BATCH_SIZE >= 2
 
 
+def test_transcribe_audio_passes_hotwords_to_the_model(tmp_path):
+    """คำศัพท์เฉพาะถูก bias ที่ชั้น ASR ไม่ใช่แก้ทีหลังด้วย glossary
+
+    glossary แก้ตัวอักษรได้หลังถอดเสียงเสร็จก็จริง แต่คำที่ถอดผิดทำให้ Whisper
+    ตัด segment ผิดตำแหน่งไปแล้ว และตัวเลขที่เพี้ยน glossary ช่วยไม่ได้เลย
+    """
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake audio data")
+
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([], SimpleNamespace(language="th"))
+
+    transcribe_audio(audio_path, model=mock_model, hotwords="Kubernetes, Zitadel")
+
+    assert mock_model.transcribe.call_args.kwargs["hotwords"] == "Kubernetes, Zitadel"
+
+
+def test_transcribe_audio_conditions_on_previous_text_by_default(tmp_path):
+    """ค่าเริ่มต้นต้องเท่ากับของ faster-whisper -- การเพิ่มปุ่มนี้ห้ามเปลี่ยนพฤติกรรมเดิม"""
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake audio data")
+
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([], SimpleNamespace(language="th"))
+
+    transcribe_audio(audio_path, model=mock_model)
+
+    assert mock_model.transcribe.call_args.kwargs["condition_on_previous_text"] is True
+
+
+def test_transcribe_audio_can_stop_conditioning_on_previous_text(tmp_path):
+    """ปุ่มตัดวงวนซ้ำคำ
+
+    วัดจริง 2026-07-31 (ช่วง 80:00-90:00 ของประชุม 92 นาที): เปิด hotwords 54 คำ
+    แล้วโมเดลตกลงวงวน "PPU" ที่บรรทัด 58 จาก 133 แล้วไม่กลับมาอีกเลย -- ข้อความที่
+    ซ้ำถูกป้อนกลับเป็น prompt ของหน้าต่างถัดไปเพราะ condition_on_previous_text
+    เปิดอยู่ ทำให้ 56% ท้ายของช่วงนั้นสูญทั้งหมด
+    """
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake audio data")
+
+    mock_model = MagicMock()
+    mock_model.transcribe.return_value = ([], SimpleNamespace(language="th"))
+
+    transcribe_audio(audio_path, model=mock_model, condition_on_previous_text=False)
+
+    assert mock_model.transcribe.call_args.kwargs["condition_on_previous_text"] is False
+
+
 def test_transcribe_audio_loads_model_by_size_when_none_given(tmp_path):
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"fake audio data")

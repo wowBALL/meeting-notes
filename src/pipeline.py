@@ -217,6 +217,19 @@ def process_file(
             move_to_failed(audio_path, config.failed_dir, f"Audio conversion failed: {e}")
             raise
 
+        # โหลด glossary รอบของตัวเองตรงนี้ ไม่ใช้ตัวที่ _finish_meeting โหลด สองเหตุผล:
+        # (1) ตัวนั้นอยู่ในบล็อกที่ถูกข้ามทั้งก้อนเมื่อ claude_model เป็น transcript-only
+        #     ซึ่งเป็นโหมดที่ transcript คือผลลัพธ์สุดท้ายและต้องการ hotwords มากที่สุด
+        # (2) _finish_meeting ถูกเรียกจาก path ลองใหม่ที่ไม่ถอดเสียงเลยด้วย ย้ายการโหลด
+        #     ออกมาข้างนอกจึงทำให้ path นั้นโหลดของที่ไม่ได้ใช้
+        # ไฟล์เล็กและอ่านครั้งเดียวต่อประชุม ราคาของการอ่านซ้ำจึงถูกกว่าการผูกสองขั้นนี้
+        # เข้าด้วยกัน -- ขั้นถอดเสียงกับขั้นสรุปใช้ตารางเดียวกันคนละวัตถุประสงค์
+        hotwords = ""
+        if config.whisper_hotwords:
+            hotwords = load_glossary(
+                config.base_dir / "glossary.md", config.base_dir / "teams.md"
+            ).hotwords_text()
+
         activity.append(config.base_dir, job, "transcribe_started")
         try:
             whisper_segments = retry_with_backoff(
@@ -225,6 +238,10 @@ def process_file(
                     model_size=config.whisper_model,
                     model=whisper_model,
                     batched=config.whisper_batched,
+                    # สตริงว่าง (ไม่มี glossary.md) ต้องกลายเป็น None ไม่ใช่ "" --
+                    # faster-whisper เปิดช่อง sot_prev ให้ทันทีที่ hotwords truthy
+                    # ค่าว่างจึงเป็นการจ่าย token ทิ้งเปล่า ๆ ทุกหน้าต่าง
+                    hotwords=hotwords or None,
                 )
             )
         except Exception as e:

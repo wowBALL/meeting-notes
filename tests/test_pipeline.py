@@ -1444,6 +1444,124 @@ def test_process_file_records_the_transcript_path_for_a_later_retry(tmp_path):
     )
 
 
+def test_hotwords_are_not_sent_while_the_switch_is_off(tmp_path):
+    """glossary.md ที่มีคำอยู่ต้องไม่ทำให้ decoder ถูก bias เองโดยไม่มีใครสั่ง
+
+    ตารางนี้มีไว้ป้อนขั้นสรุปมาตั้งแต่แรก การเพิ่ม hotwords ต้องไม่เปลี่ยนพฤติกรรม
+    ของเครื่องที่มี glossary.md อยู่แล้วจนกว่าเจ้าของเครื่องจะเปิดเอง
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "glossary.md").write_text(
+        "## fuzzy\nElectron: อิเล็กตรอน\n", encoding="utf-8"
+    )
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "Electron พร้อม"}],
+        ) as transcribe_mock,
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    assert transcribe_mock.call_args.kwargs["hotwords"] is None
+
+
+def test_glossary_reaches_the_transcriber_as_hotwords(tmp_path):
+    """คำถูกต้องไปถึง decoder ตั้งแต่ตอนถอดเสียง ไม่ใช่รอ glossary กู้ทีหลัง
+
+    apply_exact กู้ได้แค่ตัวสะกด คำที่ถอดผิดทำให้ Whisper ตัด segment ผิดตำแหน่ง
+    ไปแล้ว และตัวเลขที่เพี้ยนตามคำผิดกู้ไม่ได้เลย
+    """
+    config = make_config(tmp_path)
+    config.whisper_hotwords = True
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "glossary.md").write_text(
+        "## fuzzy\nElectron: อิเล็กตรอน\n", encoding="utf-8"
+    )
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "Electron พร้อม"}],
+        ) as transcribe_mock,
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    assert transcribe_mock.call_args.kwargs["hotwords"] == "Electron"
+
+
+def test_hotwords_still_reach_the_transcriber_in_transcript_only_mode(tmp_path):
+    """โหมดนี้ไม่มีขั้นสรุป transcript จึงเป็นผลลัพธ์สุดท้ายที่ผู้ใช้ได้จริง
+
+    glossary ตัวเดิมถูกโหลดในบล็อกที่ข้ามไปทั้งก้อนเมื่อ claude_model เป็น
+    transcript-only เพราะมันมีไว้ป้อนขั้นสรุป การเอา hotwords ไปฝากไว้ในบล็อกนั้น
+    จะทำให้โหมดที่ต้องการคุณภาพ transcript มากที่สุดเป็นโหมดเดียวที่ไม่ได้มัน
+    """
+    config = make_config(tmp_path)
+    config.whisper_hotwords = True
+    config.inbox_dir.mkdir(parents=True)
+    (tmp_path / "glossary.md").write_text(
+        "## fuzzy\nElectron: อิเล็กตรอน\n", encoding="utf-8"
+    )
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    write_job(config.inbox_dir, "weekly-standup", NO_SUMMARY_MODEL)
+
+    with (
+        _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "Electron พร้อม"}],
+        ) as transcribe_mock,
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    assert transcribe_mock.call_args.kwargs["hotwords"] == "Electron"
+
+
+def test_a_missing_glossary_file_sends_no_hotwords(tmp_path):
+    """ไม่มี glossary.md = ห้าม crash และห้ามส่งสตริงว่างเปล่าให้ decoder
+
+    faster-whisper เปิดช่อง sot_prev ให้ทันทีที่ hotwords truthy สตริงว่างจึงเป็น
+    การจ่าย token ทิ้งเปล่า ๆ ทุกหน้าต่าง 30 วินาที
+    """
+    config = make_config(tmp_path)
+    config.whisper_hotwords = True
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ) as transcribe_mock,
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    assert transcribe_mock.call_args.kwargs["hotwords"] is None
+
+
 def test_process_file_skips_summarizing_in_transcript_only_mode(tmp_path):
     config = make_config(tmp_path)
     config.inbox_dir.mkdir(parents=True)

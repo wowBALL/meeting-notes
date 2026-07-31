@@ -155,6 +155,35 @@ _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 # เปิดกลับได้ด้วย WHISPER_BATCHED=true ถ้ายอมแลกคุณภาพกับความเร็ว ~4 เท่า
 DEFAULT_WHISPER_BATCHED = False
 
+# ป้อนคำถูกจาก glossary.md ให้ decoder ตั้งแต่ตอนถอดเสียง (faster-whisper `hotwords`)
+#
+# ปิดไว้เพราะวัดแล้วว่ามันทำลาย transcript ทั้งไฟล์ ไม่ใช่แค่ "ยังไม่รู้ว่าดีขึ้นไหม"
+# -- กฎเดียวกับที่ WHISPER_BATCHED ถูกปิดหลังวัด (ดูใต้ BATCH_SIZE ใน transcribe.py)
+#
+# *** วัดจริง 2026-07-31 บนประชุม Stanup (84 นาที, ไทย, 8 ผู้พูด, large-v3,
+# sequential) ไฟล์เสียงเดียวกันเป๊ะ รันสองรอบสลับค่านี้: ***
+#
+#   hotwords=false   1618 บรรทัด   84,916 อักขระ   "สวัสดีครับพี่" 2 บรรทัด (0.1%)
+#   hotwords=true    1059 บรรทัด   43,816 อักขระ   "สวัสดีครับพี่" 1044 บรรทัด (98.6%)
+#
+# รอบที่เปิด decoder ล็อกอยู่กับประโยคทักทายจากนาทีแรกตั้งแต่ [01:01] แล้ววนซ้ำจนจบไฟล์
+# เหลือเนื้อหาจริงราว 15 บรรทัด ศัพท์เทคนิคที่อยู่ใน hotwords เองหายเกลี้ยง (Migration
+# 16 -> 0, Merge Request 3 -> 0, BRD 2 -> 0) คือคำที่ป้อนเข้าไปเพื่อให้ถอดถูก กลับไม่
+# ปรากฏในผลลัพธ์เลยสักคำ
+#
+# อาการนี้คือ repetition loop ตัวเดียวกับที่ batched=True ทำ (โทเคนซ้ำ 31.6%) แต่หนักกว่า
+# สามเท่า และต่างจากความเสี่ยงที่เคยเดาไว้ ("โมเดลแต่งคำในลิสต์ขึ้นมาในช่วงเงียบ") --
+# ของจริงคือมันไม่แต่งคำในลิสต์เลย มันหยุดถอดเสียงไปทั้งไฟล์
+#
+# ผลข้างเคียงที่หลอกตา: รอบที่เปิดใช้เวลา 9 นาที ส่วนรอบที่ปิดใช้ 28 นาที -- เร็วขึ้น
+# สามเท่าเพราะมันเลิกถอดเสียงตั้งแต่นาทีแรก ไม่ใช่เพราะ decoder ทำงานดีขึ้น อย่าอ่าน
+# เวลาที่ลดลงเป็นสัญญาณบวก
+#
+# ยังไม่ได้ลอง: hotwords ที่สั้นกว่านี้มาก (ตัวที่วัดยาว 592 อักขระ ~57 คำ) หรือ
+# condition_on_previous_text=False ควบคู่กัน ถ้าจะรื้อมาลองใหม่ ให้ลองกับไฟล์สั้นก่อน
+# แล้วนับ "สวัสดี"/บรรทัดซ้ำก่อนเสมอ ประชุมจริงที่อัดซ้ำไม่ได้ไม่ใช่ที่ทดลอง
+DEFAULT_WHISPER_HOTWORDS = False
+
 # ขนาด chunk ตอนหั่น transcript ยาว และส่วนที่ให้ chunk คาบเกี่ยวกัน
 #
 # ค่าคู่นี้อยู่ที่นี่ไม่ใช่ใน summarize.py เพราะ summarize.py import config อยู่แล้ว
@@ -186,6 +215,7 @@ class Config:
     carryover_enabled: bool = DEFAULT_CARRYOVER_ENABLED
     chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS
     whisper_batched: bool = DEFAULT_WHISPER_BATCHED
+    whisper_hotwords: bool = DEFAULT_WHISPER_HOTWORDS
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -307,6 +337,7 @@ def load_config(base_dir: Path | None = None) -> Config:
     carryover_enabled = _read_bool("CARRYOVER_ENABLED", DEFAULT_CARRYOVER_ENABLED)
     chunk_overlap_tokens = _read_chunk_overlap()
     whisper_batched = _read_bool("WHISPER_BATCHED", DEFAULT_WHISPER_BATCHED)
+    whisper_hotwords = _read_bool("WHISPER_HOTWORDS", DEFAULT_WHISPER_HOTWORDS)
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -351,4 +382,5 @@ def load_config(base_dir: Path | None = None) -> Config:
         carryover_enabled=carryover_enabled,
         chunk_overlap_tokens=chunk_overlap_tokens,
         whisper_batched=whisper_batched,
+        whisper_hotwords=whisper_hotwords,
     )
