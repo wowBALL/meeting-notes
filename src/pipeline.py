@@ -477,6 +477,8 @@ def _finish_meeting(
                 profile=profile,
                 carryover_text=carryover_text,
                 chunk_overlap_tokens=config.chunk_overlap_tokens,
+                on_progress=report_progress,
+                merge_turns=config.merge_speaker_turns,
             )
         except Exception as e:
             activity.append(

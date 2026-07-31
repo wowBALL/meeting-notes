@@ -238,6 +238,17 @@ DEFAULT_WHISPER_CONDITION_ON_PREVIOUS_TEXT = False
 DEFAULT_CHUNK_MAX_TOKENS = 15_000
 DEFAULT_CHUNK_OVERLAP_TOKENS = 1_500
 
+# รวมบล็อกของผู้พูดคนเดียวกันที่อยู่ติดกัน ก่อนส่งข้อความให้โมเดล (transcript.md ไม่เปลี่ยน)
+#
+# เปิดเป็นค่าเริ่มต้นเพราะวัดจริงแล้วทั้ง 9 ประชุม: token ที่ส่ง -33% และจำนวนคำขอ 28->20
+# บนประชุม 84 นาทีคือ -43% กับ 6->4 คำขอ ซึ่งสำคัญกว่าค่า token ที่ประหยัดได้ -- เครื่อง
+# inference ที่ปลายทางถูกแชร์กันทั้งองค์กร และวัดไว้แล้วว่าคิวที่นั่นตันเป็นช่วง ๆ จนคำขอ
+# ขนาด 16 token ใช้เวลา 36 วินาที ทุกคำขอที่เราไม่ต้องยิงคือคิวที่คนอื่นไม่ต้องรอ
+#
+# ปิดเมื่อไหร่: ตอนอยากเทียบคุณภาพสรุปกับข้อความดิบ หรือเมื่อ diarization ของประชุมนั้น
+# มั่วจนการรวมบล็อกยิ่งกลบความผิดพลาด (ดู docstring ของ merge_speaker_turns)
+DEFAULT_MERGE_SPEAKER_TURNS = True
+
 
 @dataclass
 class Config:
@@ -257,6 +268,7 @@ class Config:
     meeting_profile: str = DEFAULT_MEETING_PROFILE
     carryover_enabled: bool = DEFAULT_CARRYOVER_ENABLED
     chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS
+    merge_speaker_turns: bool = DEFAULT_MERGE_SPEAKER_TURNS
     whisper_batched: bool = DEFAULT_WHISPER_BATCHED
     whisper_hotwords: bool = DEFAULT_WHISPER_HOTWORDS
     whisper_condition_on_previous_text: bool = (
@@ -382,6 +394,9 @@ def load_config(base_dir: Path | None = None) -> Config:
         meeting_profile = DEFAULT_MEETING_PROFILE
     carryover_enabled = _read_bool("CARRYOVER_ENABLED", DEFAULT_CARRYOVER_ENABLED)
     chunk_overlap_tokens = _read_chunk_overlap()
+    merge_speaker_turns = _read_bool(
+        "MERGE_SPEAKER_TURNS", DEFAULT_MERGE_SPEAKER_TURNS
+    )
     whisper_batched = _read_bool("WHISPER_BATCHED", DEFAULT_WHISPER_BATCHED)
     whisper_hotwords = _read_bool("WHISPER_HOTWORDS", DEFAULT_WHISPER_HOTWORDS)
     whisper_condition_on_previous_text = _read_bool(
@@ -441,6 +456,7 @@ def load_config(base_dir: Path | None = None) -> Config:
         meeting_profile=meeting_profile,
         carryover_enabled=carryover_enabled,
         chunk_overlap_tokens=chunk_overlap_tokens,
+        merge_speaker_turns=merge_speaker_turns,
         whisper_batched=whisper_batched,
         whisper_hotwords=whisper_hotwords,
         whisper_condition_on_previous_text=whisper_condition_on_previous_text,

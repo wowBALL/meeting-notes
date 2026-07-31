@@ -1218,6 +1218,34 @@ def test_process_file_falls_back_to_the_config_model_without_a_job_file(tmp_path
     assert summarize.call_args.kwargs["model"] == config.claude_model
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_the_merge_switch_from_config_reaches_the_summarizer(tmp_path, enabled):
+    """สวิตช์ใน .env ต้องเดินทางถึงที่ที่มันทำงานจริง ไม่ใช่แค่ถูกอ่านเข้ามาใน Config
+
+    การรวมบล็อกทำอยู่ใน summarize_transcript ไม่ใช่ที่นี่ เพราะมันต้องเกิดก่อนการตัดสินใจ
+    ว่าจะยิงรอบเดียวหรือหั่น chunk -- pipeline จึงมีหน้าที่แค่ส่งค่าต่อ
+    """
+    config = make_config(tmp_path)
+    config.merge_speaker_turns = enabled
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+    summarize = MagicMock(return_value="## สรุป")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch("src.pipeline.summarize_transcript", summarize),
+    ):
+        process_file(audio_path, config)
+
+    assert summarize.call_args.kwargs["merge_turns"] is enabled
+
+
 def test_summarize_is_called_without_an_api_key(tmp_path):
     """key เป็นเรื่องของ provider -- pipeline ต้องไม่ส่ง key ของ Anthropic เข้าไปใน
     เส้นทางที่อาจไปจบที่ provider อื่น"""

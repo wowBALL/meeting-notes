@@ -1,14 +1,30 @@
 import logging
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
 
-from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
+from src.chunk import (
+    MERGE_MAX_TOKENS,
+    estimate_tokens,
+    merge_speaker_turns,
+    parse_transcript_segments,
+    split_into_chunks,
+)
 from src.config import (
     DEFAULT_CHUNK_MAX_TOKENS,
     DEFAULT_CHUNK_OVERLAP_TOKENS,
     DEFAULT_SUMMARY_MODEL,
 )
-from src.llm import MissingSettingError, Provider, UnusableAnswerError, resolve
+from src.llm import (
+    LLM_TIMEOUT_SECONDS,
+    MissingSettingError,
+    Provider,
+    UnusableAnswerError,
+    check_reachable,
+    resolve,
+)
 from src.prompts import DEFAULT_PROFILE, FALLBACKS, render
 from src.render import format_timestamp
 from src.retry import retry_with_backoff
@@ -227,6 +243,8 @@ def summarize_transcript(
     profile: str = DEFAULT_PROFILE,
     carryover_text: str = "",
     chunk_overlap_tokens: int | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+    merge_turns: bool = True,
 ) -> str:
     """`glossary_text` มาจาก glossary.format_for_prompt() -- ว่างได้ แปลว่าไม่มีตาราง
     `profile` เลือกไฟล์ prompts/profiles/<profile>.md ที่จะแทรกเข้า {profile_rules}
@@ -239,6 +257,21 @@ def summarize_transcript(
     เปิดช่องให้แก้ไฟล์กลางประชุมแล้วได้สรุปที่ครึ่งหนึ่งใช้กฎเก่าครึ่งหนึ่งใช้กฎใหม่
     """
     provider = resolve(model)
+    overlap = (
+        CHUNK_OVERLAP_TOKENS if chunk_overlap_tokens is None else chunk_overlap_tokens
+    )
+    if merge_turns:
+        # ต้องรวมก่อนเช็ค SINGLE_CALL_THRESHOLD_TOKENS ไม่ใช่หลัง: ประชุมที่เดิมต้องหั่น
+        # เป็นสอง chunk อาจเหลือต่ำกว่าเพดานแล้วยิงรอบเดียวจบ -- จากสองคำขอเหลือหนึ่ง
+        # ซึ่งคือทั้งหมดที่ฟีเจอร์นี้มีไว้ทำ (ลดจำนวนงานที่เราใส่เข้าคิวของ endpoint)
+        #
+        # เพดานผูกกับงบ overlap เสมอ ไม่ใช่ค่าลอย ๆ: บล็อกที่ใหญ่กว่างบ overlap ถูก
+        # _overlap_tail เล่นซ้ำไม่ได้เลย รอยต่อ chunk จะขาดบริบทแบบเงียบ ๆ หารสองเพื่อ
+        # ให้ยังเล่นซ้ำได้อย่างน้อยสองบล็อก (ค่า default 1500//2=750 > 600 ⇒ ปกติเพดาน
+        # คือ 600 ตามที่วัดมา วาล์วนี้ทำงานเฉพาะตอนมีคนไปลด CHUNK_OVERLAP_TOKENS)
+        transcript_markdown = merge_speaker_turns(
+            transcript_markdown, max_tokens=min(MERGE_MAX_TOKENS, max(1, overlap // 2))
+        )
     # carryover ไม่เข้าขั้น map: map สรุปทีละช่วงของประชุมนี้ เรื่องค้างของประชุมก่อน
     # ไม่เกี่ยวกับมัน และ map ถูกเรียกต่อ chunk -- ยัดเข้าไปคือจ่ายค่า token ซ้ำทุก chunk
     single_system = render(

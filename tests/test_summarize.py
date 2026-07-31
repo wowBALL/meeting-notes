@@ -175,8 +175,12 @@ def _prompt_aware_client():
 
 
 def _long_transcript(segment_count: int) -> str:
+    # ผู้พูดสลับกันทุกบล็อกเหมือนบทสนทนาจริง เพื่อให้ merge_speaker_turns ไม่มีอะไรให้รวม
+    # -- ถ้าให้เป็นคนเดียวทั้งไฟล์ เทสต์หลายสิบตัวที่ใช้ fixture นี้จะขึ้นกับเพดานการรวม
+    # โดยบังเอิญ (ตอนนี้บล็อกละ ~387 token ซึ่งเกินครึ่งของเพดาน 600 พอดีจนไม่รวม)
     blocks = [
-        f"**ผู้พูด 1** [{i:02d}:00]: " + ("ก" * 400) for i in range(segment_count)
+        f"**ผู้พูด {i % 2 + 1}** [{i:02d}:00]: " + ("ก" * 400)
+        for i in range(segment_count)
     ]
     return "# Transcript\n\n" + "\n\n".join(blocks)
 
@@ -237,6 +241,74 @@ def test_short_transcript_returns_the_single_response_verbatim():
     assert result == "## ประเด็นสำคัญ\n- ทดสอบระบบ"
     assert client.messages.create.call_count == 1
     assert "ไทม์ไลน์" not in result
+
+
+def _one_speaker_transcript(segment_count: int, chars: int = 100) -> str:
+    """ผู้พูดคนเดียวรวดทั้งไฟล์ -- กรณีที่ merge_speaker_turns มีของให้รวมจริง"""
+    blocks = [
+        f"**ผู้พูด 1** [{i:02d}:00]: " + ("ก" * chars) for i in range(segment_count)
+    ]
+    return "# Transcript\n\n" + "\n\n".join(blocks)
+
+
+def test_merging_runs_before_the_single_call_threshold():
+    """ประชุมที่ดิบแล้วต้องหั่น chunk แต่รวมบล็อกแล้วเหลือรอบเดียว ต้องยิงครั้งเดียว
+
+    นี่คือเหตุผลที่การรวมต้องเกิดก่อนบรรทัด SINGLE_CALL_THRESHOLD_TOKENS ไม่ใช่หลัง:
+    จำนวนคำขอที่ลดลงคือทั้งหมดที่ฟีเจอร์นี้มีไว้ทำ ถ้าสลับลำดับ เทสต์นี้จะเห็นสองคำขอ
+    """
+    # บล็อกละ ~46 token: รวมกันได้เต็มเพดาน 600 ทำให้ทั้งไฟล์หดลงต่ำกว่าเกณฑ์ยิงรอบเดียว
+    transcript = _one_speaker_transcript(700, chars=25)
+    assert estimate_tokens(transcript) > SINGLE_CALL_THRESHOLD_TOKENS
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, model="claude-opus-5")
+
+    assert client.messages.create.call_count == 1
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert estimate_tokens(sent) <= SINGLE_CALL_THRESHOLD_TOKENS
+    assert "# Transcript" in sent
+
+
+def test_merging_off_sends_the_transcript_untouched():
+    transcript = _one_speaker_transcript(3)
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, model="claude-opus-5", merge_turns=False)
+
+    assert client.messages.create.call_args.kwargs["messages"][0]["content"] == (
+        transcript
+    )
+
+
+def test_merging_on_joins_adjacent_turns_before_sending():
+    transcript = _one_speaker_transcript(3)
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, model="claude-opus-5")
+
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert sent != transcript
+    assert sent.count("**ผู้พูด 1**") == 1
+    assert sent.count("ก") == transcript.count("ก")
+
+
+def test_merging_cap_shrinks_with_a_small_overlap_budget():
+    """เพดานการรวมต้องไม่โตกว่างบ overlap ไม่งั้นบล็อกที่รวมแล้วถูกเล่นซ้ำไม่ได้เลย"""
+    transcript = _one_speaker_transcript(3, chars=200)
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript(
+            transcript, model="claude-opus-5", chunk_overlap_tokens=200
+        )
+
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    # เพดานกลายเป็น 100 (=200//2) บล็อกละ ~200 token จึงรวมไม่ได้เลยแม้จะเป็นคนเดียวกัน
+    assert sent == transcript
 
 
 def test_short_transcript_uses_given_model_and_original_prompt():

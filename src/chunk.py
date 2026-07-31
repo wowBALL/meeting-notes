@@ -55,6 +55,84 @@ def parse_transcript_segments(markdown: str) -> list[dict]:
     return segments
 
 
+# เพดานความยาวของบล็อกที่รวมแล้ว วัดจริงบน transcript 84 นาที (1,618 บล็อก):
+# เพดาน 600 ลดขนาดได้ 43.4% ส่วนแบบไม่จำกัดเลยได้ 44.2% -- ต่างกันไม่ถึงหนึ่งจุด
+# เพราะบทสนทนาส่วนใหญ่สลับผู้พูดเร็วอยู่แล้ว มีแค่ช่วงที่คนหนึ่งพูดยาวคนเดียวที่โดนตัด
+#
+# แต่แบบไม่จำกัดผลิตบล็อกขนาด 3,797 token ซึ่งใหญ่เกินงบ overlap (1,500) จน
+# _overlap_tail เล่นซ้ำมันไม่ได้เลยแม้แต่ก้อนเดียว -- รอยต่อ chunk จะขาดบริบทโดยไม่มี
+# อะไรฟ้อง และก้อนที่โตกว่านี้ก็มีทางชนเพดาน max_tokens ที่ split_into_chunks
+# ปล่อยผ่าน (ดู `if current and` ด้านล่าง) เพดานนี้จึงกันไว้ที่ต้นทาง
+MERGE_MAX_TOKENS = 600
+
+
+def merge_speaker_turns(markdown: str, max_tokens: int = MERGE_MAX_TOKENS) -> str:
+    """รวมบล็อกของผู้พูดคนเดียวกันที่อยู่ติดกัน ให้เหลือบล็อกเดียว
+
+    "ติดกัน" คือไม่มีผู้พูดคนอื่นคั่นเท่านั้น A A B A จึงได้ AA / B / A ไม่ใช่ AAA / B
+    หัวบล็อกที่เก็บไว้คือของประโยคแรก ส่วน timestamp ของประโยคที่ถูกรวมเข้ามาถูกทิ้ง --
+    prompt ทั้งสามไม่ได้สั่งให้โมเดลอ้าง timestamp ในคำตอบ และช่วงเวลาที่โผล่ในสรุปมาจาก
+    start_seconds ของบล็อกหัว/ท้าย chunk ซึ่งยังอยู่ครบ เก็บ timestamp ข้างในไว้ด้วยวัดแล้ว
+    ว่าลดขนาดได้แค่ 30.6% แทนที่จะเป็น 43.4%
+
+    *** ราคาที่ต้องรู้: การรวมบล็อกทำให้ diarization ที่ผิดกลืนหายไป ***
+    ถ้าระบบแยกผู้พูดพลาดแล้วป้ายคนสองคนเป็นคนเดียวกัน ตอนยังไม่รวมยังพอเห็นเป็นสองบล็อก
+    ที่น้ำเสียงไม่เข้ากัน (เจอจริงที่ [35:56] ของประชุม 07-31: "ขอบคุณค่ะ" กับ "ผมรู้สึกว่า"
+    อยู่ติดกันใต้ป้ายเดียวกัน) พอรวมแล้วมันกลายเป็นประโยคเดียวที่อ่านเหมือนคนคนเดียวพูดยาว
+    เพดาน max_tokens ช่วยจำกัดความเสียหายไว้ ไม่ได้แก้
+
+    คืนค่าเดิมทั้งก้อนถ้าไม่มีอะไรถูกรวมเลย -- ปิดสวิตช์แล้วข้อความที่ส่งให้โมเดลต้องเท่า
+    ของเดิมเป๊ะ และ transcript ที่ไม่มีบล็อกผู้พูดติดกันเลยก็ไม่ควรถูกจัดรูปใหม่โดยเปล่าประโยชน์
+    """
+    blocks: list[str] = []
+    open_speaker: str | None = None
+    segments_in = 0
+    segments_out = 0
+
+    for block in markdown.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        match = SEGMENT_PATTERN.match(block)
+        if not match:
+            if segments_out:
+                # ประโยคที่มีบรรทัดว่างในตัวเอง -- ต่อกลับเข้าบล็อกที่มันเป็นของ แบบเดียว
+                # กับ parse_transcript_segments แล้วตัดสายการรวม: ประโยคถัดไปของคนเดิม
+                # ต้องขึ้นบล็อกใหม่ ไม่ใช่ไปต่อท้ายย่อหน้าที่คนละที่กับหัวบล็อก
+                blocks[-1] += "\n\n" + block
+                open_speaker = None
+            else:
+                # "# Transcript" กับหมายเหตุตอน diarization ล้ม -- path ยิงรอบเดียวส่งทั้ง
+                # ไฟล์รวมหัวเรื่อง (ต่างจาก chunker ที่ตัดทิ้ง) ที่นี่จึงต้องเก็บไว้
+                blocks.append(block)
+            continue
+
+        segments_in += 1
+        speaker = match.group("speaker")
+        body = block[match.end() :].strip()
+        if (
+            speaker == open_speaker
+            and estimate_tokens(blocks[-1]) + estimate_tokens(body) + 1 <= max_tokens
+        ):
+            blocks[-1] = f"{blocks[-1]} {body}".rstrip()
+        else:
+            blocks.append(block)
+            segments_out += 1
+            open_speaker = speaker
+
+    if segments_out == segments_in:
+        return markdown
+
+    merged = "\n\n".join(blocks)
+    logger.info(
+        "Merged %d speaker blocks into %d (%.0f%% fewer characters)",
+        segments_in,
+        segments_out,
+        100 * (1 - len(merged) / len(markdown)) if markdown else 0,
+    )
+    return merged
+
+
 def _build_chunk(segments: list[dict]) -> dict:
     # end_seconds is when the last utterance in the chunk *started* -- the
     # transcript carries no end times, and this is close enough to label a range.

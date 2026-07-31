@@ -149,6 +149,34 @@ def test_an_unreadable_carryover_value_warns_and_keeps_the_default(
     assert "flase" in caplog.text
 
 
+def test_speaker_turn_merging_is_on_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("MERGE_SPEAKER_TURNS", raising=False)
+
+    assert load_config(base_dir=tmp_path).merge_speaker_turns is True
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "off"])
+def test_speaker_turn_merging_can_be_switched_off(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MERGE_SPEAKER_TURNS", value)
+
+    assert load_config(base_dir=tmp_path).merge_speaker_turns is False
+
+
+def test_an_unreadable_merge_value_warns_and_keeps_the_default(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MERGE_SPEAKER_TURNS", "ture")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.merge_speaker_turns is True
+    assert "ture" in caplog.text
+
+
 def test_chunk_overlap_defaults_to_ten_percent_of_a_chunk(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")
     monkeypatch.delenv("CHUNK_OVERLAP_TOKENS", raising=False)
