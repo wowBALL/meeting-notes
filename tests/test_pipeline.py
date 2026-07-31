@@ -30,6 +30,18 @@ from src.voiceprint import Voiceprint
 MODEL = "pyannote/speaker-diarization-community-1"
 
 
+@pytest.fixture(autouse=True)
+def skip_the_reachability_probe():
+    """process_file ยิงคำขอเล็ก ๆ ไปที่โมเดลก่อนเริ่มสรุป (ดู check_model_reachable)
+    เทสต์ในไฟล์นี้ไม่ได้เกี่ยวกับเรื่องนั้นเลย และหลายตัวจงใจใช้ model id ปลอมที่
+    resolve() ไม่รู้จัก -- ปิดไว้ที่เดียวแทนการเติม patch ให้ทั้ง 45 จุด
+
+    เทสต์ที่ตรวจตัว probe เองอยู่ที่ท้ายไฟล์นี้ และปิด fixture นี้ด้วยการ patch ซ้อน
+    """
+    with patch("src.pipeline.check_model_reachable"):
+        yield
+
+
 def _diarization(turns=None) -> DiarizationResult:
     """ผลแยกผู้พูดปลอมในรูปที่ diarize_audio ของจริงคืนมา
 
@@ -2215,3 +2227,105 @@ def test_process_file_queues_speakers_in_transcript_only_mode_without_a_model_ca
     summarize_mock.assert_not_called()
     speakers = load_all_pending(tmp_path)[0]["speakers"]
     assert [entry["label"] for entry in speakers] == ["ผู้พูด 1", "ผู้พูด 2"]
+
+
+def test_an_unreachable_model_fails_before_the_map_stage_is_paid_for(tmp_path):
+    """หัวใจของเรื่องนี้: 2026-07-31 เสียไปหนึ่งชั่วโมงเต็ม (5 chunks x 3 retries x 900
+    วินาที) กว่าจะรู้ว่าปลายทางไปไม่ถึง -- probe ต้องยิงก่อน และ summarize ต้องไม่ถูก
+    เรียกเลยเมื่อมันไม่ผ่าน
+
+    fixture skip_the_reachability_probe ถูกทับด้วย patch ซ้อนในนี้โดยตั้งใจ
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch(
+            "src.pipeline.check_model_reachable",
+            side_effect=TimeoutError("the read operation timed out"),
+        ) as probe,
+        patch("src.pipeline.summarize_transcript") as summarize,
+        pytest.raises(TimeoutError),
+    ):
+        process_file(audio_path, config)
+
+    probe.assert_called_once()
+    summarize.assert_not_called()
+    assert _stage_codes(config)[-1] == "job_failed"
+
+
+def test_an_unreachable_model_still_leaves_the_transcript_behind(tmp_path):
+    """transcript ถูกเซฟก่อนขั้นสรุปอยู่แล้ว การล้มที่ probe จึงต้องไม่ทำให้งานถอดเสียง
+    หาย -- ไม่งั้นการ "ล้มเร็ว" กลายเป็นการทิ้งงาน 40 นาทีเร็วขึ้นเฉย ๆ"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch(
+            "src.pipeline.check_model_reachable",
+            side_effect=TimeoutError("the read operation timed out"),
+        ),
+        pytest.raises(TimeoutError),
+    ):
+        process_file(audio_path, config)
+
+    transcripts = list(config.meetings_dir.glob("*/transcript.md"))
+    assert len(transcripts) == 1, "transcript ต้องรอด"
+    assert "สวัสดีครับ" in transcripts[0].read_text(encoding="utf-8")
+    # และ .job.json ต้องชี้กลับมาที่ transcript นั้น เพื่อให้ลากกลับ inbox แล้วสรุปใหม่
+    # ได้โดยไม่ต้องถอดเสียงซ้ำ (README: ลองใหม่หลังจากพัง)
+    assert read_transcript(config.failed_dir / audio_path.name) == transcripts[0]
+
+
+def test_the_activity_feed_moves_while_the_summary_is_being_written(tmp_path):
+    """แถบใน UI เคยค้างที่ขั้น "กำลังสรุป" ตั้งแต่นาทีแรกจนจบ ระหว่าง summarize_started
+    กับ job_failed/meeting_done ไม่มีเหตุการณ์อะไรคั่นเลย -- payload ของ /api/state
+    จึงเหมือนกันทุกไบต์ทุกรอบที่ poll ซึ่งแยกไม่ออกว่ายังทำงานอยู่หรือแขวนไปแล้ว
+    (2026-07-31: เงียบแบบนั้นไปหนึ่งชั่วโมง)"""
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    def fake_summarize(*args, on_progress=None, **kwargs):
+        assert on_progress is not None, "pipeline ต้องส่ง callback เข้าไปเสมอ"
+        for done in (1, 2, 3):
+            on_progress(done, 3)
+        return "## สรุป"
+
+    with (
+        _mock_convert_to_wav(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ),
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch("src.pipeline.summarize_transcript", side_effect=fake_summarize),
+    ):
+        process_file(audio_path, config)
+
+    events = _activity_events(config, "summarize_progress")
+    assert [e["params"] for e in events] == [
+        {"done": 1, "total": 3},
+        {"done": 2, "total": 3},
+        {"done": 3, "total": 3},
+    ]
+    codes = _stage_codes(config)
+    assert codes.index("summarize_started") < codes.index("summarize_progress")
+    assert codes.index("summarize_progress") < codes.index("meeting_done")

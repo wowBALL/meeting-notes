@@ -116,7 +116,9 @@ class Provider:
     model_id: str
     map_max_tokens: int
     reduce_max_tokens: int
-    complete: Callable[[str, str, int], Completion]
+    # timeout เป็นพารามิเตอร์ที่สี่ (มี default) ไม่ใช่ค่าตายตัวใน completer เพราะ
+    # check_reachable ต้องยิงด้วยเวลาสั้น ๆ ในขณะที่งานสรุปจริงต้องการ 900 วินาทีเต็ม
+    complete: Callable[..., Completion]
 
 
 def _require_setting(env_var: str, model_id: str) -> str:
@@ -129,10 +131,13 @@ def _require_setting(env_var: str, model_id: str) -> str:
     return value
 
 
-def _anthropic_completer(
-    model_id: str, key_env: str
-) -> Callable[[str, str, int], Completion]:
-    def complete(system: str, content: str, max_tokens: int) -> Completion:
+def _anthropic_completer(model_id: str, key_env: str) -> Callable[..., Completion]:
+    def complete(
+        system: str,
+        content: str,
+        max_tokens: int,
+        timeout: float | None = None,
+    ) -> Completion:
         from anthropic import Anthropic
 
         api_key = _require_setting(key_env, model_id)
@@ -143,7 +148,13 @@ def _anthropic_completer(
         # เกินจริง (ดู pipeline.py) และซ่อน asymmetry ระหว่าง provider ไว้ด้วย เพราะ
         # ฝั่ง GLM (urllib) ไม่มีชั้น retry ในตัวเองแบบนี้เลย retry ทั้งหมดต้องอยู่ที่
         # is_retryable ที่เดียวเท่านั้น ตามที่คอมเมนต์นี้ตั้งใจจะบอกอยู่แล้ว
-        client = Anthropic(api_key=api_key, max_retries=0)
+        # timeout=None แปลว่า "ปล่อยให้ SDK ใช้ default ของมันเอง" ซึ่งเป็นการตัดสินใจ
+        # เดิมที่ tests/test_llm.py ยึดไว้ -- ส่งค่าเข้าไปเฉพาะตอนที่ผู้เรียกขอมาจริง
+        # (check_reachable) ไม่ใช่ตั้ง 900 ให้ทุกคนโดยไม่มีใครขอ
+        options = {"api_key": api_key, "max_retries": 0}
+        if timeout is not None:
+            options["timeout"] = timeout
+        client = Anthropic(**options)
         response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens,
@@ -192,8 +203,13 @@ def _response_detail(payload: object) -> str:
 
 def _openai_compat_completer(
     model_id: str, key_env: str, base_url_env: str
-) -> Callable[[str, str, int], Completion]:
-    def complete(system: str, content: str, max_tokens: int) -> Completion:
+) -> Callable[..., Completion]:
+    def complete(
+        system: str,
+        content: str,
+        max_tokens: int,
+        timeout: float | None = None,
+    ) -> Completion:
         api_key = _require_setting(key_env, model_id)
         # .rstrip("/"): LLM_BASE_URL ที่ลงท้ายด้วย "/" (เช่นก็อปมาทั้งท้าย path)
         # จะกลายเป็น ".../v1//chat/completions" -- proxy บางตัวตอบ 404 ทึบให้กับ
@@ -225,11 +241,13 @@ def _openai_compat_completer(
             },
         )
         try:
-            # งานสรุปทั้ง chunk ใช้เวลาได้นาน จึงเป็น LLM_TIMEOUT_SECONDS เต็ม ๆ
+            # งานสรุปทั้ง chunk ใช้เวลาได้นาน ค่า default จึงเป็น LLM_TIMEOUT_SECONDS
+            # เต็ม ๆ -- ผู้เรียกที่ต้องการเวลาสั้นกว่านั้น (check_reachable) ส่งมาเอง
             # ไม่ต้องปิด retry ที่นี่: urlopen ไม่ retry เองอยู่แล้ว การลองใหม่เป็นหน้าที่
             # ของ is_retryable ใน summarize.py ที่ชั้นเหนือขึ้นไป
             with urllib.request.urlopen(
-                request, timeout=LLM_TIMEOUT_SECONDS
+                request,
+                timeout=LLM_TIMEOUT_SECONDS if timeout is None else timeout,
             ) as response:
                 try:
                     raw_body = response.read().decode("utf-8")

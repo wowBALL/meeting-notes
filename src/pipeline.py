@@ -31,7 +31,7 @@ from src.storage import (
 from src import carryover
 from src.glossary import load as load_glossary
 from src.prompts import CROSS_TEAM_PROFILE
-from src.summarize import summarize_transcript
+from src.summarize import check_model_reachable, summarize_transcript
 from src.transcribe import transcribe_audio
 from src.voiceprint import Voiceprint, extract_voiceprints, load_embedder
 
@@ -453,7 +453,23 @@ def _finish_meeting(
             "summarize_started",
             params={"model": claude_model, "profile": profile},
         )
+        # summarize.py ไม่รู้จัก activity feed และไม่ควรรู้ -- ส่ง callback เข้าไปแทน
+        # การ import src.activity เข้าไปในนั้น รูปแบบเดียวกับ on_event ที่ record.py
+        # ใช้อยู่แล้ว เหตุผลที่ต้องมี: ก่อนหน้านี้แถบใน UI ค้างที่ขั้น "กำลังสรุป"
+        # ตั้งแต่นาทีแรกจนจบ ทำให้แยกไม่ออกว่ากำลังทำงานอยู่หรือแขวนไปแล้ว
+        def report_progress(done: int, total: int) -> None:
+            activity.append(
+                config.base_dir,
+                job,
+                "summarize_progress",
+                params={"done": done, "total": total},
+            )
+
         try:
+            # ยิงคำขอเล็ก ๆ ก่อนลงทุนกับงานจริง: ถ้าปลายทางไปไม่ถึง เราจะรู้ใน 30 วินาที
+            # แทนที่จะเป็นหนึ่งชั่วโมง transcript ถูกเซฟไปแล้วก่อนถึงบรรทัดนี้ การล้ม
+            # ตรงนี้จึงไม่ทำให้งานถอดเสียงหาย และกู้ได้ตามขั้นตอนใน README
+            check_model_reachable(claude_model)
             summary_markdown = summarize_transcript(
                 corrected_markdown,
                 model=claude_model,

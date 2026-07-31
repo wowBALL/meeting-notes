@@ -17,6 +17,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 
 from src import activity, enroll, pending, speakers
+from src.logsetup import UI_LOG, configure_logging
 from src.messages import render
 from src.record import run_recording
 from src.storage import rename_speaker_in_transcript, safe_meeting_dir
@@ -915,8 +916,12 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
 def main() -> None:
     from src.config import load_config
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = load_config()
+    # ไฟล์แยกจาก watcher.log โดยเจตนา -- คนละ process กัน ดูเหตุผลใน src/logsetup.py
+    # (RotatingFileHandler หมุนไฟล์ด้วยการ rename ซึ่งชนกันบน Windows)
+    log_file = configure_logging(config.base_dir, UI_LOG)
+    if log_file is not None:
+        logging.info("Writing logs to %s", log_file)
     app = create_app(config)
     # 127.0.0.1 เท่านั้น -- ขอบเขตความปลอดภัยของ service นี้คือการไม่รับจากนอกเครื่อง
     app.run(host="127.0.0.1", port=config.ui_port, threaded=True)

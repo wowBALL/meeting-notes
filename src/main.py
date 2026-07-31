@@ -17,6 +17,7 @@ if os.name == "nt":
 from src.config import load_config
 from src.diarize import load_diarization_pipeline
 from src.enroll import enroll_dir
+from src.logsetup import WATCHER_LOG, configure_logging
 from src.transcribe import load_whisper_model
 from src.voiceprint import load_embedder
 from src.watcher import watch_loop
@@ -25,7 +26,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def main(base_dir: Path = PROJECT_ROOT) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # ตั้ง log ก่อน load_config: ถ้า .env พังจนโหลดไม่ได้ เราต้องมีบรรทัดที่บอกว่า
+    # พังเพราะอะไรอยู่ในไฟล์ ไม่ใช่แค่บนหน้าจอที่ปิดไปแล้ว
+    log_file = configure_logging(base_dir, WATCHER_LOG)
+    if log_file is not None:
+        logging.info("Writing logs to %s", log_file)
     config = load_config(base_dir=base_dir)
     config.inbox_dir.mkdir(parents=True, exist_ok=True)
     config.failed_dir.mkdir(parents=True, exist_ok=True)

@@ -154,6 +154,30 @@ def _summarize(provider: Provider, system: str, content: str, max_tokens: int) -
     return retried.text + TRUNCATION_NOTICE
 
 
+def check_model_reachable(model: str) -> None:
+    """ยิงคำขอเล็ก ๆ ไปที่โมเดลที่จะใช้สรุป raise ถ้าไปไม่ถึง
+
+    ผู้เรียก (pipeline) คุยกับโมดูลนี้อยู่แล้ว การให้มันต้อง import resolve จาก llm
+    เองเพิ่มอีกทางแปลว่ามีสองทางที่ pipeline รู้จักชั้น provider
+
+    หมายเหตุที่ต้องเคารพ: src/preflight.py:17-20 บันทึกไว้ว่าการยิง API จริงเคยมีแล้ว
+    **ถูกถอดออกโดยตั้งใจ** สิ่งที่ต่างออกไปรอบนี้คือตำแหน่งกับวัตถุประสงค์ ของเดิมยิงตอน
+    ก่อนเริ่มอัดเสียงเพื่อตรวจว่าตั้งค่าถูกไหม ซึ่งเป็นคำถามที่ตอบได้โดยไม่ต้องยิงเน็ต
+    ส่วนอันนี้ยิงตอนก่อนเริ่ม map เพื่อกันงานที่ไม่มีคนเฝ้าซึ่งกินเวลาได้เป็นชั่วโมง
+    (5 chunks x 3 retries x 900 วินาที) ไม่ให้เริ่มทั้งที่ปลายทางไปไม่ถึงตั้งแต่แรก --
+    2026-07-31 เสียไปหนึ่งชั่วโมงเต็มกับกรณีแบบนี้พอดี
+    """
+    started = time.monotonic()
+    check_reachable(resolve(model))
+    # บันทึกตอนผ่านด้วย ไม่ใช่แค่ตอนล้ม: คนที่ไล่ log ย้อนหลังต้องแยก "เช็คแล้วผ่าน"
+    # ออกจาก "ไม่เคยเช็ค" ได้ ไม่งั้นความเงียบตีความได้สองแบบเหมือนเดิม
+    logger.info(
+        "%s answered a probe request in %.1fs, starting the real work",
+        model,
+        time.monotonic() - started,
+    )
+
+
 def _time_range(chunk: dict) -> str:
     return f"{format_timestamp(chunk['start_seconds'])}–{format_timestamp(chunk['end_seconds'])}"
 
@@ -163,25 +187,37 @@ def _summarize_chunk(
 ) -> str | Exception:
     """The chunk's summary, or the exception that ended it after every retry.
     Returning the failure instead of raising keeps one dead chunk from throwing
-    away the summaries of every other chunk in the meeting."""
+    away the summaries of every other chunk in the meeting.
+
+    The start/finish lines exist because this stage used to log nothing at all
+    until a chunk died. A stalled endpoint produced up to 45 minutes of complete
+    silence per chunk, which is indistinguishable from a hung process -- on
+    2026-07-31 that cost an hour before anyone could tell something was wrong."""
+    label = f"Chunk {index + 1}/{total} [{_time_range(chunk)}]"
+    logger.info("%s: starting", label)
+    started = time.monotonic()
     try:
-        return _demote_headings(
+        summary = _demote_headings(
             retry_with_backoff(
                 lambda: _summarize(
                     provider, system, chunk["text"], provider.map_max_tokens
                 ),
                 should_retry=is_retryable,
+                label=label,
             )
         )
     except Exception as e:
         logger.error(
-            "Chunk %d/%d [%s] failed after every retry, using a placeholder: %s",
-            index + 1,
-            total,
-            _time_range(chunk),
+            "%s: failed after every retry in %.1fs, using a placeholder: %s",
+            label,
+            time.monotonic() - started,
             e,
         )
         return e
+    logger.info(
+        "%s: done in %.1fs (%d chars)", label, time.monotonic() - started, len(summary)
+    )
+    return summary
 
 
 def summarize_transcript(
@@ -227,15 +263,18 @@ def summarize_transcript(
                 provider.map_max_tokens,
             ),
             should_retry=is_retryable,
+            label="Single-call summary",
         )
 
     if estimate_tokens(transcript_markdown) <= SINGLE_CALL_THRESHOLD_TOKENS:
+        logger.info(
+            "Summarizing with %s in a single call (~%d tokens)",
+            provider.model_id,
+            estimate_tokens(transcript_markdown),
+        )
         return single_call()
 
     segments = parse_transcript_segments(transcript_markdown)
-    overlap = (
-        CHUNK_OVERLAP_TOKENS if chunk_overlap_tokens is None else chunk_overlap_tokens
-    )
     chunks = split_into_chunks(segments, CHUNK_MAX_TOKENS, overlap)
 
     if not chunks:
@@ -244,21 +283,57 @@ def summarize_transcript(
     # Chunks are independent, so summarize them concurrently. executor.map yields
     # results in submission order, so the timeline stays in transcript order no
     # matter which chunk finishes first.
-    with ThreadPoolExecutor(max_workers=min(MAP_MAX_CONCURRENCY, len(chunks))) as pool:
-        chunk_summaries = list(
-            pool.map(
-                lambda item: _summarize_chunk(
-                    provider, chunk_system, item[1], item[0], len(chunks)
-                ),
-                enumerate(chunks),
-            )
-        )
+    workers = min(MAP_MAX_CONCURRENCY, len(chunks))
+    # Whoever reads this log during an incident needs to know how much work is in
+    # flight before the per-chunk lines start arriving -- without it, "Chunk 5/6"
+    # appearing first out of the concurrent pool reads like chunks went missing.
+    logger.info(
+        "Summarizing with %s: %d chunks, %d at a time (timeout %ds per call)",
+        provider.model_id,
+        len(chunks),
+        workers,
+        LLM_TIMEOUT_SECONDS,
+    )
+    map_started = time.monotonic()
+
+    # Reported on completion rather than on start, and counted rather than indexed,
+    # because chunks finish out of order: "3/6 done" is true regardless of which
+    # three they were, while "chunk 5 started" tells a watching user nothing about
+    # how far along the meeting is.
+    progress_lock = threading.Lock()
+    completed = 0
+
+    def run_chunk(item: tuple[int, dict]) -> str | Exception:
+        nonlocal completed
+        index, chunk = item
+        result = _summarize_chunk(provider, chunk_system, chunk, index, len(chunks))
+        if on_progress is not None:
+            with progress_lock:
+                completed += 1
+                done = completed
+            try:
+                on_progress(done, len(chunks))
+            except Exception:
+                # A progress report that fails must never cost a chunk summary that
+                # already succeeded and was already paid for -- same reasoning as
+                # activity.append() swallowing OSError.
+                logger.exception("Progress callback failed, continuing anyway")
+        return result
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        chunk_summaries = list(pool.map(run_chunk, enumerate(chunks)))
 
     succeeded = [
         (chunk, summary)
         for chunk, summary in zip(chunks, chunk_summaries)
         if not isinstance(summary, Exception)
     ]
+    logger.info(
+        "Map stage finished in %.1fs: %d/%d chunks succeeded",
+        time.monotonic() - map_started,
+        len(succeeded),
+        len(chunks),
+    )
     if not succeeded:
         first_error = chunk_summaries[0]
         raise RuntimeError(
@@ -276,6 +351,12 @@ def summarize_transcript(
         f"## ช่วง [{_time_range(chunk)}]\n\n{summary.replace(TRUNCATION_NOTICE, '')}"
         for chunk, summary in succeeded
     )
+    logger.info(
+        "Reduce stage: merging %d chunk summaries (~%d tokens)",
+        len(succeeded),
+        estimate_tokens(combined),
+    )
+    reduce_started = time.monotonic()
     # floor=2: the model likes to open with an H1 title, which would rank above
     # "## ไทม์ไลน์ตามช่วง" and nest the whole timeline inside the merged summary.
     # Its own ## and ### structure is left untouched.
@@ -289,6 +370,7 @@ def summarize_transcript(
                     provider.reduce_max_tokens,
                 ),
                 should_retry=is_retryable,
+                label="Reduce stage",
             ),
             floor=2,
         )
@@ -298,12 +380,15 @@ def summarize_transcript(
         # away and send the recording to failed/, so the map stage would have to
         # be paid for a second time. The timeline alone is worth reading.
         logger.error(
-            "Reduce stage failed after every retry, returning the %d chunk "
+            "Reduce stage failed after every retry in %.1fs, returning the %d chunk "
             "summaries without a merged summary: %s",
+            time.monotonic() - reduce_started,
             len(succeeded),
             e,
         )
         overall = REDUCE_FAILURE_NOTICE
+    else:
+        logger.info("Reduce stage: done in %.1fs", time.monotonic() - reduce_started)
 
     timeline = "\n\n".join(
         f"### [{_time_range(chunk)}]\n\n"

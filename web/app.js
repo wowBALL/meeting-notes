@@ -143,6 +143,7 @@ const STAGE_OF = {
   transcribe_started: 1,
   diarize_started: 2,
   summarize_started: 3,
+  summarize_progress: 3,
   meeting_done: 4,
 };
 

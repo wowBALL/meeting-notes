@@ -9,9 +9,13 @@ from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
     LLM_TIMEOUT_SECONDS,
+    PROBE_TIMEOUT_SECONDS,
     GLM_MAP_MAX_TOKENS,
     GLM_REDUCE_MAX_TOKENS,
+    QWEN_MAP_MAX_TOKENS,
+    QWEN_REDUCE_MAX_TOKENS,
     Completion,
+    check_reachable,
     HttpStatusError,
     MissingSettingError,
     UnknownModelError,
@@ -446,3 +450,75 @@ def test_glm_strips_a_trailing_slash_from_the_base_url():
     assert (
         captured["request"].full_url == "https://other.example/v1/chat/completions"
     )
+
+
+def test_check_reachable_treats_an_empty_reasoning_answer_as_reachable():
+    """*** กับดักที่วัดมาจากของจริง 2026-07-31 ***
+    GLM-5.2 เป็น reasoning model ที่ max_tokens คุมผลรวมของ reasoning + คำตอบ ที่ budget
+    ระดับ PROBE_MAX_TOKENS มันใช้หมดไปกับ reasoning แล้วคืน content="" เป็นเรื่องปกติ
+    (ยิงจริงด้วย max_tokens=32 ได้ content ว่างคู่กับ reasoning_content ยาวห้าย่อหน้า)
+
+    ถ้านับกรณีนี้เป็น "ไปไม่ถึง" ทุกประชุมจะถูกปฏิเสธตั้งแต่ยังไม่เริ่ม ทั้งที่ endpoint
+    ปกติดีทุกอย่าง -- แย่กว่าปัญหาที่ฟังก์ชันนี้ถูกสร้างมาแก้เสียอีก"""
+    patcher, _ = _patch_urlopen(_llm_payload("", "length"))
+
+    with (
+        patcher,
+        patch.dict(
+            "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+        ),
+    ):
+        check_reachable(resolve("GLM-5.2"))  # ต้องไม่ raise
+
+
+def test_check_reachable_raises_when_the_endpoint_never_answers():
+    def urlopen(request, timeout=None):
+        raise TimeoutError("the read operation timed out")
+
+    with (
+        patch("urllib.request.urlopen", side_effect=urlopen),
+        patch.dict(
+            "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+        ),
+    ):
+        with pytest.raises(TimeoutError):
+            check_reachable(resolve("GLM-5.2"))
+
+
+def test_check_reachable_uses_the_short_timeout_not_the_summarizing_one():
+    """ทั้งหมดของเรื่องนี้คือการไม่รอ 900 วินาทีเพื่อรู้ว่าปลายทางไปไม่ถึง"""
+    patcher, captured = _patch_urlopen(_llm_payload("OK"))
+
+    with (
+        patcher,
+        patch.dict(
+            "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+        ),
+    ):
+        check_reachable(resolve("GLM-5.2"))
+
+    assert captured["timeout"] == PROBE_TIMEOUT_SECONDS
+    assert PROBE_TIMEOUT_SECONDS < LLM_TIMEOUT_SECONDS
+
+
+def test_check_reachable_reports_a_missing_setting_instead_of_swallowing_it():
+    """ตั้งค่าไม่ครบคือความล้มเหลวจริงที่ควรหยุดตั้งแต่ตรงนี้ ไม่ใช่ไปตายทีละ chunk"""
+    with patch.dict("os.environ", {"LLM_API_KEY": "", "LLM_BASE_URL": ""}, clear=False):
+        with pytest.raises(MissingSettingError):
+            check_reachable(resolve("GLM-5.2"))
+
+
+def test_a_normal_completion_still_leaves_the_sdk_timeout_alone():
+    """timeout ที่ไม่ได้ส่งมา = ใช้ค่า default เดิมของแต่ละ provider ไม่ใช่ค่าที่
+    check_reachable ต้องการ -- การเพิ่มพารามิเตอร์ต้องไม่เปลี่ยนพฤติกรรมของผู้เรียกเดิม"""
+    patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
+
+    with (
+        patcher,
+        patch.dict(
+            "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+        ),
+    ):
+        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 100)
+
+    assert captured["timeout"] == LLM_TIMEOUT_SECONDS

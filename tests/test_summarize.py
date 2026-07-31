@@ -10,7 +10,7 @@ from urllib.error import URLError
 import pytest
 
 import src.summarize as summarize_module
-from src.chunk import parse_transcript_segments, split_into_chunks
+from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
 from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
@@ -24,6 +24,7 @@ from src.summarize import (
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
     REDUCE_FAILURE_NOTICE,
+    SINGLE_CALL_THRESHOLD_TOKENS,
     is_retryable,
     summarize_transcript,
 )
@@ -979,3 +980,78 @@ def test_a_provider_that_returns_no_text_is_not_retried():
         summarize_transcript("สั้น", model="GLM-5.2")
 
     assert calls["n"] == 1
+
+
+def test_the_map_stage_announces_how_much_work_is_in_flight(caplog):
+    """ก่อนหน้านี้ขั้นนี้ไม่ log อะไรเลยจนกว่า chunk จะตาย -- endpoint ที่ค้างจึงให้ความ
+    เงียบสนิทได้ถึง 45 นาทีต่อ chunk ซึ่งแยกไม่ออกจาก process ที่แขวนไปแล้ว
+    (2026-07-31: เสียไปหนึ่งชั่วโมงกว่าจะรู้ว่ามีอะไรผิดปกติ)
+
+    คนอ่าน log ต้องรู้จำนวน chunk ก่อนบรรทัดรายก้อนจะทยอยมา ไม่งั้น "Chunk 5/6" ที่โผล่
+    มาก่อนเพราะ pool ทำงานขนานกัน จะอ่านเหมือนว่า chunk อื่นหายไป"""
+    transcript = _long_transcript(120)
+    expected = _expected_chunk_count(transcript)
+    assert expected >= 2, "sanity: transcript ต้องยาวพอให้เข้าเส้นทาง map-reduce"
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client), caplog.at_level(logging.INFO):
+        summarize_transcript(transcript, model="claude-opus-5")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        f"{expected} chunks" in m and "at a time" in m for m in messages
+    ), messages
+    # ทุก chunk ต้องมีทั้งบรรทัดเริ่มและบรรทัดจบ พร้อมเวลาที่ใช้
+    for i in range(1, expected + 1):
+        assert any(f"Chunk {i}/{expected}" in m and "starting" in m for m in messages)
+        assert any(f"Chunk {i}/{expected}" in m and "done in" in m for m in messages)
+    assert any("Map stage finished" in m for m in messages)
+    assert any("Reduce stage: merging" in m for m in messages)
+    assert any("Reduce stage: done" in m for m in messages)
+
+
+def test_on_progress_reports_one_completion_per_chunk():
+    """แถบใน UI เคยค้างที่ "กำลังสรุป" ตั้งแต่นาทีแรกจนจบ แยกไม่ออกว่ายังทำงานอยู่
+    หรือแขวนไปแล้ว -- รายงานตอน "เสร็จ" ไม่ใช่ตอน "เริ่ม" และนับจำนวนแทนการอ้าง index
+    เพราะ chunk จบไม่เรียงลำดับ: "3/6 เสร็จแล้ว" จริงเสมอไม่ว่าจะเป็นสามก้อนไหน"""
+    transcript = _long_transcript(120)
+    expected = _expected_chunk_count(transcript)
+    assert expected >= 2, "sanity: transcript ต้องยาวพอให้เข้าเส้นทาง map-reduce"
+    client = _prompt_aware_client()
+    seen = []
+
+    with _patch_anthropic(client):
+        summarize_transcript(
+            transcript, model="claude-opus-5", on_progress=lambda d, t: seen.append((d, t))
+        )
+
+    assert len(seen) == expected
+    assert [d for d, _ in seen] == list(range(1, expected + 1))
+    assert {t for _, t in seen} == {expected}
+
+
+def test_a_failing_progress_callback_does_not_lose_the_summary(caplog):
+    """รายงานความคืบหน้าที่พังต้องไม่ทำให้สรุปที่จ่ายเงินไปแล้วหายไป -- เหตุผลเดียวกับ
+    ที่ activity.append() กลืน OSError ทิ้ง"""
+    transcript = _long_transcript(120)
+    client = _prompt_aware_client()
+
+    def explode(done, total):
+        raise RuntimeError("activity feed is on fire")
+
+    with _patch_anthropic(client), caplog.at_level(logging.ERROR):
+        result = summarize_transcript(
+            transcript, model="claude-opus-5", on_progress=explode
+        )
+
+    assert "สรุปรวมทั้งประชุม" in result
+    assert "Progress callback failed" in caplog.text
+
+
+def test_on_progress_is_optional():
+    """ผู้เรียกเดิมทุกจุดต้องยังทำงานได้โดยไม่ต้องแก้"""
+    transcript = _long_transcript(120)
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        assert summarize_transcript(transcript, model="claude-opus-5")

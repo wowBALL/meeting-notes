@@ -50,6 +50,7 @@ MESSAGES = {
         "speakers_pending": "มีผู้พูด {count} คนรอตั้งชื่อ",
         "speakers_failed": "ระบบจำเสียงทำงานไม่สำเร็จ ไฟล์ที่ได้ไม่ได้รับผลกระทบ: {error}",
         "summarize_started": "กำลังสรุปด้วย {model}",
+        "summarize_progress": "สรุปแล้ว {done}/{total} ช่วง",
         "meeting_done": "เสร็จแล้ว: {path}",
         "job_failed": "ประมวลผลล้มเหลว: {error}",
         # --- preflight ---
@@ -145,6 +146,7 @@ MESSAGES = {
         "speakers_pending": "{count} speaker(s) waiting to be named",
         "speakers_failed": "Speaker identification failed; the saved files are unaffected: {error}",
         "summarize_started": "Summarizing with {model}",
+        "summarize_progress": "Summarized {done}/{total} segments",
         "meeting_done": "Done: {path}",
         "job_failed": "Processing failed: {error}",
         # --- preflight ---
