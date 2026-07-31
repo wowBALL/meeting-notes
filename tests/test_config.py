@@ -233,17 +233,34 @@ def test_batched_whisper_can_be_turned_back_on(tmp_path, monkeypatch):
     assert load_config(base_dir=tmp_path).whisper_batched is True
 
 
-def test_hotwords_are_off_until_measured_on_real_meeting_audio(tmp_path, monkeypatch):
-    """ยังไม่มีตัวเลขว่า hotwords ทำให้ transcript ดีขึ้นจริงบนเสียงประชุมของเครื่องนี้
+def test_hotwords_are_on_after_the_full_file_confirmed_it(tmp_path, monkeypatch):
+    """ยืนยันบนไฟล์เต็ม 84 นาทีแล้ว: ถอดถูก 28.9% -> 54.2% เนื้อหาหายแค่ 3.5%
+    และบรรทัดซ้ำสุด 0.6% (รอบที่พังคือ 98.6%)
 
-    ความเสี่ยงที่รู้กันของ hotwords คือโมเดลแต่งคำในลิสต์ขึ้นมาเองช่วงเงียบ ประชุมที่
-    อัดซ้ำไม่ได้จึงไม่ควรเป็นที่ทดลอง -- เปิดเมื่อวัดแล้วเท่านั้น แบบเดียวกับที่
-    WHISPER_BATCHED ถูกปิดหลังวัด
+    ใช้ได้ก็ต่อเมื่อ whisper_condition_on_previous_text เป็น False เท่านั้น --
+    load_config เตือนเมื่อตั้งคู่ที่อันตราย
     """
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")
     monkeypatch.delenv("WHISPER_HOTWORDS", raising=False)
 
-    assert load_config(base_dir=tmp_path).whisper_hotwords is False
+    assert load_config(base_dir=tmp_path).whisper_hotwords is True
+
+
+def test_the_shipped_defaults_are_never_the_pair_that_destroys_transcripts(
+    tmp_path, monkeypatch
+):
+    """กันไว้ตรง ๆ ว่าค่าเริ่มต้นสองตัวจะไม่กลายเป็นคู่ที่พังพร้อมกัน
+
+    คนแก้ค่าใดค่าหนึ่งในอนาคตโดยไม่ได้อ่านคอมเมนต์ของอีกตัว จะทำให้ทุกเครื่องที่ไม่ได้
+    ตั้ง .env เอง ถอดเสียงออกมาเป็นประโยคเดียววนซ้ำทั้งไฟล์
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("WHISPER_HOTWORDS", raising=False)
+    monkeypatch.delenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", raising=False)
+
+    config = load_config(base_dir=tmp_path)
+
+    assert not (config.whisper_hotwords and config.whisper_condition_on_previous_text)
 
 
 def test_hotwords_can_be_turned_on(tmp_path, monkeypatch):
@@ -251,6 +268,40 @@ def test_hotwords_can_be_turned_on(tmp_path, monkeypatch):
     monkeypatch.setenv("WHISPER_HOTWORDS", "true")
 
     assert load_config(base_dir=tmp_path).whisper_hotwords is True
+
+
+def test_conditioning_on_previous_text_is_off_by_default(tmp_path, monkeypatch):
+    """ตัวตัดวงวนซ้ำคำ -- ครึ่งหนึ่งของคู่ที่วัดแล้วว่าได้ผล
+
+    ค่าเริ่มต้นนี้ต่างจาก faster-whisper (ซึ่งเป็น True) โดยเจตนา
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", raising=False)
+
+    assert load_config(base_dir=tmp_path).whisper_condition_on_previous_text is False
+
+
+def test_conditioning_on_previous_text_can_be_turned_back_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", "true")
+
+    assert load_config(base_dir=tmp_path).whisper_condition_on_previous_text is True
+
+
+def test_the_combination_that_destroys_transcripts_warns(tmp_path, monkeypatch, caplog):
+    """hotwords เปิด + conditioning เปิด = เนื้อหาหาย 60-67% (วัดแล้วสองรอบ)
+
+    ไม่ห้าม เพราะเจ้าของเครื่องอาจอยากวัดซ้ำเอง แต่ต้องไม่ใช่กับดักเงียบ -- ตั้งค่านี้
+    ทิ้งไว้แล้วประชุมที่อัดซ้ำไม่ได้จะออกมาพังโดยไม่มีอะไรบอกล่วงหน้า
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_HOTWORDS", "true")
+    monkeypatch.setenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", "true")
+
+    with caplog.at_level(logging.WARNING):
+        load_config(base_dir=tmp_path)
+
+    assert any("HOTWORDS" in record.message for record in caplog.records)
 
 
 def test_load_config_reads_whisper_model_override(tmp_path, monkeypatch):

@@ -242,6 +242,9 @@ def process_file(
                     # faster-whisper เปิดช่อง sot_prev ให้ทันทีที่ hotwords truthy
                     # ค่าว่างจึงเป็นการจ่าย token ทิ้งเปล่า ๆ ทุกหน้าต่าง
                     hotwords=hotwords or None,
+                    condition_on_previous_text=(
+                        config.whisper_condition_on_previous_text
+                    ),
                 )
             )
         except Exception as e:

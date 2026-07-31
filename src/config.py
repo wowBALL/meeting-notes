@@ -179,10 +179,53 @@ DEFAULT_WHISPER_BATCHED = False
 # สามเท่าเพราะมันเลิกถอดเสียงตั้งแต่นาทีแรก ไม่ใช่เพราะ decoder ทำงานดีขึ้น อย่าอ่าน
 # เวลาที่ลดลงเป็นสัญญาณบวก
 #
-# ยังไม่ได้ลอง: hotwords ที่สั้นกว่านี้มาก (ตัวที่วัดยาว 592 อักขระ ~57 คำ) หรือ
-# condition_on_previous_text=False ควบคู่กัน ถ้าจะรื้อมาลองใหม่ ให้ลองกับไฟล์สั้นก่อน
-# แล้วนับ "สวัสดี"/บรรทัดซ้ำก่อนเสมอ ประชุมจริงที่อัดซ้ำไม่ได้ไม่ใช่ที่ทดลอง
-DEFAULT_WHISPER_HOTWORDS = False
+# สองข้อที่ "ยังไม่ได้ลอง" ข้างบนถูกลองแล้ว (2026-07-31, สไลซ์ 10 นาทีสองช่วงของประชุม
+# 92 นาที ช่วง 80:00-90:00 และ 10:00-20:00) ตัวเลขคือส่วนต่างของอัตราส่วน "คำในตาราง
+# glossary ที่ถอดถูก : ที่ถอดผิด" เทียบกับค่าเริ่มต้นของหน้าต่างเดียวกัน:
+#
+#                                  80:00-90:00   10:00-20:00
+#   hotwords เต็ม + cond ปิด          +21.4         +20.4
+#   hotwords 14-18 คำ + cond เปิด     +15.3          +3.0
+#   hotwords 14-18 คำ + cond ปิด       +9.5          +2.0
+#   cond ปิด อย่างเดียว                +6.5          -3.6   <- กลับเครื่องหมาย
+#
+# ปิด conditioning ทำให้อาการวนซ้ำหายไปจริงบนสไลซ์ทั้งสอง (hotwords เต็ม + cond เปิด
+# เหลือเนื้อหา 40% ส่วน + cond ปิด เหลือ 95%) และ hotwords ที่สั้นลงไม่ใช่คำตอบ --
+# ปุ่มเดี่ยว ๆ ทั้งสองตัวไม่นิ่งข้ามหน้าต่าง มีแต่คู่เต็มที่นิ่ง
+#
+# *** ยืนยันบนไฟล์เต็มแล้ว *** (2026-07-31, Stanup 84 นาที ไฟล์เดียวกับที่รอบพังใช้
+# ให้คะแนนใหม่ทั้งสองฝั่งด้วย glossary.md ตัวปัจจุบัน เพราะตารางโตขึ้นระหว่างทาง):
+#
+#                            บรรทัด   อักขระ   บรรทัดซ้ำสุด   ถูก%
+#   hw ปิด / cond เปิด (เดิม)   1618    40,580       0.5%      28.9%
+#   hw เปิด / cond ปิด           877    39,154       0.6%      54.2%   <- ค่าปัจจุบัน
+#   hw เปิด / cond เปิด         1059    43,816      98.6%        --    <- รอบที่พัง
+#
+# +25.3 จุด สอดคล้องกับสไลซ์ทั้งสอง (+21.4, +20.4) เนื้อหาหายเพียง 3.5% และไม่มีวงวน
+# ระดับไฟล์อีกเลย ใช้เวลา 27 นาที (รอบที่พังใช้ 9 นาทีเพราะมันเลิกถอดเสียง)
+#
+# สิ่งที่แลกมา วัดไว้ให้ครบ ไม่ใช่แค่ด้านที่ดีขึ้น:
+#   * segment ยาวขึ้นเท่าตัว (เฉลี่ย 24.1 -> 43.6 อักขระ, p99 80 -> 271) เพราะโมเดล
+#     ไม่มีบริบทประโยคก่อนหน้ามาช่วยตัด -- ดันสัดส่วนบรรทัดที่มีสองคนพูดจาก 0.2%
+#     เป็น 0.5% (ยังเล็กมาก แต่เป็นทิศทางที่ทำให้ป้ายผู้พูดพังง่ายขึ้น)
+#   * วงวนซ้ำคำยังเกิดได้ แค่ถูกกักไว้ในหน้าต่างเดียวแทนที่จะลามทั้งไฟล์ -- บรรทัดที่
+#     มีวลีซ้ำติดกัน 3+ ครั้ง กินพื้นที่ 1.4% -> 3.7% ของ transcript
+#   * อักขระจากภาษาอื่นที่หลุดมา 0.067% -> 0.112%
+DEFAULT_WHISPER_HOTWORDS = True
+
+# ตัวตัดวงวนซ้ำคำ -- ค่านี้ต่างจาก faster-whisper (ซึ่งเป็น True) โดยเจตนา
+#
+# ปิดไว้เพราะมันคือกลไกที่ทำให้วงวนซ้ำ "ติด" ข้ามหน้าต่าง 30 วินาที: ข้อความที่ซ้ำถูก
+# ป้อนกลับเป็น prompt ของหน้าต่างถัดไป ซึ่งผลิตซ้ำอีก วนจนจบไฟล์ ปิดแล้วแต่ละหน้าต่าง
+# ตัดสินจากเสียงล้วน วงวนจึงจบในตัวมันเอง
+#
+# คอมเมนต์เก่าใต้ BATCH_SIZE เคยบันทึกว่าค่านี้ "ไม่ช่วยอะไร ได้ผลเท่ากันเป๊ะทุกไบต์"
+# -- นั่นวัดบน BatchedInferencePipeline ซึ่งเป็น path ที่ปิดไปแล้ว บน WhisperModel
+# แบบ sequential ที่ระบบใช้จริง มันเปลี่ยนผลลัพธ์ชัดเจน (ดูตารางใต้ BATCH_SIZE)
+#
+# ลำพังตัวเดียวไม่ได้ดีขึ้นเสมอไป (+6.5 จุดหน้าต่างหนึ่ง แต่ -3.6 อีกหน้าต่าง) ที่ปิดไว้
+# เป็นค่าเริ่มต้นเพราะมันลดอัตราวนซ้ำได้ทุกรอบที่วัด และเป็นเงื่อนไขจำเป็นของ hotwords
+DEFAULT_WHISPER_CONDITION_ON_PREVIOUS_TEXT = False
 
 # ขนาด chunk ตอนหั่น transcript ยาว และส่วนที่ให้ chunk คาบเกี่ยวกัน
 #
@@ -216,6 +259,9 @@ class Config:
     chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS
     whisper_batched: bool = DEFAULT_WHISPER_BATCHED
     whisper_hotwords: bool = DEFAULT_WHISPER_HOTWORDS
+    whisper_condition_on_previous_text: bool = (
+        DEFAULT_WHISPER_CONDITION_ON_PREVIOUS_TEXT
+    )
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -338,6 +384,20 @@ def load_config(base_dir: Path | None = None) -> Config:
     chunk_overlap_tokens = _read_chunk_overlap()
     whisper_batched = _read_bool("WHISPER_BATCHED", DEFAULT_WHISPER_BATCHED)
     whisper_hotwords = _read_bool("WHISPER_HOTWORDS", DEFAULT_WHISPER_HOTWORDS)
+    whisper_condition_on_previous_text = _read_bool(
+        "WHISPER_CONDITION_ON_PREVIOUS_TEXT",
+        DEFAULT_WHISPER_CONDITION_ON_PREVIOUS_TEXT,
+    )
+    if whisper_hotwords and whisper_condition_on_previous_text:
+        # ไม่ห้าม เพราะเจ้าของเครื่องอาจตั้งใจวัดซ้ำเอง แต่ต้องไม่ใช่กับดักเงียบ:
+        # คู่นี้วัดแล้วสองรอบว่าทำให้ decoder ล็อกอยู่กับประโยคเดียววนจนจบไฟล์
+        # (ไฟล์เต็ม 84 นาที: 98.6% ของบรรทัดเป็นประโยคทักทายเดียวกัน)
+        logger.warning(
+            "WHISPER_HOTWORDS=true พร้อมกับ WHISPER_CONDITION_ON_PREVIOUS_TEXT=true "
+            "เป็นคู่ที่วัดแล้วว่าทำลาย transcript ทั้งไฟล์ (decoder ล็อกอยู่กับประโยค "
+            "เดียววนจนจบ) -- ตั้งใจจริงให้ปล่อยไว้ ไม่งั้นตั้ง "
+            "WHISPER_CONDITION_ON_PREVIOUS_TEXT=false"
+        )
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -383,4 +443,5 @@ def load_config(base_dir: Path | None = None) -> Config:
         chunk_overlap_tokens=chunk_overlap_tokens,
         whisper_batched=whisper_batched,
         whisper_hotwords=whisper_hotwords,
+        whisper_condition_on_previous_text=whisper_condition_on_previous_text,
     )

@@ -1444,13 +1444,45 @@ def test_process_file_records_the_transcript_path_for_a_later_retry(tmp_path):
     )
 
 
+def test_conditioning_on_previous_text_follows_config(tmp_path):
+    """ค่าจาก .env ต้องไปถึง decoder จริง ไม่ใช่ค้างอยู่ใน Config
+
+    ปุ่มนี้เป็นตัวตัดวงวนซ้ำคำที่ทำให้ transcript ทั้งไฟล์กลายเป็นประโยคเดียววนซ้ำ
+    ถ้ามันไม่ถูกส่งต่อ ค่าที่ตั้งใน .env จะดูเหมือนมีผลแต่ไม่มีอะไรเกิดขึ้นเลย
+
+    ตั้งเป็น True โดยเจตนา ทั้งที่ค่าที่ระบบส่งจริงคือ False -- ทดสอบด้วยค่าเริ่มต้น
+    จะผ่านแม้ pipeline จะ hardcode False ทิ้งไว้ ซึ่งไม่ได้พิสูจน์อะไรเลย
+    """
+    config = make_config(tmp_path)
+    config.whisper_condition_on_previous_text = True
+    config.inbox_dir.mkdir(parents=True)
+    audio_path = config.inbox_dir / "weekly-standup.mp3"
+    audio_path.write_bytes(b"fake audio")
+
+    with (
+        _mock_convert_to_wav(),
+        _mock_load_embedder(),
+        patch(
+            "src.pipeline.transcribe_audio",
+            return_value=[{"start": 0.0, "end": 2.0, "text": "สวัสดีครับ"}],
+        ) as transcribe_mock,
+        patch("src.pipeline.diarize_audio", return_value=_diarization([])),
+        patch("src.pipeline.summarize_transcript", return_value="## สรุป"),
+    ):
+        process_file(audio_path, config)
+
+    kwargs = transcribe_mock.call_args.kwargs
+    assert kwargs["condition_on_previous_text"] is True
+
+
 def test_hotwords_are_not_sent_while_the_switch_is_off(tmp_path):
     """glossary.md ที่มีคำอยู่ต้องไม่ทำให้ decoder ถูก bias เองโดยไม่มีใครสั่ง
 
-    ตารางนี้มีไว้ป้อนขั้นสรุปมาตั้งแต่แรก การเพิ่ม hotwords ต้องไม่เปลี่ยนพฤติกรรม
-    ของเครื่องที่มี glossary.md อยู่แล้วจนกว่าเจ้าของเครื่องจะเปิดเอง
+    ตารางนี้มีไว้ป้อนขั้นสรุปมาตั้งแต่แรก เครื่องที่ปิดสวิตช์ต้องได้พฤติกรรมเดิมเป๊ะ
+    แม้จะมี glossary.md อยู่ก็ตาม
     """
     config = make_config(tmp_path)
+    config.whisper_hotwords = False
     config.inbox_dir.mkdir(parents=True)
     (tmp_path / "glossary.md").write_text(
         "## fuzzy\nElectron: อิเล็กตรอน\n", encoding="utf-8"
