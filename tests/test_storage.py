@@ -107,27 +107,34 @@ def test_save_transcript_writes_the_transcript_file(tmp_path):
     assert path.read_text(encoding="utf-8") == "# Transcript"
 
 
-def test_save_summary_writes_the_summary_file_with_the_model_footer(tmp_path):
+def test_save_summary_writes_the_summary_file_without_metadata(tmp_path):
+    """summary.md คือของที่ส่งต่อให้คนอ่าน -- ต้องไม่มีอะไรของระบบปนอยู่ท้ายไฟล์"""
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
     path = save_summary(meeting_dir, "# Summary", "claude-sonnet-5")
 
     assert path == meeting_dir / "summary.md"
-    assert path.read_text(encoding="utf-8") == (
-        "# Summary\n\n---\nสรุปด้วย claude-sonnet-5\n"
-    )
+    assert path.read_text(encoding="utf-8") == "# Summary\n"
 
 
-def test_save_summary_does_not_stack_blank_lines_before_the_footer(tmp_path):
+def test_save_summary_does_not_stack_blank_lines(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
     path = save_summary(meeting_dir, "# Summary\n\n\n", "claude-opus-5")
 
-    assert path.read_text(encoding="utf-8") == (
-        "# Summary\n\n---\nสรุปด้วย claude-opus-5\n"
-    )
+    assert path.read_text(encoding="utf-8") == "# Summary\n"
+
+
+def test_save_summary_writes_the_model_to_a_separate_meta_file(tmp_path):
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    save_summary(meeting_dir, "# Summary", "claude-sonnet-5")
+
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta == "สรุปด้วย claude-sonnet-5\n"
 
 
 def test_save_summary_records_glossary_corrections_per_term(tmp_path):
@@ -135,15 +142,15 @@ def test_save_summary_records_glossary_corrections_per_term(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
-    path = save_summary(
+    save_summary(
         meeting_dir,
         "# Summary",
         "GLM-5.2",
         glossary_counts={"PostgreSQL": 3, "Railway": 1},
     )
 
-    text = path.read_text(encoding="utf-8")
-    assert "แก้คำตาม glossary: PostgreSQL 3 จุด, Railway 1 จุด" in text
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 3 จุด, Railway 1 จุด" in meta
 
 
 def test_save_summary_keeps_fuzzy_sightings_on_their_own_line(tmp_path):
@@ -152,7 +159,7 @@ def test_save_summary_keeps_fuzzy_sightings_on_their_own_line(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
-    path = save_summary(
+    save_summary(
         meeting_dir,
         "# Summary",
         "GLM-5.2",
@@ -160,21 +167,22 @@ def test_save_summary_keeps_fuzzy_sightings_on_their_own_line(tmp_path):
         fuzzy_seen={"Electron": 2},
     )
 
-    text = path.read_text(encoding="utf-8")
-    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in text
-    assert "คำ fuzzy ที่เจอในห้อง: Electron 2 ครั้ง" in text
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in meta
+    assert "คำ fuzzy ที่เจอในห้อง: Electron 2 ครั้ง" in meta
 
 
-def test_save_summary_footer_is_untouched_when_the_glossary_did_nothing(tmp_path):
+def test_save_summary_meta_is_untouched_when_the_glossary_did_nothing(tmp_path):
     """คนที่ยังไม่มี glossary.md ต้องได้ไฟล์หน้าตาเดิมเป๊ะ ไม่มีบรรทัดเปล่าโผล่มา"""
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
-    path = save_summary(
+    save_summary(
         meeting_dir, "# Summary", "GLM-5.2", glossary_counts={}, fuzzy_seen={}
     )
 
-    assert path.read_text(encoding="utf-8") == "# Summary\n\n---\nสรุปด้วย GLM-5.2\n"
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta == "สรุปด้วย GLM-5.2\n"
 
 
 def test_archive_audio_moves_the_recording_into_the_meeting_folder(tmp_path):

@@ -163,6 +163,41 @@ def test_a_file_where_a_meeting_folder_should_be_is_ignored(tmp_path):
     assert previous_open_items(meetings, "dev") == "- ของจริง"
 
 
+def test_profile_is_read_from_the_meta_file_when_present(tmp_path):
+    """หลัง storage.save_summary แยก footer ไป summary.meta.md แล้ว บรรทัด
+    "ประเภทประชุม:" ใน summary.md เองไม่มีอยู่แล้ว -- ต้องอ่านจากไฟล์ meta แทน"""
+    meetings = tmp_path / "meetings"
+    d = meetings / "2026-07-30_09-00-standup"
+    d.mkdir(parents=True)
+    (d / "summary.md").write_text(
+        f"{OPEN_ITEMS_HEADING}\n- เรื่องค้างใหม่\n", encoding="utf-8"
+    )
+    (d / "summary.meta.md").write_text(
+        "สรุปด้วย GLM-5.2\nประเภทประชุม: dev\n", encoding="utf-8"
+    )
+
+    assert previous_open_items(meetings, "dev") == "- เรื่องค้างใหม่"
+    assert previous_open_items(meetings, "cross") == ""
+
+
+def test_meta_file_profile_wins_over_a_stale_inline_footer(tmp_path):
+    """ถ้ามีทั้งสองแบบ (ประชุมที่เคยสรุปด้วยโค้ดเก่าแล้วสรุปซ้ำด้วยโค้ดใหม่) ให้เชื่อ
+    ไฟล์ meta ซึ่งเป็นของล่าสุดเสมอ ไม่ใช่บรรทัดเก่าที่อาจค้างอยู่ใน summary.md"""
+    meetings = tmp_path / "meetings"
+    d = meetings / "2026-07-30_09-00-standup"
+    d.mkdir(parents=True)
+    (d / "summary.md").write_text(
+        f"{OPEN_ITEMS_HEADING}\n- เรื่องค้าง\n\n---\nสรุปด้วย GLM-5.2\nประเภทประชุม: cross\n",
+        encoding="utf-8",
+    )
+    (d / "summary.meta.md").write_text(
+        "สรุปด้วย GLM-5.2\nประเภทประชุม: dev\n", encoding="utf-8"
+    )
+
+    assert previous_open_items(meetings, "dev") == "- เรื่องค้าง"
+    assert previous_open_items(meetings, "cross") == ""
+
+
 def test_format_for_prompt_is_empty_when_there_is_nothing_to_carry(tmp_path):
     assert format_for_prompt("") == ""
 

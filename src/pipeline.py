@@ -454,8 +454,8 @@ def _finish_meeting(
             raise
 
     try:
-        # save_summary stamps the model name into the file's footer, so calling it
-        # in transcript-only mode would write "สรุปด้วย transcript-only" under a
+        # save_summary stamps the model name into summary.meta.md, so calling it
+        # in transcript-only mode would write "สรุปด้วย transcript-only" for a
         # summary nobody asked for. Everything else below still runs: the meeting
         # is finished, just without that one file.
         if summary_markdown is not None:

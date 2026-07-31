@@ -97,12 +97,20 @@ def save_summary(
 ) -> Path:
     # `model` is required, not optional: the point of choosing a model per meeting
     # is being able to judge afterwards whether the pricier one was worth it, and
-    # a summary.md with no attribution cannot be judged at all.
+    # summary.meta.md with no attribution cannot be judged at all.
     #
     # อีกสองค่าเป็น optional และจะไม่เขียนบรรทัดอะไรเลยเมื่อว่าง -- คนที่ยังไม่มี
     # glossary.md ต้องได้ไฟล์หน้าตาเดิมเป๊ะ ไม่ใช่บรรทัดเปล่าที่อ่านไม่ได้ความ
+    #
+    # เมตาดาต้า (โมเดล, ประเภทประชุม, คำที่แก้ตาม glossary) แยกไปอยู่ summary.meta.md
+    # คนละไฟล์กับ summary.md โดยเจตนา: summary.md คือของที่ส่งต่อให้คนอ่าน (หัวหน้า,
+    # ทีม) ไม่ควรมีรายละเอียดเชิงเทคนิคของระบบปนอยู่ท้ายไฟล์ -- ดู carryover._profile_of
+    # ที่อ่านค่า "ประเภทประชุม:" จากไฟล์นี้ (ตกกลับไปอ่านจาก summary.md เองถ้าเป็น
+    # ประชุมเก่าก่อนมีไฟล์นี้)
     path = meeting_dir / "summary.md"
     body = summary_markdown.rstrip("\n")
+    path.write_text(f"{body}\n", encoding="utf-8")
+
     footer = [f"สรุปด้วย {model}"]
     if profile:
         # ต้องเห็นย้อนหลังได้ว่าสรุปนี้ใช้กฎชุดไหน -- เผลอกด dev ในประชุมข้ามฝ่ายแล้ว
@@ -117,14 +125,15 @@ def save_summary(
         footer.append(f"แก้คำตาม glossary: {corrected}")
     if fuzzy_seen:
         # "เจอ แต่ไม่ได้แก้" -- ชั้น fuzzy โมเดลเป็นคนตีความ บรรทัดนี้เป็นหลักฐาน
-        # ชิ้นเดียวที่บอกได้ว่าคำไหนเลิกใช้ไปแล้ว จึงควรตัดออกจาก prompt (มันกิน
-        # token ทุกครั้งที่สรุป) ต้องแยกจากบรรทัดบนเพราะความหมายต่างกัน
+        # ชิ้นเดียวที่บอกได้ว่าคำใน fuzzy คำไหนตายแล้วควรลบ ต้องแยกจากบรรทัดบนเพราะ
+        # ความหมายต่างกัน
         seen = ", ".join(
             f"{term} {count} ครั้ง" for term, count in _busiest_first(fuzzy_seen)
         )
         footer.append(f"คำ fuzzy ที่เจอในห้อง: {seen}")
-    joined = "\n".join(footer)
-    path.write_text(f"{body}\n\n---\n{joined}\n", encoding="utf-8")
+    meta_path = meeting_dir / "summary.meta.md"
+    meta_path.write_text("\n".join(footer) + "\n", encoding="utf-8")
+
     return path
 
 

@@ -125,10 +125,9 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
     assert meeting_dir == expected_dir
     assert (meeting_dir / "transcript.md").exists()
     summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
-    assert summary.startswith("## ประเด็นสำคัญ\n- ทดสอบ")
-    assert summary.endswith(
-        f"---\nสรุปด้วย {config.claude_model}\nประเภทประชุม: {config.meeting_profile}\n"
-    )
+    assert summary == "## ประเด็นสำคัญ\n- ทดสอบ\n"
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta == f"สรุปด้วย {config.claude_model}\nประเภทประชุม: {config.meeting_profile}\n"
     assert (meeting_dir / "weekly-standup.mp3").exists()
     assert not audio_path.exists()
 
@@ -174,9 +173,9 @@ def test_glossary_corrects_the_transcript_before_it_reaches_the_summarizer(tmp_p
     raw = (meeting_dir / "transcript.md").read_text(encoding="utf-8")
     assert "โพสเกรส" in raw, "transcript ดิบต้องไม่ถูกแก้"
 
-    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
-    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in summary
-    assert "คำ fuzzy ที่เจอในห้อง: Electron 1 ครั้ง" in summary
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in meta
+    assert "คำ fuzzy ที่เจอในห้อง: Electron 1 ครั้ง" in meta
 
 
 def _run_with_profile(tmp_path, job_profile=None, env_profile=None):
@@ -254,11 +253,11 @@ def test_the_job_file_profile_beats_the_env_value(tmp_path):
     assert "สมชาย" not in kwargs["glossary_text"]
 
 
-def test_the_meeting_profile_is_recorded_in_the_summary_footer(tmp_path):
+def test_the_meeting_profile_is_recorded_in_the_summary_meta(tmp_path):
     _, meeting_dir = _run_with_profile(tmp_path, job_profile="cross")
 
-    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
-    assert "ประเภทประชุม: cross" in summary
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "ประเภทประชุม: cross" in meta
 
 
 def _previous_summary(config, name, profile, open_items):
@@ -420,7 +419,7 @@ def test_glossary_reaches_the_summarizer_as_prompt_text(tmp_path):
 
 
 def test_a_missing_glossary_file_adds_no_glossary_lines(tmp_path):
-    """ไม่มี glossary.md = ห้าม crash และห้ามมีบรรทัดเรื่องคำศัพท์โผล่มา
+    """ไม่มี glossary.md = ห้าม crash และห้ามมีบรรทัดเรื่องคำศัพท์โผล่มาใน summary.meta.md
     (บรรทัด "ประเภทประชุม" ไม่เกี่ยวกับ glossary มันมีเสมอเพื่อให้ย้อนดูได้ว่า
     สรุปนี้ใช้กฎชุดไหน)"""
     config = make_config(tmp_path)
@@ -444,12 +443,17 @@ def test_a_missing_glossary_file_adds_no_glossary_lines(tmp_path):
         meeting_dir = process_file(audio_path, config)
 
     summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
-    assert summary == (
-        f"## สรุป\n\n---\nสรุปด้วย {config.claude_model}\n"
-        f"ประเภทประชุม: {config.meeting_profile}\n"
-    )
+    assert summary == "## สรุป\n"
     assert "glossary" not in summary
     assert "fuzzy" not in summary
+
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta == (
+        f"สรุปด้วย {config.claude_model}\n"
+        f"ประเภทประชุม: {config.meeting_profile}\n"
+    )
+    assert "glossary" not in meta
+    assert "fuzzy" not in meta
 
 
 def test_process_file_continues_without_diarization_on_failure(tmp_path):
@@ -1297,7 +1301,7 @@ def test_process_file_sends_the_job_file_to_failed_when_summarizing_fails(tmp_pa
 def test_the_recorded_model_choice_survives_from_manifest_to_summary(tmp_path):
     # The feature's actual premise: the model the user picked at record time
     # (written into the session manifest) must survive session -> job sidecar ->
-    # pipeline -> summarize_transcript call -> summary.md footer, with the sidecar
+    # pipeline -> summarize_transcript call -> summary.meta.md, with the sidecar
     # gone from inbox/ afterward. No hop in between (write_job, read_model,
     # finish_session) is mocked -- only the external boundaries are.
     config = make_config(tmp_path)
@@ -1343,8 +1347,8 @@ def test_the_recorded_model_choice_survives_from_manifest_to_summary(tmp_path):
         meeting_dir = process_file(audio_path, config)
 
     assert summarize.call_args.kwargs["model"] == "claude-sonnet-5"
-    summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
-    assert "---\nสรุปด้วย claude-sonnet-5\n" in summary
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "สรุปด้วย claude-sonnet-5\n" in meta
     assert not (inbox / f"weekly-standup{JOB_SUFFIX}").exists()
 
 

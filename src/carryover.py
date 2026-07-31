@@ -17,19 +17,41 @@ logger = logging.getLogger(__name__)
 
 # ต้องตรงกับหัวข้อใน prompts/reduce.md และ prompts/single.md
 OPEN_ITEMS_HEADING = "## ต้องคุยต่อครั้งหน้า"
-# ต้องตรงกับที่ storage.save_summary เขียนท้ายไฟล์
+# ต้องตรงกับที่ storage.save_summary เขียน
 PROFILE_FOOTER_PREFIX = "ประเภทประชุม:"
 
 SUMMARY_NAME = "summary.md"
+# เมตาดาต้า (โมเดล, ประเภทประชุม, คำที่แก้ตาม glossary) ย้ายมาอยู่ไฟล์นี้แยกจาก
+# summary.md แล้ว (ดู storage.save_summary) -- ประชุมเก่าก่อนย้ายไม่มีไฟล์นี้ จึง
+# ต้องตกกลับไปอ่าน "ประเภทประชุม:" จาก summary.md เอง ดู _profile_of_meeting ด้านล่าง
+META_NAME = "summary.meta.md"
 
 
-def _profile_of(summary_text: str) -> str | None:
-    for line in summary_text.splitlines():
+def _profile_of(text: str) -> str | None:
+    for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith(PROFILE_FOOTER_PREFIX):
             value = stripped[len(PROFILE_FOOTER_PREFIX) :].strip()
             return value or None
     return None
+
+
+def _profile_of_meeting(directory: Path, summary_text: str) -> str | None:
+    """ประเภทประชุม -- อ่านจาก summary.meta.md ก่อน ตกกลับไปอ่านจาก summary.md เอง
+
+    ไฟล์ summary.meta.md เพิ่งมีทีหลัง (ดู storage.save_summary) ประชุมเก่าที่ยังไม่
+    ถูกสรุปใหม่จะไม่มีไฟล์นี้ แต่ยังมีบรรทัด "ประเภทประชุม:" ต่อท้าย summary.md อยู่
+    เดิม -- ต้องอ่านได้ทั้งสองแบบ ไม่งั้นเรื่องค้างของประชุมเก่าทั้งชุดจะหายไปเงียบๆ
+    ตอนอัปเกรด
+    """
+    meta_path = directory / META_NAME
+    try:
+        meta_text = meta_path.read_text(encoding="utf-8")
+    except OSError:
+        meta_text = None
+    if meta_text is not None:
+        return _profile_of(meta_text)
+    return _profile_of(summary_text)
 
 
 def _section_body(summary_text: str, heading: str) -> str:
@@ -92,7 +114,7 @@ def previous_open_items(
             if path.exists():
                 logger.warning("อ่าน %s ไม่ได้ ข้ามไป: %s", path, e)
             continue
-        if _profile_of(text) != profile:
+        if _profile_of_meeting(directory, text) != profile:
             continue
         body = _section_body(text, OPEN_ITEMS_HEADING)
         if body:
