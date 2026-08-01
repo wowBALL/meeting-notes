@@ -114,13 +114,13 @@ def test_render_transcript_markdown_without_names_is_unchanged():
 
 _TRANSCRIPT = """# Transcript
 
-**Wachirakorn (สอง)** [00:10]: เดี๋ยวผมแชร์จอนะครับ ขอเปิด Odoo ก่อน
+**สมศรี (ศรี)** [00:10]: เดี๋ยวผมแชร์จอนะครับ ขอเปิด Odoo ก่อน
 
 **ผู้พูด 1** [00:20]: ครับ
 
-**Wachirakorn (สอง)** [00:30]: อันนี้คือ payslip ที่ engine คำนวณออกมา
+**สมศรี (ศรี)** [00:30]: อันนี้คือ payslip ที่ engine คำนวณออกมา
 
-**ผู้พูด 1** [00:40]: พี่บอลว่าไงบ้าง
+**ผู้พูด 1** [00:40]: พี่สมปองว่าไงบ้าง
 
 **ผู้พูด 2** [08:00]: ผมเพิ่งเข้ามาครับ ขอโทษที่สายนะครับทุกคน
 """
@@ -131,12 +131,12 @@ def test_speaker_stats_counts_characters_not_lines():
     จึงต้องเป็นอักขระ ไม่ใช่จำนวนบรรทัด"""
     stats = {entry["speaker"]: entry for entry in speaker_stats(_TRANSCRIPT)}
 
-    assert stats["Wachirakorn (สอง)"]["lines"] == 2
-    assert stats["Wachirakorn (สอง)"]["turns"] == 2
+    assert stats["สมศรี (ศรี)"]["lines"] == 2
+    assert stats["สมศรี (ศรี)"]["turns"] == 2
     assert stats["ผู้พูด 1"]["lines"] == 2
     # ผู้พูด 2 พูดบรรทัดเดียวแต่ยาวกว่าสองบรรทัดของผู้พูด 1 รวมกัน
     assert stats["ผู้พูด 2"]["chars"] > stats["ผู้พูด 1"]["chars"]
-    assert [entry["speaker"] for entry in speaker_stats(_TRANSCRIPT)][0] == "Wachirakorn (สอง)"
+    assert [entry["speaker"] for entry in speaker_stats(_TRANSCRIPT)][0] == "สมศรี (ศรี)"
 
 
 def test_speaker_stats_separates_voiceprint_names_from_placeholders():
@@ -144,7 +144,7 @@ def test_speaker_stats_separates_voiceprint_names_from_placeholders():
     ได้ว่ามีชื่อจริงกี่คน ไม่ใช่ปล่อยให้เข้าใจว่ารู้จักทุกคน"""
     stats = {entry["speaker"]: entry for entry in speaker_stats(_TRANSCRIPT)}
 
-    assert stats["Wachirakorn (สอง)"]["identified"] is True
+    assert stats["สมศรี (ศรี)"]["identified"] is True
     assert stats["ผู้พูด 1"]["identified"] is False
     assert stats["ผู้พูด 2"]["identified"] is False
 
@@ -153,10 +153,10 @@ def test_participants_line_counts_instead_of_guessing():
     line = participants_line(_TRANSCRIPT)
 
     assert line.startswith("ผู้เข้าร่วม: 3 เสียง (ระบุตัวได้จากลายเสียง 1 คน)")
-    assert "Wachirakorn (สอง)" in line
+    assert "สมศรี (ศรี)" in line
     assert "ผู้พูด 1" in line
-    # "พี่บอล" ถูกพูดถึงในบทสนทนา แต่ไม่ใช่ป้ายผู้พูด จึงต้องไม่โผล่ในรายชื่อ
-    assert "พี่บอล" not in line
+    # "พี่สมปอง" ถูกพูดถึงในบทสนทนา แต่ไม่ใช่ป้ายผู้พูด จึงต้องไม่โผล่ในรายชื่อ
+    assert "พี่สมปอง" not in line
 
 
 def test_participants_line_marks_whoever_was_not_there_from_the_start():
@@ -164,12 +164,12 @@ def test_participants_line_marks_whoever_was_not_there_from_the_start():
     line = participants_line(_TRANSCRIPT)
 
     assert "ผู้พูด 2 " in line and "(พูดครั้งแรก 08:00)" in line
-    assert "Wachirakorn (สอง)" in line.split("(พูดครั้งแรก")[0]
+    assert "สมศรี (ศรี)" in line.split("(พูดครั้งแรก")[0]
 
 
 def test_replace_participants_line_removes_whatever_the_model_wrote():
     """prompt เป็นคำขอ ไม่ใช่การบังคับ และประชุมเก่าก็มีบรรทัดนั้นติดมาด้วย"""
-    summary = "ผู้เข้าร่วม: สมชาย, สมหญิง, พี่บอล\n\n## หัวข้อที่คุยกัน\n- เรื่องที่คุยกัน"
+    summary = "ผู้เข้าร่วม: สมชาย, สมหญิง, พี่สมปอง\n\n## หัวข้อที่คุยกัน\n- เรื่องที่คุยกัน"
 
     result = replace_participants_line(summary, _TRANSCRIPT)
 
