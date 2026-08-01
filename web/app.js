@@ -54,8 +54,8 @@ const UI = {
       "รายการนี้มาจากก่อนอัปเดตระบบจำเสียง ไม่มีข้อมูลพอจะบันทึกได้ -- ข้ามคนนี้ไปได้ " +
       "อัดประชุมครั้งหน้าจะจำได้ตามปกติ",
     models: [
-      ["GLM-5.2", "GLM 5.2", "ข้อมูลไม่ออกนอกบริษัท · ช้ากว่า"],
       ["Qwen/Qwen3.6-35B-A3B", "Qwen 3.6", "ข้อมูลไม่ออกนอกบริษัท · เร็วที่สุด"],
+      ["GLM-5.2", "GLM 5.2", "ข้อมูลไม่ออกนอกบริษัท · ช้ากว่า"],
       ["claude-opus-5", "Opus 5", "แม่นสุด · $5/$25 ต่อ MTok"],
       ["claude-sonnet-5", "Sonnet 5", "ประหยัด · $3/$15 ต่อ MTok"],
       ["transcript-only", "ถอดเสียงอย่างเดียว", "ไม่สรุป · ไม่เสียเงิน"],
@@ -116,8 +116,8 @@ const UI = {
       "This entry predates the voice-recognition upgrade and lacks what's needed to save " +
       "-- you can skip it, the next recording will be recognized normally",
     models: [
-      ["GLM-5.2", "GLM 5.2", "Stays in-house · slower"],
       ["Qwen/Qwen3.6-35B-A3B", "Qwen 3.6", "Stays in-house · fastest"],
+      ["GLM-5.2", "GLM 5.2", "Stays in-house · slower"],
       ["claude-opus-5", "Opus 5", "Most accurate · $5/$25 per MTok"],
       ["claude-sonnet-5", "Sonnet 5", "Cheaper · $3/$15 per MTok"],
       ["transcript-only", "Transcript only", "No summary · no cost"],
@@ -151,7 +151,9 @@ const STAGE_OF = {
 
 // อ่านภาษาก่อน render ครั้งแรกเสมอ ไม่งั้นหน้าจอจะกระพริบสลับภาษาตอนโหลด
 let lang = localStorage.getItem("runnerLang") === "en" ? "en" : "th";
-let model = "GLM-5.2";
+// ต้องตรงกับ config.DEFAULT_SUMMARY_MODEL: หน้าเว็บกับเมนู CLI ต้องเริ่มที่โมเดลเดียวกัน
+// ไม่งั้นคนที่กด "เปิดห้อง" ทันทีกับคนที่กด Enter ผ่านเมนูจะได้คนละโมเดลโดยไม่รู้ตัว
+let model = "Qwen/Qwen3.6-35B-A3B";
 // dev เป็นค่าเริ่มต้นเพราะเป็น 3 ใน 4 ครั้งของสัปดาห์ และการเผลอเลือก cross ในประชุม
 // dev ล้วนทำให้โมเดล qualify คำพูดปกติเกินจำเป็นจนสรุปอ่านแล้วอ้อมค้อม
 let profile = "dev";

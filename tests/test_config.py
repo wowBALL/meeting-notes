@@ -55,7 +55,7 @@ def test_load_config_reads_required_env_vars(tmp_path, monkeypatch):
     config = load_config(base_dir=tmp_path)
 
     assert config.hf_token == "hf-test-token"
-    assert config.claude_model == "GLM-5.2"
+    assert config.claude_model == "Qwen/Qwen3.6-35B-A3B"
     assert config.whisper_model == "small"
     assert config.inbox_dir == tmp_path / "inbox"
     assert config.failed_dir == tmp_path / "failed"
@@ -386,11 +386,11 @@ def test_load_config_falls_back_when_the_port_is_not_a_number(tmp_path, monkeypa
 
 
 def test_load_config_works_without_an_anthropic_key(tmp_path, monkeypatch):
-    """GLM จะเป็นค่าเริ่มต้น -- คนที่ตั้งเครื่องใหม่ต้องเริ่มงานได้โดยไม่มี key ของ Anthropic
+    """โมเดลในบริษัทเป็นค่าเริ่มต้น -- คนตั้งเครื่องใหม่ต้องเริ่มงานได้โดยไม่มี key ของ Anthropic
 
     Config ไม่มี field anthropic_api_key อีกแล้ว (ไม่มีใครอ่านมันในโค้ดจริง --
     ดู src/llm.py ที่อ่าน ANTHROPIC_API_KEY ตรงจาก os.environ เอง) เทสต์นี้จึงยืนยัน
-    แค่ว่า load_config ไม่ raise และยังได้ค่าเริ่มต้น GLM ตามเดิมแม้ไม่มี key นี้เลย
+    แค่ว่า load_config ไม่ raise และยังได้ค่าเริ่มต้นที่ไม่ต้องใช้ key นี้เลย
     """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("HF_TOKEN", "hf_test")
@@ -398,7 +398,7 @@ def test_load_config_works_without_an_anthropic_key(tmp_path, monkeypatch):
 
     config = load_config(tmp_path)
 
-    assert config.claude_model == "GLM-5.2"
+    assert config.claude_model == "Qwen/Qwen3.6-35B-A3B"
 
 
 def test_the_default_summary_model_is_the_one_that_keeps_data_in_house():
@@ -406,13 +406,16 @@ def test_the_default_summary_model_is_the_one_that_keeps_data_in_house():
 
     ถ้า Claude เป็นค่าเริ่มต้น การกด Enter ผ่านเมนูจะส่ง transcript ออกนอกบริษัททุกครั้ง
     โดยไม่มีใครตัดสินใจเรื่องนั้นเลย -- ค่าเริ่มต้นจึงต้องเป็น provider ที่ข้อมูลไม่ออกไปไหน
+
+    ในสองตัวที่ข้อมูลไม่ออกนอกบริษัท ตรึงไว้ที่ Qwen ไม่ใช่ GLM-5.2: GLM คืน content
+    ว่างเปล่ากับงานสรุป 10 ครั้งจาก 10 ครั้ง (วัด 2026-07-31) ส่วนตัวนี้เสร็จใน 4 วินาที
     """
     from src.config import DEFAULT_SUMMARY_MODEL
     from src.llm import resolve
 
-    assert DEFAULT_SUMMARY_MODEL == "GLM-5.2"
+    assert DEFAULT_SUMMARY_MODEL == "Qwen/Qwen3.6-35B-A3B"
     # ต้องอยู่ใน registry จริง ไม่ใช่แค่สตริงที่พิมพ์ถูก
-    assert resolve(DEFAULT_SUMMARY_MODEL).model_id == "GLM-5.2"
+    assert resolve(DEFAULT_SUMMARY_MODEL).model_id == "Qwen/Qwen3.6-35B-A3B"
 
 
 def test_the_misnamed_claude_default_constant_is_gone():
