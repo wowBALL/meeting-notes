@@ -1,4 +1,5 @@
-from datetime import date
+import os
+from datetime import date, datetime
 from unittest.mock import patch
 
 from src.job import JOB_SUFFIX, read_model, write_job
@@ -7,6 +8,7 @@ from src.storage import (
     create_meeting_folder,
     meeting_folder_name,
     move_to_failed,
+    recording_day,
     save_summary,
     save_transcript,
 )
@@ -35,6 +37,48 @@ def test_folder_name_for_an_unnamed_recording_has_no_topic():
 def test_folder_name_for_a_user_dropped_file_keeps_the_whole_name():
     # no recorder timestamp to parse; just date-stamp whatever was dropped in
     assert meeting_folder_name("weekly-standup", TODAY) == "2026-07-22_weekly-standup"
+
+
+def test_recording_day_is_the_day_it_was_recorded_not_the_day_it_was_processed():
+    # Meet22 was recorded on 07-31 but only reached the watcher on 08-01, and the
+    # folder claimed 08-01. A named stem carries HH-MM-SS and no date, so the day
+    # has to come from the file itself, not from whenever the run happens to be.
+    finished_at = datetime(2026, 7, 31, 22, 46, 0)
+
+    assert recording_day("Meet22-19-59-59", finished_at) == date(2026, 7, 31)
+
+
+def test_recording_day_rolls_back_a_day_when_the_meeting_crossed_midnight():
+    # started 23:30, ffmpeg finished writing at 00:15 the next day. Taking the
+    # file's own day would date the folder a day AFTER the meeting -- the same
+    # class of error, just in the other direction. A recording cannot end before
+    # it starts, so an HH-MM later than the write time belongs to the day before.
+    finished_at = datetime(2026, 8, 1, 0, 15, 0)
+
+    assert recording_day("Retro-23-30-00", finished_at) == date(2026, 7, 31)
+
+
+def test_recording_day_prefers_the_date_an_unnamed_stem_already_carries():
+    # an unnamed stem is "YYYY-MM-DD_HH-MM-SS" -- it knows its own day, so no
+    # guessing from the file is needed or wanted
+    finished_at = datetime(2026, 8, 1, 9, 0, 0)
+
+    assert recording_day("2026-07-24_19-01-45", finished_at) == date(2026, 7, 24)
+
+
+def test_create_meeting_folder_dates_the_folder_from_the_audio_not_the_clock(tmp_path):
+    # the Meet22 bug end to end: recorded 07-31, processed 08-01, folder said 08-01
+    meetings_dir = tmp_path / "meetings"
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    audio_path = inbox / "Meet22-19-59-59.ogg"
+    audio_path.write_bytes(b"")
+    finished_at = datetime(2026, 7, 31, 22, 46, 0).timestamp()
+    os.utime(audio_path, (finished_at, finished_at))
+
+    result = create_meeting_folder(audio_path, meetings_dir, today=date(2026, 8, 1))
+
+    assert result == meetings_dir / "2026-07-31_19-59-Meet22"
 
 
 def test_create_meeting_folder_builds_the_new_format_and_makes_the_dir(tmp_path):

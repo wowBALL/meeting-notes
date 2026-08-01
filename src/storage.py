@@ -1,7 +1,7 @@
 import re
 import shutil
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from itertools import count
 from pathlib import Path
 
@@ -34,6 +34,33 @@ _UNNAMED_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-\d{2}$")
 _NAMED_RE = re.compile(r"^(?P<topic>.+)-(\d{2})-(\d{2})-\d{2}$")
 
 
+def recording_day(stem: str, finished_at: datetime) -> date:
+    """วันที่ประชุมนี้ "ถูกอัด" ไม่ใช่วันที่มันถูกประมวลผล
+
+    stem ของประชุมที่ตั้งชื่อมีแค่ HH-MM-SS ไม่มีวันที่ (ดูรูปแบบด้านบน) ของเดิมจึงเติม
+    วันที่ของวันที่รันเข้าไป ซึ่งตรงก็ต่อเมื่อถอดเสียงวันเดียวกับที่อัด -- ไฟล์ที่ค้างข้ามคืน
+    ได้โฟลเดอร์ที่ระบุวันผิดไปเลย (Meet22 อัด 2026-07-31 ได้ชื่อ 2026-08-01)
+
+    `finished_at` คือตอนที่ไฟล์เสียงถูกเขียนเสร็จ ซึ่งก็คือตอนที่ประชุม *จบ* -- การอัดจบ
+    ก่อนเริ่มไม่ได้ ดังนั้นถ้า HH-MM ในชื่อไฟล์ตกหลังเวลานั้น แปลว่ามันเป็นของเมื่อวาน
+    (ประชุมที่คร่อมเที่ยงคืน) กติกาข้อนี้ทำให้ทั้งสองทิศทางถูก ไม่ใช่แค่ทิศที่เพิ่งเจอ
+    """
+    unnamed = _UNNAMED_RE.match(stem)
+    if unnamed:
+        # stem รู้วันของตัวเองอยู่แล้ว ไม่ต้องเดาจากไฟล์
+        return date.fromisoformat(unnamed.group(1))
+    named = _NAMED_RE.match(stem)
+    if not named:
+        # ไฟล์ที่ผู้ใช้หย่อนเข้ามาเอง ไม่มี HH-MM ให้เทียบ เหลือแค่วันของไฟล์
+        return finished_at.date()
+    started = finished_at.replace(
+        hour=int(named.group(2)), minute=int(named.group(3)), second=0, microsecond=0
+    )
+    if started > finished_at:
+        started -= timedelta(days=1)
+    return started.date()
+
+
 def meeting_folder_name(stem: str, today: date) -> str:
     """Build 'YYYY-MM-DD_HH-MM-<topic>' from a recording's file stem."""
     unnamed = _UNNAMED_RE.match(stem)
@@ -61,7 +88,15 @@ def create_meeting_folder(
     collision gets a suffix, which that parser still reads as a title ("test-2").
     """
     today = today or date.today()
-    base = meeting_folder_name(audio_path.stem, today)
+    # วันของไฟล์เสียงเอง ไม่ใช่วันที่รัน -- `today` เหลือไว้เป็นทางถอยเมื่อ stat ไม่ได้
+    # (ไฟล์หายไประหว่างทาง/สิทธิ์ไม่พอ) ซึ่งเสียแค่ความแม่นของวันที่ ไม่ควรล้มทั้งงาน
+    try:
+        finished_at = datetime.fromtimestamp(audio_path.stat().st_mtime)
+    except OSError:
+        day = today
+    else:
+        day = recording_day(audio_path.stem, finished_at)
+    base = meeting_folder_name(audio_path.stem, day)
     for attempt in count(1):
         candidate = meetings_dir / (base if attempt == 1 else f"{base}-{attempt}")
         try:
