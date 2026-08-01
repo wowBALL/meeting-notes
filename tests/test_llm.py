@@ -9,9 +9,13 @@ from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
     LLM_TIMEOUT_SECONDS,
+    PROBE_TIMEOUT_SECONDS,
     GLM_MAP_MAX_TOKENS,
     GLM_REDUCE_MAX_TOKENS,
+    QWEN_MAP_MAX_TOKENS,
+    QWEN_REDUCE_MAX_TOKENS,
     Completion,
+    check_reachable,
     HttpStatusError,
     MissingSettingError,
     UnknownModelError,
@@ -177,6 +181,43 @@ def test_resolve_returns_the_glm_budgets():
     assert provider.map_max_tokens == GLM_MAP_MAX_TOKENS
     assert provider.reduce_max_tokens == GLM_REDUCE_MAX_TOKENS
     assert GLM_MAP_MAX_TOKENS > CLAUDE_MAP_MAX_TOKENS
+
+
+def test_resolve_returns_the_qwen_budgets():
+    """Qwen ใช้ endpoint เดียวกับ GLM แต่ไม่ใช่ reasoning model
+
+    งบจึงต้องเป็นชุดของ Claude ไม่ใช่ของ GLM ที่เผื่อไว้ให้ reasoning กินไปสี่เท่า
+    -- วัดจริงแล้วมันใช้ 602 token บน chunk ที่ใหญ่ที่สุดของประชุม 84 นาที
+    """
+    provider = resolve("Qwen/Qwen3.6-35B-A3B")
+
+    assert provider.model_id == "Qwen/Qwen3.6-35B-A3B"
+    assert provider.map_max_tokens == QWEN_MAP_MAX_TOKENS
+    assert provider.reduce_max_tokens == QWEN_REDUCE_MAX_TOKENS
+    assert QWEN_MAP_MAX_TOKENS < GLM_MAP_MAX_TOKENS
+
+
+def test_qwen_uses_the_same_endpoint_settings_as_glm():
+    """key และ base URL ตัวเดียวกัน -- ตั้ง .env เพิ่มไม่ต้องทำอะไรเลยเมื่อสลับมาใช้ตัวนี้"""
+    patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
+
+    with patcher, patch.dict(
+        "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+    ):
+        result = resolve("Qwen/Qwen3.6-35B-A3B").complete("ระบบ", "เนื้อหา", 999)
+
+    assert result == Completion(text="สรุป", truncated=False)
+    request = captured["request"]
+    assert request.full_url == f"{TEST_BASE_URL}/chat/completions"
+    assert request.headers["Authorization"] == "Bearer test-key"
+    # ชื่อรุ่นต้องออกไปเป๊ะ ๆ ทั้ง "Qwen/" และตัวพิมพ์ -- proxy ปฏิเสธชื่อที่ไม่ตรง
+    assert json.loads(request.data.decode("utf-8"))["model"] == "Qwen/Qwen3.6-35B-A3B"
+
+
+def test_qwen_without_the_llm_key_names_the_setting_to_fix():
+    with patch.dict("os.environ", {"LLM_API_KEY": "", "LLM_BASE_URL": TEST_BASE_URL}):
+        with pytest.raises(MissingSettingError, match="LLM_API_KEY"):
+            resolve("Qwen/Qwen3.6-35B-A3B").complete("ระบบ", "เนื้อหา", 999)
 
 
 def test_glm_sends_thai_as_utf8_not_escape_sequences():
@@ -446,3 +487,75 @@ def test_glm_strips_a_trailing_slash_from_the_base_url():
     assert (
         captured["request"].full_url == "https://other.example/v1/chat/completions"
     )
+
+
+def test_check_reachable_treats_an_empty_reasoning_answer_as_reachable():
+    """*** กับดักที่วัดมาจากของจริง 2026-07-31 ***
+    GLM-5.2 เป็น reasoning model ที่ max_tokens คุมผลรวมของ reasoning + คำตอบ ที่ budget
+    ระดับ PROBE_MAX_TOKENS มันใช้หมดไปกับ reasoning แล้วคืน content="" เป็นเรื่องปกติ
+    (ยิงจริงด้วย max_tokens=32 ได้ content ว่างคู่กับ reasoning_content ยาวห้าย่อหน้า)
+
+    ถ้านับกรณีนี้เป็น "ไปไม่ถึง" ทุกประชุมจะถูกปฏิเสธตั้งแต่ยังไม่เริ่ม ทั้งที่ endpoint
+    ปกติดีทุกอย่าง -- แย่กว่าปัญหาที่ฟังก์ชันนี้ถูกสร้างมาแก้เสียอีก"""
+    patcher, _ = _patch_urlopen(_llm_payload("", "length"))
+
+    with (
+        patcher,
+        patch.dict(
+            "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+        ),
+    ):
+        check_reachable(resolve("GLM-5.2"))  # ต้องไม่ raise
+
+
+def test_check_reachable_raises_when_the_endpoint_never_answers():
+    def urlopen(request, timeout=None):
+        raise TimeoutError("the read operation timed out")
+
+    with (
+        patch("urllib.request.urlopen", side_effect=urlopen),
+        patch.dict(
+            "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+        ),
+    ):
+        with pytest.raises(TimeoutError):
+            check_reachable(resolve("GLM-5.2"))
+
+
+def test_check_reachable_uses_the_short_timeout_not_the_summarizing_one():
+    """ทั้งหมดของเรื่องนี้คือการไม่รอ 900 วินาทีเพื่อรู้ว่าปลายทางไปไม่ถึง"""
+    patcher, captured = _patch_urlopen(_llm_payload("OK"))
+
+    with (
+        patcher,
+        patch.dict(
+            "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+        ),
+    ):
+        check_reachable(resolve("GLM-5.2"))
+
+    assert captured["timeout"] == PROBE_TIMEOUT_SECONDS
+    assert PROBE_TIMEOUT_SECONDS < LLM_TIMEOUT_SECONDS
+
+
+def test_check_reachable_reports_a_missing_setting_instead_of_swallowing_it():
+    """ตั้งค่าไม่ครบคือความล้มเหลวจริงที่ควรหยุดตั้งแต่ตรงนี้ ไม่ใช่ไปตายทีละ chunk"""
+    with patch.dict("os.environ", {"LLM_API_KEY": "", "LLM_BASE_URL": ""}, clear=False):
+        with pytest.raises(MissingSettingError):
+            check_reachable(resolve("GLM-5.2"))
+
+
+def test_a_normal_completion_still_leaves_the_sdk_timeout_alone():
+    """timeout ที่ไม่ได้ส่งมา = ใช้ค่า default เดิมของแต่ละ provider ไม่ใช่ค่าที่
+    check_reachable ต้องการ -- การเพิ่มพารามิเตอร์ต้องไม่เปลี่ยนพฤติกรรมของผู้เรียกเดิม"""
+    patcher, captured = _patch_urlopen(_llm_payload("สรุป"))
+
+    with (
+        patcher,
+        patch.dict(
+            "os.environ", {"LLM_API_KEY": "test-key", "LLM_BASE_URL": TEST_BASE_URL}
+        ),
+    ):
+        resolve("GLM-5.2").complete("ระบบ", "เนื้อหา", 100)
+
+    assert captured["timeout"] == LLM_TIMEOUT_SECONDS

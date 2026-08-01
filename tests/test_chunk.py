@@ -4,7 +4,10 @@ import pytest
 
 from src.chunk import (
     CHARS_PER_TOKEN,
+    MERGE_MAX_TOKENS,
+    SEGMENT_PATTERN,
     estimate_tokens,
+    merge_speaker_turns,
     parse_timestamp,
     parse_transcript_segments,
     split_into_chunks,
@@ -85,6 +88,123 @@ def test_parse_transcript_segments_loses_nothing_after_the_first_segment():
 
     for word in ("หนึ่ง", "สอง", "สาม", "สี่"):
         assert word in joined
+
+
+def test_merge_speaker_turns_joins_adjacent_blocks_of_one_speaker():
+    markdown = (
+        "# Transcript\n\n"
+        "**ผู้พูด 1** [00:11]: ครับ มีแค่ของ Payment\n\n"
+        "**ผู้พูด 1** [00:14]: ที่เป็น Result"
+    )
+
+    merged = merge_speaker_turns(markdown)
+
+    assert merged == (
+        "# Transcript\n\n**ผู้พูด 1** [00:11]: ครับ มีแค่ของ Payment ที่เป็น Result"
+    )
+
+
+def test_merge_speaker_turns_stops_at_another_speaker():
+    # A A B A -- the trailing A starts a new block, it does not rejoin the first
+    markdown = (
+        "**ผู้พูด 1** [00:00]: หนึ่ง\n\n"
+        "**ผู้พูด 1** [00:05]: สอง\n\n"
+        "**ผู้พูด 2** [00:10]: สาม\n\n"
+        "**ผู้พูด 1** [00:15]: สี่"
+    )
+
+    blocks = merge_speaker_turns(markdown).split("\n\n")
+
+    assert blocks == [
+        "**ผู้พูด 1** [00:00]: หนึ่ง สอง",
+        "**ผู้พูด 2** [00:10]: สาม",
+        "**ผู้พูด 1** [00:15]: สี่",
+    ]
+
+
+def test_merge_speaker_turns_splits_when_the_cap_is_reached():
+    markdown = "\n\n".join(
+        f"**ผู้พูด 1** [{i:02d}:00]: " + "ก" * 100 for i in range(10)
+    )
+
+    blocks = merge_speaker_turns(markdown, max_tokens=200).split("\n\n")
+
+    assert len(blocks) > 1
+    for block in blocks:
+        # every block keeps a header of its own, carrying the real timestamp of
+        # the utterance that starts it -- a split block is still a valid segment
+        assert SEGMENT_PATTERN.match(block)
+        assert estimate_tokens(block) <= 200
+    assert blocks[0].startswith("**ผู้พูด 1** [00:00]:")
+    assert blocks[1].startswith("**ผู้พูด 1** [0")
+    assert not blocks[1].startswith("**ผู้พูด 1** [00:00]:")
+
+
+def test_merge_speaker_turns_keeps_the_heading_and_diarization_note():
+    markdown = (
+        "# Transcript\n\n"
+        '> ⚠️ ไม่สามารถแยกผู้พูดได้อัตโนมัติ ข้อความทั้งหมดจึงแสดงเป็น "ผู้พูด 1" เพียงคนเดียว\n\n'
+        "**ผู้พูด 1** [00:00]: หนึ่ง\n\n"
+        "**ผู้พูด 1** [00:05]: สอง"
+    )
+
+    merged = merge_speaker_turns(markdown)
+
+    assert merged.startswith("# Transcript\n\n> ⚠️ ไม่สามารถแยกผู้พูดได้อัตโนมัติ")
+    assert "หนึ่ง สอง" in merged
+
+
+def test_merge_speaker_turns_keeps_a_blank_line_inside_an_utterance():
+    markdown = (
+        "**ผู้พูด 1** [00:00]: บรรทัดแรก\n\nบรรทัดที่สองของคนเดิม\n\n"
+        "**ผู้พูด 1** [00:20]: ประโยคถัดไป\n\n"
+        "**ผู้พูด 1** [00:25]: และอีกประโยค"
+    )
+
+    merged = merge_speaker_turns(markdown)
+
+    # the stray paragraph stays attached to the block it belongs to and in order
+    assert merged.index("บรรทัดแรก") < merged.index("บรรทัดที่สองของคนเดิม")
+    assert merged.index("บรรทัดที่สองของคนเดิม") < merged.index("ประโยคถัดไป")
+    # it also breaks the run: the next utterance starts its own block...
+    assert "\n\n**ผู้พูด 1** [00:20]: ประโยคถัดไป และอีกประโยค" in merged
+
+
+def test_merge_speaker_turns_merges_real_names_too():
+    markdown = (
+        "**สมหญิง** [00:00]: หนึ่ง\n\n**สมหญิง** [00:05]: สอง"
+    )
+
+    assert merge_speaker_turns(markdown) == "**สมหญิง** [00:00]: หนึ่ง สอง"
+
+
+def test_merge_speaker_turns_returns_the_input_untouched_when_nothing_merges():
+    assert merge_speaker_turns(TRANSCRIPT) == TRANSCRIPT
+    assert merge_speaker_turns("") == ""
+    assert merge_speaker_turns("# Transcript\n\nของเดิม") == "# Transcript\n\nของเดิม"
+
+
+def test_merge_speaker_turns_output_still_parses_as_segments():
+    markdown = (
+        "# Transcript\n\n"
+        "**ผู้พูด 1** [00:00]: หนึ่ง\n\n"
+        "**ผู้พูด 1** [00:05]: สอง\n\n"
+        "**ผู้พูด 2** [01:30]: สาม"
+    )
+
+    segments = parse_transcript_segments(merge_speaker_turns(markdown))
+
+    assert [s["start_seconds"] for s in segments] == [0, 90]
+    assert segments[0]["raw"] == "**ผู้พูด 1** [00:00]: หนึ่ง สอง"
+
+
+def test_merge_cap_leaves_room_for_the_overlap_replay():
+    # A merged block larger than the overlap budget can never be replayed by
+    # _overlap_tail, so the boundary between two chunks would silently lose its
+    # context. Two blocks must fit, hence the factor of two.
+    from src.config import DEFAULT_CHUNK_OVERLAP_TOKENS
+
+    assert MERGE_MAX_TOKENS * 2 <= DEFAULT_CHUNK_OVERLAP_TOKENS
 
 
 def test_split_into_chunks_returns_empty_for_no_segments():

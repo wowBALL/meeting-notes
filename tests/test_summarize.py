@@ -10,7 +10,7 @@ from urllib.error import URLError
 import pytest
 
 import src.summarize as summarize_module
-from src.chunk import parse_transcript_segments, split_into_chunks
+from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chunks
 from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
@@ -24,6 +24,7 @@ from src.summarize import (
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
     REDUCE_FAILURE_NOTICE,
+    SINGLE_CALL_THRESHOLD_TOKENS,
     is_retryable,
     summarize_transcript,
 )
@@ -174,8 +175,12 @@ def _prompt_aware_client():
 
 
 def _long_transcript(segment_count: int) -> str:
+    # ผู้พูดสลับกันทุกบล็อกเหมือนบทสนทนาจริง เพื่อให้ merge_speaker_turns ไม่มีอะไรให้รวม
+    # -- ถ้าให้เป็นคนเดียวทั้งไฟล์ เทสต์หลายสิบตัวที่ใช้ fixture นี้จะขึ้นกับเพดานการรวม
+    # โดยบังเอิญ (ตอนนี้บล็อกละ ~387 token ซึ่งเกินครึ่งของเพดาน 600 พอดีจนไม่รวม)
     blocks = [
-        f"**ผู้พูด 1** [{i:02d}:00]: " + ("ก" * 400) for i in range(segment_count)
+        f"**ผู้พูด {i % 2 + 1}** [{i:02d}:00]: " + ("ก" * 400)
+        for i in range(segment_count)
     ]
     return "# Transcript\n\n" + "\n\n".join(blocks)
 
@@ -236,6 +241,74 @@ def test_short_transcript_returns_the_single_response_verbatim():
     assert result == "## ประเด็นสำคัญ\n- ทดสอบระบบ"
     assert client.messages.create.call_count == 1
     assert "ไทม์ไลน์" not in result
+
+
+def _one_speaker_transcript(segment_count: int, chars: int = 100) -> str:
+    """ผู้พูดคนเดียวรวดทั้งไฟล์ -- กรณีที่ merge_speaker_turns มีของให้รวมจริง"""
+    blocks = [
+        f"**ผู้พูด 1** [{i:02d}:00]: " + ("ก" * chars) for i in range(segment_count)
+    ]
+    return "# Transcript\n\n" + "\n\n".join(blocks)
+
+
+def test_merging_runs_before_the_single_call_threshold():
+    """ประชุมที่ดิบแล้วต้องหั่น chunk แต่รวมบล็อกแล้วเหลือรอบเดียว ต้องยิงครั้งเดียว
+
+    นี่คือเหตุผลที่การรวมต้องเกิดก่อนบรรทัด SINGLE_CALL_THRESHOLD_TOKENS ไม่ใช่หลัง:
+    จำนวนคำขอที่ลดลงคือทั้งหมดที่ฟีเจอร์นี้มีไว้ทำ ถ้าสลับลำดับ เทสต์นี้จะเห็นสองคำขอ
+    """
+    # บล็อกละ ~46 token: รวมกันได้เต็มเพดาน 600 ทำให้ทั้งไฟล์หดลงต่ำกว่าเกณฑ์ยิงรอบเดียว
+    transcript = _one_speaker_transcript(700, chars=25)
+    assert estimate_tokens(transcript) > SINGLE_CALL_THRESHOLD_TOKENS
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, model="claude-opus-5")
+
+    assert client.messages.create.call_count == 1
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert estimate_tokens(sent) <= SINGLE_CALL_THRESHOLD_TOKENS
+    assert "# Transcript" in sent
+
+
+def test_merging_off_sends_the_transcript_untouched():
+    transcript = _one_speaker_transcript(3)
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, model="claude-opus-5", merge_turns=False)
+
+    assert client.messages.create.call_args.kwargs["messages"][0]["content"] == (
+        transcript
+    )
+
+
+def test_merging_on_joins_adjacent_turns_before_sending():
+    transcript = _one_speaker_transcript(3)
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript(transcript, model="claude-opus-5")
+
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert sent != transcript
+    assert sent.count("**ผู้พูด 1**") == 1
+    assert sent.count("ก") == transcript.count("ก")
+
+
+def test_merging_cap_shrinks_with_a_small_overlap_budget():
+    """เพดานการรวมต้องไม่โตกว่างบ overlap ไม่งั้นบล็อกที่รวมแล้วถูกเล่นซ้ำไม่ได้เลย"""
+    transcript = _one_speaker_transcript(3, chars=200)
+    client = _single_response_client("สรุป")
+
+    with _patch_anthropic(client):
+        summarize_transcript(
+            transcript, model="claude-opus-5", chunk_overlap_tokens=200
+        )
+
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    # เพดานกลายเป็น 100 (=200//2) บล็อกละ ~200 token จึงรวมไม่ได้เลยแม้จะเป็นคนเดียวกัน
+    assert sent == transcript
 
 
 def test_short_transcript_uses_given_model_and_original_prompt():
@@ -979,3 +1052,78 @@ def test_a_provider_that_returns_no_text_is_not_retried():
         summarize_transcript("สั้น", model="GLM-5.2")
 
     assert calls["n"] == 1
+
+
+def test_the_map_stage_announces_how_much_work_is_in_flight(caplog):
+    """ก่อนหน้านี้ขั้นนี้ไม่ log อะไรเลยจนกว่า chunk จะตาย -- endpoint ที่ค้างจึงให้ความ
+    เงียบสนิทได้ถึง 45 นาทีต่อ chunk ซึ่งแยกไม่ออกจาก process ที่แขวนไปแล้ว
+    (2026-07-31: เสียไปหนึ่งชั่วโมงกว่าจะรู้ว่ามีอะไรผิดปกติ)
+
+    คนอ่าน log ต้องรู้จำนวน chunk ก่อนบรรทัดรายก้อนจะทยอยมา ไม่งั้น "Chunk 5/6" ที่โผล่
+    มาก่อนเพราะ pool ทำงานขนานกัน จะอ่านเหมือนว่า chunk อื่นหายไป"""
+    transcript = _long_transcript(120)
+    expected = _expected_chunk_count(transcript)
+    assert expected >= 2, "sanity: transcript ต้องยาวพอให้เข้าเส้นทาง map-reduce"
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client), caplog.at_level(logging.INFO):
+        summarize_transcript(transcript, model="claude-opus-5")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        f"{expected} chunks" in m and "at a time" in m for m in messages
+    ), messages
+    # ทุก chunk ต้องมีทั้งบรรทัดเริ่มและบรรทัดจบ พร้อมเวลาที่ใช้
+    for i in range(1, expected + 1):
+        assert any(f"Chunk {i}/{expected}" in m and "starting" in m for m in messages)
+        assert any(f"Chunk {i}/{expected}" in m and "done in" in m for m in messages)
+    assert any("Map stage finished" in m for m in messages)
+    assert any("Reduce stage: merging" in m for m in messages)
+    assert any("Reduce stage: done" in m for m in messages)
+
+
+def test_on_progress_reports_one_completion_per_chunk():
+    """แถบใน UI เคยค้างที่ "กำลังสรุป" ตั้งแต่นาทีแรกจนจบ แยกไม่ออกว่ายังทำงานอยู่
+    หรือแขวนไปแล้ว -- รายงานตอน "เสร็จ" ไม่ใช่ตอน "เริ่ม" และนับจำนวนแทนการอ้าง index
+    เพราะ chunk จบไม่เรียงลำดับ: "3/6 เสร็จแล้ว" จริงเสมอไม่ว่าจะเป็นสามก้อนไหน"""
+    transcript = _long_transcript(120)
+    expected = _expected_chunk_count(transcript)
+    assert expected >= 2, "sanity: transcript ต้องยาวพอให้เข้าเส้นทาง map-reduce"
+    client = _prompt_aware_client()
+    seen = []
+
+    with _patch_anthropic(client):
+        summarize_transcript(
+            transcript, model="claude-opus-5", on_progress=lambda d, t: seen.append((d, t))
+        )
+
+    assert len(seen) == expected
+    assert [d for d, _ in seen] == list(range(1, expected + 1))
+    assert {t for _, t in seen} == {expected}
+
+
+def test_a_failing_progress_callback_does_not_lose_the_summary(caplog):
+    """รายงานความคืบหน้าที่พังต้องไม่ทำให้สรุปที่จ่ายเงินไปแล้วหายไป -- เหตุผลเดียวกับ
+    ที่ activity.append() กลืน OSError ทิ้ง"""
+    transcript = _long_transcript(120)
+    client = _prompt_aware_client()
+
+    def explode(done, total):
+        raise RuntimeError("activity feed is on fire")
+
+    with _patch_anthropic(client), caplog.at_level(logging.ERROR):
+        result = summarize_transcript(
+            transcript, model="claude-opus-5", on_progress=explode
+        )
+
+    assert "สรุปรวมทั้งประชุม" in result
+    assert "Progress callback failed" in caplog.text
+
+
+def test_on_progress_is_optional():
+    """ผู้เรียกเดิมทุกจุดต้องยังทำงานได้โดยไม่ต้องแก้"""
+    transcript = _long_transcript(120)
+    client = _prompt_aware_client()
+
+    with _patch_anthropic(client):
+        assert summarize_transcript(transcript, model="claude-opus-5")

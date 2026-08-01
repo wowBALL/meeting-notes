@@ -28,6 +28,17 @@ CLAUDE_REDUCE_MAX_TOKENS = 8192
 GLM_MAP_MAX_TOKENS = 16384
 GLM_REDUCE_MAX_TOKENS = 24576
 
+# Qwen บน endpoint เดียวกับ GLM (key และ base URL ตัวเดียวกัน) แต่ไม่ใช่ reasoning model
+# -- วัดจริง 2026-07-31 บน chunk ที่ใหญ่ที่สุดของประชุม 84 นาที (16,288 ตัวอักษร) มันใช้
+# ไปแค่ 602 token และไม่มี reasoning_content เลย ค่าพวกนี้จึงเป็นชุดเดียวกับ Claude ไม่ใช่
+# ชุดของ GLM ที่ต้องเผื่อให้ reasoning กินไปสี่เท่า
+#
+# ทำไมต้องมีตัวนี้: วันที่ 2026-07-31 GLM-5.2 คืน content ว่างเปล่าทุกครั้งกับงานสรุป
+# (ใช้โควตาหมดไปกับ reasoning 10 ครั้งจาก 10 ครั้ง ทั้งก้อนใหญ่และก้อนเล็ก) ขณะที่ตัวนี้
+# สรุปก้อนเดียวกันเสร็จใน 4 วินาที -- มีไว้เป็นทางออกที่ข้อมูลยังไม่ออกนอกบริษัทเหมือนกัน
+QWEN_MAP_MAX_TOKENS = 4096
+QWEN_REDUCE_MAX_TOKENS = 8192
+
 # หนึ่ง call ของ GLM ใช้เวลาได้ถึง ~155 วินาทีที่ราว 53 token/วินาที เผื่อไว้มาก
 # เพราะการหมดเวลากลาง reduce แปลว่าเสียสรุปรายช่วงที่จ่ายไปแล้วทั้งหมด
 LLM_TIMEOUT_SECONDS = 900
@@ -116,7 +127,9 @@ class Provider:
     model_id: str
     map_max_tokens: int
     reduce_max_tokens: int
-    complete: Callable[[str, str, int], Completion]
+    # timeout เป็นพารามิเตอร์ที่สี่ (มี default) ไม่ใช่ค่าตายตัวใน completer เพราะ
+    # check_reachable ต้องยิงด้วยเวลาสั้น ๆ ในขณะที่งานสรุปจริงต้องการ 900 วินาทีเต็ม
+    complete: Callable[..., Completion]
 
 
 def _require_setting(env_var: str, model_id: str) -> str:
@@ -129,10 +142,13 @@ def _require_setting(env_var: str, model_id: str) -> str:
     return value
 
 
-def _anthropic_completer(
-    model_id: str, key_env: str
-) -> Callable[[str, str, int], Completion]:
-    def complete(system: str, content: str, max_tokens: int) -> Completion:
+def _anthropic_completer(model_id: str, key_env: str) -> Callable[..., Completion]:
+    def complete(
+        system: str,
+        content: str,
+        max_tokens: int,
+        timeout: float | None = None,
+    ) -> Completion:
         from anthropic import Anthropic
 
         api_key = _require_setting(key_env, model_id)
@@ -143,7 +159,13 @@ def _anthropic_completer(
         # เกินจริง (ดู pipeline.py) และซ่อน asymmetry ระหว่าง provider ไว้ด้วย เพราะ
         # ฝั่ง GLM (urllib) ไม่มีชั้น retry ในตัวเองแบบนี้เลย retry ทั้งหมดต้องอยู่ที่
         # is_retryable ที่เดียวเท่านั้น ตามที่คอมเมนต์นี้ตั้งใจจะบอกอยู่แล้ว
-        client = Anthropic(api_key=api_key, max_retries=0)
+        # timeout=None แปลว่า "ปล่อยให้ SDK ใช้ default ของมันเอง" ซึ่งเป็นการตัดสินใจ
+        # เดิมที่ tests/test_llm.py ยึดไว้ -- ส่งค่าเข้าไปเฉพาะตอนที่ผู้เรียกขอมาจริง
+        # (check_reachable) ไม่ใช่ตั้ง 900 ให้ทุกคนโดยไม่มีใครขอ
+        options = {"api_key": api_key, "max_retries": 0}
+        if timeout is not None:
+            options["timeout"] = timeout
+        client = Anthropic(**options)
         response = client.messages.create(
             model=model_id,
             max_tokens=max_tokens,
@@ -192,8 +214,13 @@ def _response_detail(payload: object) -> str:
 
 def _openai_compat_completer(
     model_id: str, key_env: str, base_url_env: str
-) -> Callable[[str, str, int], Completion]:
-    def complete(system: str, content: str, max_tokens: int) -> Completion:
+) -> Callable[..., Completion]:
+    def complete(
+        system: str,
+        content: str,
+        max_tokens: int,
+        timeout: float | None = None,
+    ) -> Completion:
         api_key = _require_setting(key_env, model_id)
         # .rstrip("/"): LLM_BASE_URL ที่ลงท้ายด้วย "/" (เช่นก็อปมาทั้งท้าย path)
         # จะกลายเป็น ".../v1//chat/completions" -- proxy บางตัวตอบ 404 ทึบให้กับ
@@ -225,11 +252,13 @@ def _openai_compat_completer(
             },
         )
         try:
-            # งานสรุปทั้ง chunk ใช้เวลาได้นาน จึงเป็น LLM_TIMEOUT_SECONDS เต็ม ๆ
+            # งานสรุปทั้ง chunk ใช้เวลาได้นาน ค่า default จึงเป็น LLM_TIMEOUT_SECONDS
+            # เต็ม ๆ -- ผู้เรียกที่ต้องการเวลาสั้นกว่านั้น (check_reachable) ส่งมาเอง
             # ไม่ต้องปิด retry ที่นี่: urlopen ไม่ retry เองอยู่แล้ว การลองใหม่เป็นหน้าที่
             # ของ is_retryable ใน summarize.py ที่ชั้นเหนือขึ้นไป
             with urllib.request.urlopen(
-                request, timeout=LLM_TIMEOUT_SECONDS
+                request,
+                timeout=LLM_TIMEOUT_SECONDS if timeout is None else timeout,
             ) as response:
                 try:
                     raw_body = response.read().decode("utf-8")
@@ -317,9 +346,53 @@ PROVIDERS: dict[str, Provider] = {
         reduce_max_tokens=GLM_REDUCE_MAX_TOKENS,
         complete=_openai_compat_completer("GLM-5.2", "LLM_API_KEY", "LLM_BASE_URL"),
     ),
+    # ชื่อต้องตรงกับที่ endpoint รู้จักเป๊ะ รวมทั้ง "Qwen/" ข้างหน้าและตัวพิมพ์ใหญ่-เล็ก
+    # (ดูรายชื่อจาก GET /models) -- proxy ปฏิเสธชื่อที่ไม่ตรง
+    "Qwen/Qwen3.6-35B-A3B": Provider(
+        model_id="Qwen/Qwen3.6-35B-A3B",
+        map_max_tokens=QWEN_MAP_MAX_TOKENS,
+        reduce_max_tokens=QWEN_REDUCE_MAX_TOKENS,
+        complete=_openai_compat_completer(
+            "Qwen/Qwen3.6-35B-A3B", "LLM_API_KEY", "LLM_BASE_URL"
+        ),
+    ),
     "claude-opus-5": _claude("claude-opus-5"),
     "claude-sonnet-5": _claude("claude-sonnet-5"),
 }
+
+
+# คำขอที่เล็กที่สุดเท่าที่ยังเป็นคำขอจริง ใช้ตอบคำถามเดียว: "ตอนนี้ยิงถึงโมเดลไหม"
+# 30 วินาทีเพราะคำขอขนาดนี้ที่ endpoint ปกติใช้เวลา ~1 วินาที (วัดจริง 2026-07-31)
+# ถ้ามันเกิน 30 ก็ไม่มีเหตุผลให้เชื่อว่างานจริงที่ใหญ่กว่านี้ 1,000 เท่าจะรอด
+PROBE_TIMEOUT_SECONDS = 30
+PROBE_MAX_TOKENS = 16
+_PROBE_SYSTEM = "Reply with the single word OK."
+_PROBE_CONTENT = "OK"
+
+
+def check_reachable(provider: Provider) -> None:
+    """ยิงคำขอเล็ก ๆ หนึ่งครั้ง raise ถ้าไปไม่ถึงโมเดล คืน None ถ้าไปถึง
+
+    ตอบคำถามเดียวคือ "ยิงถึงไหม" ไม่ใช่ "คำตอบดีไหม" -- เจตนาคือกันงาน unattended
+    ที่กินเวลาเป็นชั่วโมงไม่ให้เริ่มทั้งที่ปลายทางไปไม่ถึงตั้งแต่แรก
+
+    *** UnusableAnswerError ต้องนับเป็น "ไปถึงแล้ว" ***
+    GLM-5.2 เป็น reasoning model ที่ max_tokens คุมผลรวมของ reasoning + คำตอบ
+    ที่ budget ระดับ PROBE_MAX_TOKENS มันใช้หมดไปกับ reasoning แล้วคืน content
+    ว่างเปล่าเป็นเรื่องปกติ ไม่ใช่ความผิดปกติ -- วัดจริง 2026-07-31 ด้วย max_tokens=32
+    ได้ content="" คู่กับ reasoning_content ยาวห้าย่อหน้า และ finish_reason="length"
+    ถ้านับกรณีนี้เป็นความล้มเหลว ทุกประชุมจะถูกปฏิเสธตั้งแต่ยังไม่เริ่มทั้งที่ endpoint
+    ปกติดีทุกอย่าง ซึ่งแย่กว่าปัญหาที่ฟังก์ชันนี้ถูกสร้างมาแก้เสียอีก
+
+    ส่วน MissingSettingError ปล่อยให้ทะลุขึ้นไป: ตั้งค่าไม่ครบคือความล้มเหลวจริงที่
+    ควรหยุดตั้งแต่ตรงนี้ ไม่ใช่ไปตายทีละ chunk
+    """
+    try:
+        provider.complete(
+            _PROBE_SYSTEM, _PROBE_CONTENT, PROBE_MAX_TOKENS, PROBE_TIMEOUT_SECONDS
+        )
+    except UnusableAnswerError:
+        return
 
 
 def resolve(model_id: str) -> Provider:

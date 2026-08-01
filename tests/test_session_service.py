@@ -1,7 +1,10 @@
 import inspect
 import json
+import re
 import subprocess
+import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -12,9 +15,176 @@ from src.config import Config
 from src.pending import build_pending_speakers, pending_dir, write_pending
 from src.session_service import create_app, probe_worker
 from src.speakers import add_sample, load_registry, save_registry
+from src.voiceprint import Voiceprint
 
 MODEL = "pyannote/speaker-diarization-community-1"
 OTHER_MODEL = "pyannote/speaker-diarization-3.1"
+# ป้ายพื้นที่เวกเตอร์ (ตัวที่ match_known ใช้กรองจริง) -- คนละตัวกับ MODEL/OTHER_MODEL
+# ข้างบนซึ่งเป็นโมเดลแยกผู้พูด (diarization) ที่ตอนนี้เป็นแค่ provenance เสริม ค่าเดียวกับ
+# ที่ tests/test_speakers.py และ tests/test_pending.py ใช้ (ตรงกับ DEFAULT_EMBEDDING_MODEL)
+EMBED = "pyannote/wespeaker-voxceleb-resnet34-LM"
+OTHER_EMBED = "speechbrain/spkrec-ecapa-voxceleb"
+
+
+def _sample(embedding, embedding_model=EMBED, **extra):
+    """payload dict สำหรับ add_sample -- ก่อน Task 12 add_sample รับเวกเตอร์เป็น list
+    เดี่ยว ๆ (บวก keyword model=) แต่ตอนนี้ต้องเป็น dict ที่มี embedding_model บังคับเสมอ
+    (ดู speakers.add_sample) ทุกเทสต์ในไฟล์นี้ที่ไม่ได้ตั้งใจทดสอบ "ไม่มีป้าย" โดยเฉพาะ
+    เรียกผ่าน helper นี้แทนการประกอบ dict เองซ้ำทุกจุด
+    """
+    payload = {"embedding": list(embedding), "embedding_model": embedding_model}
+    payload.update(extra)
+    return payload
+
+
+def _assert_no_embedding_vector_leaks(body):
+    """เวกเตอร์เสียงต้องไม่รั่วออกไปไม่ว่าจะอยู่ใต้คีย์ไหน
+
+    Task 12 เปลี่ยนการ์ดนี้จาก substring "embedding" ธรรมดา ไปเป็นเช็คคีย์ JSON
+    ตรง ๆ ว่า '"embedding":' (เพราะตอนนั้น endpoint เริ่มมี embedding_model ที่การ์ด
+    แบบเดิมปฏิเสธผิด ๆ) แต่การเช็คคีย์ตายตัวคือ denylist ตัวเดียว -- โปรเจกชันที่มันกัน
+    (_public_speaker / list_entries) ก็เป็น denylist เหมือนกัน (ตัดแค่คีย์ชื่อ "embedding"
+    ทิ้ง) ไฟล์ result.json และไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้เอง -- ใครใส่เวกเตอร์
+    ไว้ใต้ชื่ออื่น (เช่น "embedding_backup" หรือ "raw_embedding") จะหลุดผ่าน denylist ทั้งสอง
+    ชั้นไปเงียบ ๆ จับที่ "รูปทรง" ของค่าแทน (array ต่อท้ายคีย์ที่มีคำว่า embedding) ไม่ใช่
+    ชื่อคีย์ตายตัว -- ยังยอม embedding_model ผ่านได้ตามปกติเพราะค่าของมันเป็นสตริง ไม่ใช่ array
+
+    ยังจับได้แค่คีย์ที่ *ชื่อ* มีคำว่า "embedding" อยู่ดี -- ดู
+    _assert_no_numeric_vector_leaks ด้านล่างสำหรับการ์ดที่ไม่สนใจชื่อคีย์เลย (ตัวที่ควร
+    ใช้กับ endpoint ใหม่ ๆ จากนี้ไป)
+    """
+    dumped = json.dumps(body)
+    leak = re.search(r'"(\w*embedding\w*)":\s*\[', dumped)
+    if leak:
+        pytest.fail(f'พบเวกเตอร์รั่วใต้คีย์ "{leak.group(1)}": {dumped}')
+
+
+def _assert_no_numeric_vector_leaks(body):
+    """เวกเตอร์เสียงต้องไม่รั่วไม่ว่าจะซ่อนอยู่ใต้คีย์ชื่ออะไรหรือลึกแค่ไหน (finding 3 ของ
+    รีวิวรอบที่สี่)
+
+    _assert_no_embedding_vector_leaks ข้างบนจับคีย์ที่ *ชื่อ* มีคำว่า "embedding" -- รอบ
+    รีวิวที่ 3 และ 4 ของบั๊กนี้ทั้งคู่หลุดผ่านการ์ดแบบนั้นเพราะเวกเตอร์ถูกวางไว้ใต้คีย์ที่ไม่มี
+    คำว่า embedding เลย (guess.voiceprint, samples[].voiceprint, suggested.voiceprint,
+    ระดับบนสุดของ record ก็เคยเป็น "voiceprint" มาก่อน) -- การกันด้วยชื่อคีย์แพ้ได้เสมอแค่
+    เปลี่ยนชื่อคีย์ ตัวนี้จึงเดินทั้งโครงสร้าง response แทน แล้วเช็คที่ "รูปทรง" ของค่าแทน
+    ชื่อคีย์: list ที่ไม่ว่างและทุกสมาชิกเป็นตัวเลข (int/float, ไม่นับ bool ซึ่งเป็น subclass
+    ของ int ใน Python) คือเวกเตอร์เสมอไม่ว่าจะอยู่ใต้คีย์ไหนหรือซ้อนลึกแค่ไหน
+
+    ตรวจแล้วว่าไม่มี endpoint ไหนในไฟล์นี้ที่ควรส่ง numeric array ออกไปจริง ๆ:
+    samples[].start/end, speaking_seconds, elapsed_seconds, sample_count, score ฯลฯ ล้วน
+    เป็นตัวเลขเดี่ยว ไม่ใช่ array เลยสักตัว -- ถ้าอนาคตมี numeric array ที่ชอบธรรมจริง ๆ
+    ให้เพิ่ม path เจาะจงไว้เป็นข้อยกเว้นในฟังก์ชันนี้ ไม่ใช่ผ่อนกฎทั้งหมดให้หลวมลง
+    """
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            if node and all(
+                isinstance(item, (int, float)) and not isinstance(item, bool)
+                for item in node
+            ):
+                pytest.fail(
+                    f'พบ numeric array ที่ {path} (รูปทรงของเวกเตอร์เสียงที่รั่ว): {node}'
+                )
+            for index, item in enumerate(node):
+                walk(item, f"{path}[{index}]")
+
+    walk(body, "$")
+
+
+# ชนิดของ "ใบ" ทุกใบที่ endpoint ในไฟล์นี้ประกาศว่าจะส่งออก -- ตรงกับที่ web/app.js,
+# web/enroll.js และ D:\COWORK\COWORK Desktop\meetingrun.js อ่านจริง
+#
+# รอบที่หกของบั๊กนี้: ห้ารอบก่อนหน้าไล่ปิด "แกน" ทีละแกน (ชื่อคีย์ -> ความลึก -> ค่าของ
+# คีย์ใน allowlist -> รูปทรง) แล้วรอบถัดไปก็โดนแกนใหม่ทุกครั้ง รูปทรงก็เป็นแค่แกนที่ห้า
+# ไม่ใช่ค่าคงที่ของข้อมูล (ดู _PLANTED_VECTOR_SHAPES ด้านล่าง -- หกรูปทรงที่ทำซ้ำได้จริง
+# บน endpoint ที่รันอยู่ ทุกตัวเลี่ยง "list ตัวเลขล้วน" ได้หมด) การ์ดที่ปิดทุกแกนพร้อมกัน
+# คือการประกาศชนิดของใบ แล้วบังคับว่าไม่ใช่ชนิดนั้น = ออกไม่ได้ ไม่ว่าคนแก้ไฟล์จะเลือก
+# ชื่อคีย์ ความลึก หรือรูปทรงอะไรก็ตาม เพราะไม่มีรูปทรงเหลือให้เลือกอีกแล้ว
+_DECLARED_LEAF_TYPES = {
+    # สตริง
+    "meeting_dir": str,
+    "label": str,
+    "name": str,
+    "evidence": str,
+    "text": str,
+    "audio_file": str,
+    "state": str,
+    "status": str,
+    "reason": str,
+    "suggested_name": str,
+    "ts": str,
+    "code": str,
+    "level": str,
+    "job": str,
+    "path": str,
+    # ตัวเลข
+    "speaking_seconds": "number",
+    "start": "number",
+    "end": "number",
+    "speaker_count": "number",
+    "size_bytes": "number",
+    "min_speaking_seconds": "number",
+    "sample_count": "number",
+    "score": "number",
+    # bool
+    "changed_during_analysis": bool,
+    "confident": bool,
+}
+
+
+def _assert_declared_leaf_types(body):
+    """ทุกใบที่ประกาศชนิดไว้ ต้องเป็นชนิดนั้นหรือ None เท่านั้น -- ไม่มีทางที่สาม
+
+    _assert_no_numeric_vector_leaks ด้านบนถูกต้องแต่ตาบอดกับทุกอย่างที่ไม่ใช่ "list ที่
+    สมาชิกเป็นตัวเลขล้วน" -- [0.11, 0.12, "x"] / ["x", 0.11, 0.12] / {"0": 0.11} /
+    ["0.11", "0.12"] / [0.11, None, 0.12] / [{"v": 0.11}] ผ่านมันไปได้ทุกตัวทั้งที่ขน
+    เวกเตอร์เต็ม ๆ ออกไปแบบกู้คืนได้ ตัวนี้จึงไม่ถามว่า "หน้าตาเหมือนเวกเตอร์ไหม" แต่ถาม
+    ว่า "เป็นชนิดที่ endpoint สัญญาไว้หรือเปล่า" ซึ่งเป็นคำถามที่คนวางเวกเตอร์ตอบเลี่ยง
+    ไม่ได้ เพราะเวกเตอร์ไม่ใช่ str ไม่ใช่ตัวเลขเดี่ยว และไม่ใช่ bool ไม่ว่าจะห่อมาแบบไหน
+    """
+
+    def check(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                declared = _DECLARED_LEAF_TYPES.get(key)
+                here = f"{path}.{key}"
+                if declared is not None and value is not None:
+                    if declared == "number":
+                        ok = isinstance(value, (int, float)) and not isinstance(
+                            value, bool
+                        )
+                    else:
+                        ok = isinstance(value, declared)
+                    if not ok:
+                        pytest.fail(
+                            f"ใบ {here} ประกาศไว้เป็น {declared} แต่ส่งออก "
+                            f"{type(value).__name__}: {value!r}"
+                        )
+                check(value, here)
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                check(item, f"{path}[{index}]")
+
+    check(body, "$")
+
+
+# หกรูปทรงที่ทำซ้ำได้จริงบน endpoint ที่รันอยู่ ทุกตัวขนเวกเตอร์เดียวกันออกไปแบบกู้คืนได้
+# และทุกตัวเลี่ยง _is_numeric_vector (ตาข่ายชั้นล่างของรอบที่ห้า) ได้หมด -- นี่คือหลักฐาน
+# ว่า "รูปทรง" ไม่ใช่สิ่งที่คนวางเวกเตอร์เลือกไม่ได้ แต่เป็นแกนที่ห้าเหมือนชื่อคีย์และความลึก
+_PLANTED_VECTOR = [0.1111111, 0.2222222, 0.3333333, 0.4444444]
+_PLANT_MARK = "1111111"
+_PLANTED_VECTOR_SHAPES = {
+    "trailing_string": _PLANTED_VECTOR + ["x"],
+    "leading_string": ["x"] + _PLANTED_VECTOR,
+    "index_keyed_dict": {str(i): v for i, v in enumerate(_PLANTED_VECTOR)},
+    "string_floats": [str(v) for v in _PLANTED_VECTOR],
+    "null_padded": [_PLANTED_VECTOR[0], None, _PLANTED_VECTOR[1], None],
+    "wrapped_objects": [{"v": v} for v in _PLANTED_VECTOR],
+}
 
 
 def make_config(tmp_path):
@@ -351,13 +521,42 @@ _PENDING_LABELS = {"SPEAKER_00": "ผู้พูด 1", "SPEAKER_01": "ผู�
 _PENDING_EMBEDDINGS = {"SPEAKER_00": [1.0, 0.0], "SPEAKER_01": [0.0, 1.0]}
 
 
+def _voiceprints(embeddings, seconds=21.4, segments=7):
+    """dict[label -> Voiceprint] จากเวกเตอร์ดิบ -- build_pending_speakers ต้องการ
+    Voiceprint จริง (มี .embedding/.seconds/.segment_count) ไม่ใช่ list เปล่า ๆ อีกต่อไป
+    (ดู src/voiceprint.py และ tests/test_pending.py ซึ่งใช้ pattern เดียวกันนี้)
+    """
+    return {
+        label: Voiceprint(embedding=list(vector), seconds=seconds, segment_count=segments)
+        for label, vector in embeddings.items()
+    }
+
+
 def _queue_two_speakers(config, meeting="2026-07-28_10-30-standup"):
     write_pending(
         config.base_dir,
         meeting,
         "standup.ogg",
-        build_pending_speakers(_PENDING_MERGED, _PENDING_LABELS, _PENDING_EMBEDDINGS, MODEL),
+        build_pending_speakers(
+            _PENDING_MERGED,
+            _PENDING_LABELS,
+            _voiceprints(_PENDING_EMBEDDINGS),
+            MODEL,
+            EMBED,
+        ),
     )
+    return meeting
+
+
+def _write_queue(base_dir, entry, meeting="m", audio_file="a.ogg"):
+    """เขียนไฟล์คิวหนึ่งผู้พูดตรง ๆ โดยไม่ผ่าน build_pending_speakers -- ใช้จำลองไฟล์คิว
+    ที่ถูกแก้มือหรือมาจากเวอร์ชันเก่ากว่านี้ (เช่นไม่มีคีย์ embedding_model เลย) ซึ่งเป็น
+    รูปทรงที่ build_pending_speakers ของวันนี้ไม่มีทางสร้างออกมาได้เองแล้ว (มันติดป้าย
+    embedding_model ให้ทุกคนในคิวเสมอ) `entry` ทับค่า default ด้านล่างได้ทุกคีย์
+    """
+    base_entry = {"label": "SPEAKER_00", "diarization_id": "SPEAKER_00"}
+    base_entry.update(entry)
+    write_pending(base_dir, meeting, audio_file, [base_entry])
     return meeting
 
 
@@ -374,7 +573,10 @@ def test_pending_speakers_endpoint_lists_the_queue(client, config):
 
     assert len(body["meetings"]) == 1
     assert body["meetings"][0]["meeting_dir"] == meeting
-    assert body["meetings"][0]["audio_file"] == "standup.ogg"
+    # audio_file ไม่อยู่ใน allowlist ระดับการประชุม (_public_pending_meeting) อีกต่อไป --
+    # web/app.js ไม่เคยอ่าน meeting.audio_file เลย (ดู pendingHtml/speakerAt ใน app.js ซึ่ง
+    # ใช้แค่ meeting.meeting_dir กับ meeting.speakers) จึงไม่มีเหตุผลให้มันหลุดออก endpoint
+    assert "audio_file" not in body["meetings"][0]
     labels = [entry["label"] for entry in body["meetings"][0]["speakers"]]
     assert labels == ["ผู้พูด 1", "ผู้พูด 2"]
 
@@ -382,19 +584,319 @@ def test_pending_speakers_endpoint_lists_the_queue(client, config):
 def test_pending_speakers_endpoint_never_ships_the_voice_vectors(client, config):
     # เบราว์เซอร์ไม่ต้องใช้เวกเตอร์เลย และมันคือข้อมูล biometric -- ส่งออกไปเปล่า ๆ
     # คือเพิ่มที่ที่มันอาจรั่วโดยไม่ได้อะไรกลับมา
-    _queue_two_speakers(config)
+    meeting = _queue_two_speakers(config)
+    # ไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้ (ดู docstring ของ _write_queue ด้านบน) --
+    # จำลองไฟล์ที่ถูกแก้มือให้มีเวกเตอร์แอบอยู่ใต้ชื่อคีย์อื่นที่ไม่ใช่ "embedding" ตรง ๆ
+    # _public_speaker เป็น denylist (ตัดแค่คีย์ชื่อ "embedding" ทิ้ง) คีย์แปลกใหม่แบบนี้จึง
+    # หลุดผ่านไปได้เงียบ ๆ ถ้าการ์ดข้างล่างเช็คแค่ '"embedding":' ตรง ๆ (รูปแบบที่ task 12
+    # เปลี่ยนมาใช้เพื่อยอม embedding_model แต่ดันแคบไปจนพลาดกรณีนี้)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["speakers"][0]["raw_embedding"] = [1.0, 0.0]
+    # finding ที่สามของรีวิวรอบนี้: ชั้นบนสุดของ record (นอก speakers[]) รั่วได้เหมือนกัน --
+    # list_pending_speakers เดิมประกอบด้วย {**meeting, "speakers": ...} ซึ่งสเปรดคีย์ระดับ
+    # การประชุมทุกตัวตรง ๆ โดยไม่กรองเลย (ต่างจาก _public_speaker ที่กรอง speaker แต่ละคน
+    # แล้ว) วางทั้งคีย์ที่มีคำว่า "embedding" (regex ของ _assert_no_embedding_vector_leaks
+    # จับได้) และคีย์ที่ไม่มีคำนั้นเลย เช่น "voiceprint" (regex จับไม่ได้ -- ต้องเช็คตรง ๆ
+    # ว่าหลุดออกมาไหม เพื่อพิสูจน์ว่า allowlist เป็นตัวกันจริง ไม่ใช่แค่ regex ของการ์ดข้างล่าง)
+    record["raw_embedding"] = [1.0, 0.0]
+    record["voiceprint"] = [0.0, 1.0]
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
 
     body = client.get("/api/speakers/pending").get_json()
 
-    for speaker in body["meetings"][0]["speakers"]:
+    meeting_body = body["meetings"][0]
+    for speaker in meeting_body["speakers"]:
         assert "embedding" not in speaker
-    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้
-    assert "embedding" not in json.dumps(body)
+    # allowlist ระดับการประชุมต้องคุมคีย์ที่ออกไปทั้งหมด ไม่ใช่แค่ตัดคีย์ต้องสงสัยทีละชื่อ --
+    # เช็คว่า "voiceprint" หายไปตรง ๆ เพราะ regex ของ _assert_no_embedding_vector_leaks
+    # ด้านล่างจับไม่ได้ (ไม่มีคำว่า embedding อยู่ในชื่อคีย์เลย)
+    assert "voiceprint" not in meeting_body
+    assert "raw_embedding" not in meeting_body
+    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้ (เช่น raw_embedding
+    # ข้างบน) -- จับที่รูปทรงของค่า (array ต่อท้ายคีย์ที่มีคำว่า embedding) ไม่ใช่คีย์ตายตัว
+    # เดียว เพราะทุกคนในคิววันนี้มีคีย์ embedding_model ติดมาด้วยโดยตั้งใจ (ป้ายพื้นที่เวกเตอร์
+    # เป็นสตริงชื่อโมเดล ไม่ใช่ข้อมูล biometric เหมือนตัวเวกเตอร์เอง จึงไม่ใช่สิ่งที่การ์ดนี้
+    # มีไว้กัน) เช็คแบบ substring ธรรมดาจะชนกับ "embedding_model" เข้าเองอย่างผิด ๆ
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+
+
+def test_pending_speakers_endpoint_never_ships_vectors_nested_in_guess_samples_or_suggested(
+    client, config
+):
+    """finding 1 ของรีวิวรอบที่สี่: _public_speaker allowlist *ชื่อคีย์* ของ guess/
+    samples/suggested ถูกแล้ว แต่คืนค่าที่อยู่ใต้คีย์เหล่านั้นตรง ๆ โดยไม่กรองอะไรเลย --
+    ไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้ (ดู docstring ของ _write_queue) ใครใส่เวกเตอร์
+    ไว้ใต้คีย์ที่ชื่อไม่มีคำว่า "embedding" เลย (เช่น "voiceprint") ในสามจุดนี้จะหลุดออก
+    endpoint ไปเงียบ ๆ เหมือนที่รอบ 3 เคยปล่อยให้ "voiceprint" หลุดออกจากระดับการประชุมมา
+    แล้วครั้งหนึ่ง -- ทดสอบทั้งสามจุดพร้อมกันเพราะเป็นบั๊กเดียวกันซ้ำสามที่ในฟังก์ชันเดียว
+    """
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["speakers"][0]["guess"] = {"name": "สมชาย", "voiceprint": [1.0, 0.0]}
+    record["speakers"][0]["samples"][0]["voiceprint"] = [0.0, 1.0]
+    record["speakers"][0]["suggested"] = {
+        "name": "สมหญิง",
+        "speaker_id": "sp-1",
+        "score": 0.9,
+        "voiceprint": [0.5, 0.5],
+    }
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    speaker = body["meetings"][0]["speakers"][0]
+    assert "voiceprint" not in speaker["guess"]
+    assert "voiceprint" not in speaker["samples"][0]
+    assert "voiceprint" not in speaker["suggested"]
+    # suggested ไม่ใช่แค่ต้องไม่มีเวกเตอร์ -- ต้องไม่มี speaker_id/score เลยด้วย เพราะ
+    # web/app.js อ่านแค่ suggested.name (ดู pendingHtml ใน app.js) คีย์ทั้งสองไม่มีเหตุผล
+    # ต้องออกไปเลย
+    assert speaker["suggested"] == {"name": "สมหญิง"}
+    assert speaker["guess"] == {"name": "สมชาย", "evidence": None}
+    _assert_no_numeric_vector_leaks(body)
+
+
+def test_pending_speakers_endpoint_drops_vectors_planted_as_values_of_allowlisted_keys(
+    client, config
+):
+    """finding 1 ของรีวิวรอบที่ห้า: allowlist กรอง "ชื่อคีย์" แล้วคืน "ค่า" ของคีย์นั้นดิบ ๆ
+
+    สี่รอบที่ผ่านมาแก้แบบเดียวกันหมด คือแจกแจงชื่อคีย์เพิ่มอีกหนึ่งชั้น แล้วรอบถัดไปก็เจอ
+    รูรั่วที่ลึกลงไปอีกหนึ่งชั้นทุกครั้ง -- รอบนี้เวกเตอร์ไม่ได้อยู่ใต้ "คีย์ใหม่" ที่ allowlist
+    ไม่รู้จักอีกแล้ว แต่เป็น *ค่า* ของคีย์ที่อยู่ใน allowlist เองทุกตัว (meeting_dir, label,
+    speaking_seconds, guess.evidence, samples[].start, suggested.name) การไล่แจกแจงชื่อคีย์
+    อีกชั้นจึงกันกรณีนี้ไม่ได้เลยไม่ว่าจะไล่ไปกี่ชั้น ต้องกรองด้วย "รูปทรง" ของค่าแทน
+    (ดู speakers.drop_numeric_vectors) -- หกจุดนี้ทำซ้ำได้จริงบน endpoint ที่รันอยู่
+    """
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["meeting_dir"] = [0.11, 0.12]
+    speaker = record["speakers"][0]
+    speaker["label"] = [0.21, 0.22]
+    speaker["speaking_seconds"] = [0.31, 0.32]
+    speaker["guess"] = {"name": "สมชาย", "evidence": [0.41, 0.42]}
+    speaker["samples"][0]["start"] = [0.51, 0.52]
+    speaker["suggested"] = {"name": [0.61, 0.62]}
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+
+
+@pytest.mark.parametrize("shape_name", sorted(_PLANTED_VECTOR_SHAPES))
+def test_pending_speakers_endpoint_drops_every_planted_vector_shape(
+    client, config, shape_name
+):
+    """finding ของรีวิวรอบที่หก: "รูปทรง" ไม่ใช่สิ่งที่คนวางเวกเตอร์เลือกไม่ได้
+
+    docstring ของ drop_numeric_vectors (รอบที่ห้า) อ้างว่า "สิ่งเดียวที่คนวางเวกเตอร์
+    เลือกไม่ได้คือรูปทรงของเวกเตอร์เอง" ซึ่งไม่จริง และเป็นข้ออ้างที่ค้ำดีไซน์ทั้งรอบนั้นไว้
+    -- หกรูปทรงใน _PLANTED_VECTOR_SHAPES ทำซ้ำได้จริงบน endpoint ที่รันอยู่ ทุกตัวไม่ใช่
+    "list ตัวเลขล้วน" จึงผ่านตาข่ายรูปทรงไปได้หมด และทุกตัวขนเวกเตอร์เดียวกันออกไปแบบ
+    กู้คืนได้ครบ
+
+    ปลูกที่ทั้งหกตำแหน่งที่รอบที่ห้าเคยพิสูจน์ไว้พร้อมกัน (meeting_dir, label,
+    speaking_seconds, guess.evidence, samples[].start, suggested.name) เพราะเป็นบั๊ก
+    เดียวกันซ้ำหกที่ ไม่ใช่หกบั๊ก
+    """
+    shape = _PLANTED_VECTOR_SHAPES[shape_name]
+    meeting = _queue_two_speakers(config)
+    path = pending_dir(config.base_dir) / f"{meeting}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["meeting_dir"] = shape
+    speaker = record["speakers"][0]
+    speaker["label"] = shape
+    speaker["speaking_seconds"] = shape
+    speaker["guess"] = {"name": "สมชาย", "evidence": shape}
+    speaker["samples"][0]["start"] = shape
+    speaker["suggested"] = {"name": shape}
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    _assert_declared_leaf_types(body)
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+    # เข้มกว่าการ์ดข้างบน: ตัวเลขของเวกเตอร์ต้องไม่ปรากฏใน body เลยไม่ว่าในรูปใด
+    assert _PLANT_MARK not in json.dumps(body)
+
+
+def test_pending_speakers_endpoint_still_serves_every_field_the_ui_reads(client, config):
+    """การ์ดชนิดของใบต้องไม่กินของจริงไปด้วย -- ทุกฟิลด์ที่ web/app.js อ่านต้องยังมาครบ
+
+    รอบที่สี่เคยแก้บั๊กนี้ด้วยการตัดฟิลด์ทิ้ง แล้วทำให้คิวตั้งชื่อผู้พูดเข้าไม่ถึงทั้งฟีเจอร์
+    -- เทสต์นี้ตรึงฝั่งตรงข้ามของการ์ดไว้ ไม่ให้รอบนี้ซ้ำรอยเดิม
+    """
+    meeting = _queue_two_speakers(config)
+
+    body = client.get("/api/speakers/pending").get_json()
+
+    found = next(m for m in body["meetings"] if m["meeting_dir"] == meeting)
+    speaker = found["speakers"][0]
+    assert isinstance(speaker["label"], str) and speaker["label"]
+    assert isinstance(speaker["speaking_seconds"], (int, float))
+    sample = speaker["samples"][0]
+    assert isinstance(sample["text"], str) and sample["text"]
+    assert isinstance(sample["start"], (int, float))
+    assert isinstance(sample["end"], (int, float))
+    _assert_declared_leaf_types(body)
+
+
+def test_state_activity_never_ships_a_vector_hidden_in_params(client, config):
+    """finding 2 ของรีวิวรอบที่สี่: get_state ประกอบ {**e, "text": ...} จาก entry ที่อ่าน
+    ตรงจาก state/activity.jsonl (ดู activity.tail) -- ไฟล์นี้แก้มือได้ตามดีไซน์เดียวกับ
+    ไฟล์คิว (ดู activity.append) วันนี้ยังไม่มี production call ไหนส่ง params ที่เป็นเวกเตอร์
+    จริง (latent ไม่ใช่ live) แต่โครงสร้างเหมือนสามจุดที่แก้ไปแล้วทุกประการ
+
+    รอบที่ห้าแก้วิธีกัน: รอบที่สี่ "ตัด params ทิ้งทั้งก้อน" ซึ่งพังของจริง (ดู
+    test_state_activity_still_serves_job_and_params_path ด้านล่าง) -- params ต้องออกไป
+    ตามปกติ แต่ถูกกรองด้วยรูปทรงจนไม่มีเวกเตอร์เหลือ
+    """
+    append(
+        config.base_dir,
+        "meet-1",
+        "queued",
+        params={"voiceprint": [1.0, 0.0]},
+    )
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    assert "voiceprint" not in entry["params"]
+    assert "voiceprint" not in json.dumps(entry)
+    _assert_no_numeric_vector_leaks(body)
+
+
+def test_state_activity_still_serves_job_and_params_path(client, config):
+    """finding 2 ของรีวิวรอบที่ห้า -- regression จริง ไม่ใช่รูรั่วที่ยังไม่ถูกใช้
+
+    รอบที่สี่ตัด job/params ออกจาก /api/state โดยอ้าง grep ของ renderLog ตัวเดียว ซึ่งเป็น
+    grep ที่ไม่ครบ: e.job ถูกอ่านอีกสามที่ -- web/app.js jobProgress() (แถบความคืบหน้าหลัง
+    ปิดห้อง) web/app.js poll() (สัญญาณ speakers_pending ที่ทำให้คิวตั้งชื่อโผล่มา) และ
+    D:\\COWORK\\COWORK Desktop\\meetingrun.js progressOf()/finishedMeetingId() (ซึ่งอ่าน
+    e.params.path ด้วย) ผลจริงคือหน้าจอค้างที่ "กำลังประมวลผล" ขั้นที่ 1 ตลอดกาล viewDone
+    ไปไม่ถึง และเพราะ viewProcessing ไม่ได้ render pendingHtml() คิวตั้งชื่อ -- ซึ่งเป็น
+    เหตุผลทั้งหมดที่ฟีเจอร์นี้มีอยู่ -- จึงเข้าไม่ถึงจากหน้าเว็บเลย
+
+    job เป็นสตริงชื่องาน การตัดมันทิ้งจึงไม่เคยกันเวกเตอร์อะไรได้ตั้งแต่แรก
+    """
+    append(
+        config.base_dir,
+        "2026-07-30_10-00-standup",
+        "meeting_done",
+        params={"path": "meetings/2026-07-30_10-00-standup"},
+    )
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    assert entry["job"] == "2026-07-30_10-00-standup"
+    assert entry["params"]["path"] == "meetings/2026-07-30_10-00-standup"
+    # ฟิลด์ที่ renderLog/logHtml อ่านต้องยังอยู่ครบเหมือนเดิมด้วย
+    assert entry["code"] == "meeting_done"
+    assert entry["level"] == "info"
+    assert entry["ts"]
+    assert entry["text"]
+
+
+@pytest.mark.parametrize("shape_name", sorted(_PLANTED_VECTOR_SHAPES))
+def test_state_activity_drops_every_planted_vector_shape(client, config, shape_name):
+    """หกรูปทรงเดียวกัน ฝั่ง /api/state -- ปลูกทั้งใน params และในใบระดับบรรทัด
+
+    ts/job/code/level เป็นสตริงทั้งหมดตามที่ renderLog (app.js), logHtml (meetingrun.js),
+    jobProgress() และ progressOf() อ่านจริง -- เวกเตอร์ที่ถูกวางแทนที่ค่าเหล่านั้นต้องไม่
+    ออกไปไม่ว่าจะห่อมาในรูปทรงไหน
+    """
+    shape = _PLANTED_VECTOR_SHAPES[shape_name]
+    append(config.base_dir, "meet-1", "meeting_done", params={"path": shape})
+    log = config.base_dir / "state" / "activity.jsonl"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    planted = json.loads(lines[-1])
+    planted.update({"ts": shape, "job": shape, "code": shape, "level": shape})
+    lines[-1] = json.dumps(planted, ensure_ascii=False)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    body = client.get("/api/state").get_json()
+
+    _assert_declared_leaf_types(body)
+    _assert_no_numeric_vector_leaks(body)
+    assert _PLANT_MARK not in json.dumps(body)
+
+
+def test_state_activity_text_cannot_carry_a_serialized_vector(client, config):
+    """render() เอา params ไปเติมลงเทมเพลตข้อความ -- เวกเตอร์ที่วางไว้ใต้ {path} จะออกไป
+    เป็น *สตริง* ในคีย์ text ซึ่งการ์ดรูปทรงและการ์ดชนิดของใบจับไม่ได้ทั้งคู่ เพราะปลายทาง
+    เป็น str จริง ๆ ตามที่ประกาศไว้
+
+    ปิดด้วยสองอย่างพร้อมกัน: (1) ค่าที่ไม่ใช่ scalar ไม่ถูกเอาไปเติมเลย (2) ค่าที่เป็นสตริง
+    อยู่แล้วถูกตัดความยาว -- เวกเตอร์ 256 มิติที่ serialize แล้วยาวเกินสองพันตัวอักษร ส่วน
+    param จริงในโปรเจกต์นี้เป็นชื่องาน พาธไฟล์ และตัวนับเล็ก ๆ เท่านั้น
+    """
+    vector = [1 / (index + 3) for index in range(256)]
+    serialized = json.dumps(vector)
+    # เวกเตอร์ 256 มิติที่ความละเอียดของ float จริง serialize แล้วยาวราวห้าพันตัวอักษร
+    assert len(serialized) > 2000
+    append(config.base_dir, "meet-1", "meeting_done", params={"path": serialized})
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    # ตัวสุดท้ายของเวกเตอร์คือหลักฐานว่ามันออกไปครบทั้งก้อน -- ต้องไม่มีทั้งใน text และ params
+    tail = str(vector[-1])
+    assert tail not in entry["text"]
+    assert tail not in entry["params"]["path"]
+    assert len(entry["params"]["path"]) <= session_service.PARAM_VALUE_MAX_CHARS
+    assert len(entry["text"]) <= len("เสร็จแล้ว: ") + session_service.PARAM_VALUE_MAX_CHARS
+    _assert_declared_leaf_types(body)
+
+
+def test_state_activity_text_never_renders_a_non_scalar_param(client, config):
+    """params ที่ไม่ใช่ scalar ต้องไม่ไปโผล่ในข้อความที่ render ออกมา"""
+    append(
+        config.base_dir,
+        "meet-1",
+        "meeting_done",
+        params={"path": {"0": 0.1111111, "1": 0.2222222}},
+    )
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    assert _PLANT_MARK not in entry["text"]
+    assert _PLANT_MARK not in json.dumps(body)
+    _assert_declared_leaf_types(body)
+
+
+def test_state_activity_ships_only_the_one_param_the_consumers_read(client, config):
+    """params เป็นฟิลด์ปลายเปิดฟิลด์เดียวที่เหลือ -- ตรวจแล้วทั้ง app.js, enroll.js และ
+    meetingrun.js ว่าไม่มีใครอ่านอะไรนอกจาก params.path (ซึ่งเป็นสตริง) การส่ง params
+    ทั้งก้อนออกไปจึงเป็นการเปิดแกนที่หกไว้เปล่า ๆ ให้รอบที่เจ็ด
+    """
+    append(
+        config.base_dir,
+        "meet-1",
+        "meeting_done",
+        params={"path": "meetings/m1", "voiceprint": [0.11, 0.12], "extra": "x"},
+    )
+
+    body = client.get("/api/state").get_json()
+
+    entry = body["activity"][-1]
+    assert entry["params"] == {"path": "meetings/m1"}
+    # แต่ข้อความยังต้องเติม {path} ได้เหมือนเดิม
+    assert entry["text"].endswith("meetings/m1")
+    _assert_declared_leaf_types(body)
 
 
 def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
-    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL)
-    registry = add_sample(registry, "สมหญิง็ม", [0.9, 0.1], source="m2", model=MODEL)
+    registry = add_sample([], "สมหญิง็ม", _sample([1.0, 0.0]), source="m1")
+    registry = add_sample(registry, "สมหญิง็ม", _sample([0.9, 0.1]), source="m2")
     save_registry(config.base_dir, registry)
 
     body = client.get("/api/speakers").get_json()
@@ -402,14 +904,15 @@ def test_speakers_endpoint_lists_names_and_sample_counts(client, config):
     assert body["speakers"] == [
         {"id": registry[0]["id"], "name": "สมหญิง็ม", "sample_count": 2}
     ]
+    _assert_no_numeric_vector_leaks(body)
 
 
 def test_renaming_a_speaker_keeps_their_samples(client, config):
     """ชื่อครั้งแรกมาจากชื่อไฟล์ใน enroll/ ซึ่งมักติดส่วนเกินมา (เช่น วงเล็บชื่อเล่น) -- ก่อนมี endpoint นี้
     ทางแก้เดียวคือลบทิ้งแล้วอัดใหม่ ซึ่งทำลายตัวอย่างเสียงที่สะสมไว้เพราะสะกดผิด
     """
-    registry = add_sample([], "สมชาย ( ชาย )", [1.0, 0.0], source="m1", model=MODEL)
-    registry = add_sample(registry, "สมชาย ( ชาย )", [0.9, 0.1], source="m2", model=MODEL)
+    registry = add_sample([], "สมชาย ( ชาย )", _sample([1.0, 0.0]), source="m1")
+    registry = add_sample(registry, "สมชาย ( ชาย )", _sample([0.9, 0.1]), source="m2")
     save_registry(config.base_dir, registry)
 
     response = client.patch(
@@ -425,11 +928,12 @@ def test_renaming_a_speaker_keeps_their_samples(client, config):
     assert len(updated[0]["samples"]) == 2
     # เวกเตอร์เสียงต้องไม่ออกไปกับ response -- ข้อมูล biometric
     assert "embedding" not in json.dumps(response.get_json())
+    _assert_no_numeric_vector_leaks(response.get_json())
 
 
 def test_renaming_to_a_name_someone_else_already_has_is_refused(client, config):
-    registry = add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
-    registry = add_sample(registry, "สมหญิง", [0.0, 1.0], source="m2", model=MODEL)
+    registry = add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
+    registry = add_sample(registry, "สมหญิง", _sample([0.0, 1.0]), source="m2")
     save_registry(config.base_dir, registry)
     target = next(s for s in registry if s["name"] == "สมหญิง")
 
@@ -443,7 +947,7 @@ def test_renaming_to_a_name_someone_else_already_has_is_refused(client, config):
 
 
 def test_renaming_with_an_empty_or_non_string_name_is_a_400(client, config):
-    registry = add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+    registry = add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     save_registry(config.base_dir, registry)
 
     for payload in ({"name": "  **  "}, {"name": ""}, {"name": 42}, {}):
@@ -456,7 +960,7 @@ def test_renaming_with_an_empty_or_non_string_name_is_a_400(client, config):
 
 def test_renaming_an_unknown_speaker_is_a_404(client, config):
     save_registry(
-        config.base_dir, add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        config.base_dir, add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
 
     response = client.patch("/api/speakers/ไม่มีจริง", json={"name": "ชื่อใหม่"})
@@ -466,7 +970,7 @@ def test_renaming_an_unknown_speaker_is_a_404(client, config):
 
 
 def test_deleting_a_speaker_removes_them_from_the_registry(client, config):
-    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL)
+    registry = add_sample([], "สมหญิง็ม", _sample([1.0, 0.0]), source="m1")
     save_registry(config.base_dir, registry)
 
     response = client.delete(f"/api/speakers/{registry[0]['id']}")
@@ -536,7 +1040,11 @@ def test_confirming_records_the_model_the_queue_was_built_with_not_the_current_o
         "2026-07-28_10-30-standup",
         "standup.ogg",
         build_pending_speakers(
-            _PENDING_MERGED, _PENDING_LABELS, _PENDING_EMBEDDINGS, OTHER_MODEL
+            _PENDING_MERGED,
+            _PENDING_LABELS,
+            _voiceprints(_PENDING_EMBEDDINGS),
+            OTHER_MODEL,
+            EMBED,
         ),
     )
     _saved_transcript_for(config, "2026-07-28_10-30-standup")
@@ -556,7 +1064,7 @@ def test_confirming_records_the_model_the_queue_was_built_with_not_the_current_o
 
 
 def test_confirming_an_existing_person_by_id_adds_a_second_sample(client, config):
-    registry = add_sample([], "สมหญิง็ม", [0.9, 0.1], source="เมื่อวาน", model=MODEL)
+    registry = add_sample([], "สมหญิง็ม", _sample([0.9, 0.1]), source="เมื่อวาน")
     save_registry(config.base_dir, registry)
     meeting = _queue_two_speakers(config)
     _saved_transcript_for(config, meeting)
@@ -652,6 +1160,47 @@ def test_confirming_is_a_400_when_the_queued_embedding_is_a_zero_vector(client, 
     assert response.status_code == 400
     assert response.get_json()["error"] == "bad_embedding"
     assert load_registry(config.base_dir) == []
+
+
+def test_confirm_speaker_refuses_a_queue_entry_with_no_embedding_model(client, tmp_path):
+    # คิวที่สร้างไว้ก่อนอัปเกรด (หรือถูกแก้มือ) ต้องถูกปฏิเสธพร้อมเหตุผลของตัวเอง ไม่ใช่
+    # 500 ที่ไม่มีใครอธิบาย และไม่ใช่ผ่านไปเก็บ sample ที่ match_known จะข้ามตลอดกาล --
+    # เวกเตอร์ตัวนี้ใช้ได้ (is_usable_embedding ผ่าน) ปัญหาคือไม่มีคีย์ embedding_model เลย
+    meeting = _write_queue(tmp_path, entry={"embedding": [1.0, 0.0]})
+
+    response = client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "SPEAKER_00", "name": "satit"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "missing_embedding_model"
+    assert load_registry(tmp_path) == []
+
+
+def test_confirm_speaker_stores_the_stamp_from_the_queue_not_from_config(client, tmp_path):
+    # คิวอยู่ข้ามวันได้ ผู้ใช้แก้ EMBEDDING_MODEL ระหว่างนั้นได้ -- ป้ายที่ถูกคือของคิว
+    meeting = _write_queue(
+        tmp_path,
+        entry={
+            "embedding": [1.0, 0.0],
+            "embedding_model": EMBED,
+            "embedding_seconds": 21.4,
+            "segment_count": 7,
+            "model": MODEL,
+        },
+    )
+
+    client.post(
+        "/api/speakers/confirm",
+        json={"meeting": meeting, "label": "SPEAKER_00", "name": "satit"},
+    )
+
+    sample = load_registry(tmp_path)[0]["samples"][0]
+    assert sample["embedding_model"] == EMBED
+    assert sample["embedding_seconds"] == 21.4
+    assert sample["segment_count"] == 7
+    assert sample["model"] == MODEL
 
 
 def test_confirming_an_unknown_meeting_or_label_is_a_404(client, config):
@@ -817,6 +1366,7 @@ def test_get_enroll_lists_files_with_state_and_never_leaks_vectors(tmp_path):
     assert body["files"][0]["audio_file"] == "สมชาย.ogg"
     assert body["files"][0]["state"] == "done"
     assert "embedding" not in json.dumps(body)
+    _assert_no_numeric_vector_leaks(body)
 
 
 def test_get_enroll_surfaces_the_changed_during_analysis_flag_once(tmp_path):
@@ -871,7 +1421,7 @@ def test_get_enroll_reports_whether_the_worker_is_running(tmp_path):
 def test_get_enroll_also_returns_the_current_registry(tmp_path):
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมหญิง", [0.1, 0.2], source="enroll:x.ogg", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมหญิง", _sample([0.1, 0.2]), source="enroll:x.ogg")
     )
     client = create_app(config).test_client()
 
@@ -880,6 +1430,7 @@ def test_get_enroll_also_returns_the_current_registry(tmp_path):
     assert body["speakers"][0]["name"] == "สมหญิง"
     assert body["speakers"][0]["sample_count"] == 1
     assert "embedding" not in json.dumps(body)
+    _assert_no_numeric_vector_leaks(body)
 
 
 def test_get_enroll_reports_the_best_registry_match_when_at_or_above_the_low_threshold(
@@ -891,13 +1442,16 @@ def test_get_enroll_reports_the_best_registry_match_when_at_or_above_the_low_thr
     """
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
-    # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.50) กับ HIGH (0.80) เกณฑ์
-    # เริ่มต้นของ Config พอดี ไม่ถึงขั้นเสนอให้รวมชื่อ แต่ต้องเตือนให้เห็น
+    # cosine([1,0], [0.6,0.8]) = 0.6 -- อยู่ระหว่าง LOW (0.45) กับ HIGH (0.70) เกณฑ์
+    # เริ่มต้นของ Config พอดี ไม่ถึงขั้นเสนอให้รวมชื่อ แต่ต้องเตือนให้เห็น -- embedding_model
+    # ต้องตรงกับป้ายในทะเบียนไม่งั้น match_known ข้ามตัวอย่างนี้ไปเงียบ ๆ (คนละพื้นที่เวกเตอร์)
     write_ok_result(
-        tmp_path, "สมชาย.ogg", {"status": "ok", "model": MODEL, "embedding": [0.6, 0.8]}
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "model": MODEL, "embedding_model": EMBED, "embedding": [0.6, 0.8]},
     )
     client = create_app(config).test_client()
 
@@ -916,12 +1470,14 @@ def test_get_enroll_flags_a_match_at_or_above_the_high_threshold(tmp_path):
     """
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
     write_ok_result(
-            tmp_path, "สมชาย.ogg", {"status": "ok", "model": MODEL, "embedding": [1.0, 0.0]}
-        )
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "model": MODEL, "embedding_model": EMBED, "embedding": [1.0, 0.0]},
+    )
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
@@ -937,10 +1493,14 @@ def test_get_enroll_omits_match_below_the_low_threshold(tmp_path):
     """
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.0, 1.0]})
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding_model": EMBED, "embedding": [0.0, 1.0]},
+    )
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
@@ -955,18 +1515,169 @@ def test_get_enroll_never_leaks_the_embedding_even_when_a_match_is_found(tmp_pat
     """
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [1.0, 0.0], source="m1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
     )
     put_enroll_audio(tmp_path)
     write_ok_result(
-            tmp_path, "สมชาย.ogg", {"status": "ok", "model": MODEL, "embedding": [1.0, 0.0]}
-        )
+        tmp_path,
+        "สมชาย.ogg",
+        {
+            "status": "ok",
+            "model": MODEL,
+            "embedding_model": EMBED,
+            "embedding": [1.0, 0.0],
+            # result.json แก้มือได้ตามดีไซน์ของโปรเจกต์นี้ (ดู docstring ของ write_ok_result
+            # ด้านบน) -- จำลองไฟล์ที่มีเวกเตอร์แอบอยู่ใต้ชื่อคีย์อื่นที่ไม่ใช่ "embedding"
+            # ตรง ๆ list_entries เป็น denylist (ตัดแค่คีย์ชื่อ "embedding" ทิ้ง) คีย์แปลกใหม่
+            # แบบนี้จึงหลุดผ่านไปได้เงียบ ๆ ถ้าการ์ดข้างล่างเช็คแค่ '"embedding":' ตรง ๆ
+            "embedding_backup": [1.0, 0.0],
+        },
+    )
     client = create_app(config).test_client()
 
     body = client.get("/api/enroll").get_json()
 
     assert "match" in body["files"][0]
-    assert "embedding" not in json.dumps(body)
+    # ตรวจทั้งก้อนด้วย เผื่อเวกเตอร์ไปโผล่ใต้คีย์อื่นที่ยังไม่มีในวันนี้ (เช่น embedding_backup
+    # ข้างบน) -- จับที่รูปทรงของค่า (array ต่อท้ายคีย์ที่มีคำว่า embedding) ไม่ใช่คีย์ตายตัว
+    # เดียว เพราะผลลัพธ์ทุกไฟล์วันนี้มีคีย์ embedding_model ติดมาด้วยโดยตั้งใจ (สตริงชื่อโมเดล
+    # ไม่ใช่ข้อมูล biometric เหมือนตัวเวกเตอร์เอง) เช็คแบบ substring ธรรมดาจะชนกับ
+    # "embedding_model" เข้าเองอย่างผิด ๆ
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+
+
+def test_get_enroll_drops_vectors_planted_as_values_of_allowlisted_keys(tmp_path):
+    """finding 1 ของรีวิวรอบที่ห้า ฝั่ง /api/enroll -- คู่แฝดของเทสต์ชื่อเดียวกันฝั่งคิว
+
+    allowlist กรอง "ชื่อคีย์" แล้ว entry.update() เอา "ค่า" ของคีย์เหล่านั้นมา
+    ตรง ๆ -- result.json แก้มือได้ตามดีไซน์ของโปรเจกต์นี้ เวกเตอร์ที่วางเป็นค่าของ
+    speaking_seconds/speaker_count/suggested_name จึงหลุดออกไปได้ทั้งที่ allowlist ทำงาน
+    ถูกต้องทุกประการ และ reason ที่เป็น dict ทั้งก้อนพิสูจน์ว่าความลึกไม่มีขอบ: ซับทรี
+    อะไรก็ได้ที่ห้อยอยู่ใต้คีย์ใน allowlist จะออกไปทั้งดุ้น
+    """
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {
+            "status": "rejected",
+            "speaking_seconds": [0.11, 0.12],
+            "speaker_count": [0.21, 0.22],
+            "suggested_name": [0.31, 0.32],
+            "reason": {"voiceprint": [0.41, 0.42]},
+        },
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+    # ค่าที่เซิร์ฟเวอร์คำนวณเองต้องไม่หายไปด้วย: suggested_name ที่ถูกต้องมาจากชื่อไฟล์
+    # (suggested_name_from) และถูกทับด้วยของปลอมจาก result.json -- ตัดของปลอมทิ้งแล้ว
+    # ของจริงต้องยังอยู่ ไม่ใช่กลายเป็นช่องว่าง
+    assert body["files"][0]["suggested_name"] == "สมชาย"
+
+
+@pytest.mark.parametrize("shape_name", sorted(_PLANTED_VECTOR_SHAPES))
+def test_get_enroll_drops_every_planted_vector_shape(tmp_path, shape_name):
+    """หกรูปทรงเดียวกัน ฝั่ง /api/enroll -- คู่แฝดของเทสต์ชื่อเดียวกันฝั่งคิว
+
+    ปลูกที่ทุกใบที่มาจาก result.json (ซึ่งแก้มือได้ตามดีไซน์ของโปรเจกต์นี้) พร้อมกัน:
+    status/reason เป็นสตริง speaking_seconds/speaker_count เป็นตัวเลข suggested_name
+    เป็นสตริง -- ตรงกับที่ web/enroll.js อ่านจริง (chipFor/renderFile)
+    """
+    shape = _PLANTED_VECTOR_SHAPES[shape_name]
+    config = make_config(tmp_path)
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {
+            "status": shape,
+            "reason": shape,
+            "speaking_seconds": shape,
+            "speaker_count": shape,
+            "suggested_name": shape,
+        },
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    _assert_declared_leaf_types(body)
+    _assert_no_embedding_vector_leaks(body)
+    _assert_no_numeric_vector_leaks(body)
+    assert _PLANT_MARK not in json.dumps(body)
+    # ค่าที่เซิร์ฟเวอร์คำนวณเองต้องรอด ไม่ถูกของปลอมทับ
+    assert body["files"][0]["suggested_name"] == "สมชาย"
+    assert body["files"][0]["audio_file"] == "สมชาย.ogg"
+    assert body["files"][0]["state"] == "done"
+
+
+def test_get_enroll_still_serves_every_field_the_ui_reads(tmp_path):
+    """ฝั่งตรงข้ามของการ์ด: ทุกฟิลด์ที่ web/enroll.js อ่านต้องยังมาครบและเป็นชนิดที่ประกาศไว้"""
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0]), source="m1")
+    )
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {
+            "status": "ok",
+            "model": MODEL,
+            "embedding_model": EMBED,
+            "embedding": [1.0, 0.0],
+            "speaking_seconds": 68.5,
+            "speaker_count": 1,
+        },
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    entry = body["files"][0]
+    assert entry["audio_file"] == "สมชาย.ogg"
+    assert entry["state"] == "done"
+    assert entry["status"] == "ok"
+    assert entry["speaking_seconds"] == 68.5
+    assert entry["speaker_count"] == 1
+    assert isinstance(entry["size_bytes"], int)
+    assert entry["suggested_name"] == "สมชาย"
+    assert isinstance(entry["match"]["score"], float)
+    assert isinstance(entry["match"]["name"], str)
+    assert isinstance(entry["match"]["confident"], bool)
+    assert isinstance(body["min_speaking_seconds"], (int, float))
+    assert isinstance(body["speakers"][0]["sample_count"], int)
+    _assert_declared_leaf_types(body)
+
+
+def test_enroll_similarity_uses_the_stamp_recorded_in_the_result_not_the_current_config(
+    tmp_path,
+):
+    """เวกเตอร์ใน result.json วิเคราะห์ไว้ตอนไหนก็ได้ (ผู้ใช้สลับ EMBEDDING_MODEL ได้
+    ระหว่างที่ยังไม่กดยืนยัน) ต้องเทียบกับทะเบียนในพื้นที่ของ *มัน* เอง ไม่ใช่ของโมเดลที่
+    ตั้งอยู่ตอนนี้ -- ตัวเลขเหมือนกันเป๊ะ (cosine 1.0) แต่คนละพื้นที่เวกเตอร์ต้องไม่ match กัน
+    """
+    config = make_config(tmp_path)
+    speakers.save_registry(
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([1.0, 0.0], embedding_model=EMBED), source="m1")
+    )
+    put_enroll_audio(tmp_path)
+    write_ok_result(
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "model": MODEL, "embedding_model": OTHER_EMBED, "embedding": [1.0, 0.0]},
+    )
+    client = create_app(config).test_client()
+
+    body = client.get("/api/enroll").get_json()
+
+    assert "match" not in body["files"][0]
 
 
 def test_list_speakers_and_list_enroll_share_the_projection_helper():
@@ -994,7 +1705,7 @@ def test_speakers_and_enroll_endpoints_report_the_same_projection_for_a_speaker(
     """พฤติกรรมที่สังเกตได้จากภายนอกต้องไม่เปลี่ยนหลังรวม helper -- shape ของทั้งสอง
     endpoint ต้องยังตรงกันทุกฟิลด์เป๊ะเหมือนก่อนแก้
     """
-    registry = add_sample([], "สมหญิง็ม", [1.0, 0.0], source="m1", model=MODEL)
+    registry = add_sample([], "สมหญิง็ม", _sample([1.0, 0.0]), source="m1")
     save_registry(config.base_dir, registry)
 
     speakers_body = client.get("/api/speakers").get_json()
@@ -1047,7 +1758,9 @@ def test_post_confirm_saves_the_embedding_and_archives_the_file(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
     write_ok_result(
-        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1, 0.2, 0.3]}
+        tmp_path,
+        "สมชาย.ogg",
+        {"status": "ok", "embedding_model": EMBED, "embedding": [0.1, 0.2, 0.3]},
     )
     client = create_app(config).test_client()
 
@@ -1067,10 +1780,12 @@ def test_post_confirm_saves_the_embedding_and_archives_the_file(tmp_path):
 def test_post_confirm_merges_into_an_existing_person_of_the_same_name(tmp_path):
     config = make_config(tmp_path)
     speakers.save_registry(
-        tmp_path, speakers.add_sample([], "สมชาย", [0.9], source="meeting-1", model=MODEL)
+        tmp_path, speakers.add_sample([], "สมชาย", _sample([0.9]), source="meeting-1")
     )
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     client.post("/api/enroll/confirm", json={"audio_file": "สมชาย.ogg", "name": "สมชาย"})
@@ -1142,7 +1857,9 @@ def test_post_confirm_refuses_a_huge_vector_with_a_400_not_a_500(tmp_path):
 def test_post_confirm_refuses_a_name_that_is_empty_after_cleaning(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     response = client.post(
@@ -1158,7 +1875,9 @@ def test_post_confirm_refuses_a_name_that_is_empty_after_cleaning(tmp_path):
 def test_post_confirm_leaves_the_file_alone_when_saving_the_registry_fails(tmp_path):
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     with patch("src.speakers.save_registry", side_effect=OSError("disk full")):
@@ -1177,7 +1896,9 @@ def test_post_confirm_still_returns_200_when_archiving_the_file_fails(tmp_path):
     # การตอบ error ตรงนี้จะทำให้ผู้ใช้กดยืนยันซ้ำและได้ตัวอย่างซ้ำเข้าทะเบียนคนเดิม
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     with patch("src.enroll.archive", side_effect=OSError("disk full")):
@@ -1210,7 +1931,9 @@ def test_post_confirm_survives_a_non_os_error_from_archive_after_the_registry_is
     """
     config = make_config(tmp_path)
     put_enroll_audio(tmp_path)
-    write_ok_result(tmp_path, "สมชาย.ogg", {"status": "ok", "embedding": [0.1]})
+    write_ok_result(
+        tmp_path, "สมชาย.ogg", {"status": "ok", "embedding_model": EMBED, "embedding": [0.1]}
+    )
     client = create_app(config).test_client()
 
     with patch("src.enroll.archive", side_effect=RuntimeError("unexpected")):
@@ -1333,3 +2056,39 @@ def test_worker_probe_is_false_when_powershell_cannot_be_launched(monkeypatch):
     monkeypatch.setattr(session_service.subprocess, "run", boom)
 
     assert probe_worker() is False
+
+
+def test_importing_the_web_service_does_not_pull_in_torch():
+    """หน้าเว็บต้องเปิดได้โดยไม่แตะ torch เลย -- ไม่ใช่แค่เรื่องความเร็ว
+
+    session_service ไม่เคยเรียก pyannote สักบรรทัด แต่มัน import pending/enroll ซึ่งเคย
+    ลากทาง src.voiceprint -> src.waveform -> torch เข้ามาที่หัวไฟล์ ผลคือ 500MB และ ~1.5
+    วินาทีก่อน Flask จะ bind พอร์ต เพื่อของที่ไม่ได้ใช้
+
+    ที่ทำให้มันเป็นเรื่องความถูกต้องไม่ใช่ความเร็ว: start-ui.bat เรียก
+    `python -m src.session_service` เป็นกระบวนการของตัวเอง และทางเข้านั้น *ไม่มี* บล็อก
+    os.add_dll_directory ที่ src/main.py มี (ตั้งแต่ python 3.8 PATH ไม่ถูกใช้ตอนแก้ชื่อ
+    DLL ที่ torch พึ่งพา) -- บนเครื่องที่ชนเงื่อนไขนั้น หน้าเว็บทั้งหน้า (อัดเสียง ดู
+    transcript ตั้งชื่อผู้พูด ลงทะเบียน) จะ traceback ตั้งแต่ import ทั้งที่เดิมพังแค่ watcher
+
+    รันในกระบวนการใหม่เพราะ sys.modules ของกระบวนการที่รันเทสต์มี torch อยู่แล้วจาก
+    เทสต์ไฟล์อื่น -- เช็คในนี้จะผ่านตลอดไม่ว่าโค้ดจะเป็นยังไง
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import src.session_service; "
+            "print('torch' in sys.modules or 'pyannote' in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parent.parent),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False", (
+        "session_service โหลด torch/pyannote ตอน import แล้ว -- หา import ที่หัวไฟล์ของ "
+        "โมดูลที่มันดึงเข้ามา แล้วย้ายเข้าไปในฟังก์ชัน (หรือ TYPE_CHECKING ถ้าใช้เป็น "
+        "annotation อย่างเดียว)"
+    )

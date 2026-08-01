@@ -1,13 +1,20 @@
 import json
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from src import enroll
 from src.diarize import DiarizationResult
+from src.enroll import analyze
 from src.speakers import MIN_SPEAKING_SECONDS
+from src.voiceprint import Voiceprint
 
 MODEL = "pyannote/speaker-diarization-community-1"
 
@@ -15,10 +22,23 @@ MODEL = "pyannote/speaker-diarization-community-1"
 @pytest.fixture(autouse=True)
 def _stub_convert_to_wav(monkeypatch):
     """analyze() ผ่าน convert_to_wav (ffmpeg จริง) เสมอตอนนี้ (finding 4) -- เทสต์ในไฟล์นี้
-    ต้องไม่พึ่ง ffmpeg ตัวจริงหรือไฟล์เสียงจริง จึง stub เป็นค่าเริ่มต้นของทุกเทสต์
-    เทสต์ที่ตั้งใจทดสอบ path การแปลงเองจะ monkeypatch ทับอีกทีในตัวเทสต์นั้น ๆ
+    ต้องไม่พึ่ง ffmpeg ตัวจริง จึง stub เป็นค่าเริ่มต้นของทุกเทสต์ เทสต์ที่ตั้งใจทดสอบ
+    path การแปลงเองจะ monkeypatch ทับอีกทีในตัวเทสต์นั้น ๆ
+
+    Task 10: เดิม stub นี้เป็น no-op ที่คืน `dst` เฉย ๆ โดยไม่เขียนไฟล์ที่ path นั้นจริง --
+    ใช้ได้ตอนที่ analyze() รู้จักแค่ diarize_audio ที่เทสต์ mock ทับอยู่แล้วเสมอ (ไม่มีใคร
+    อ่าน dst จริง) แต่ตอนนี้ analyze() เรียก extract_voiceprints (voiceprint.py) ซึ่งโหลด
+    ไฟล์ที่ dst จริงด้วย soundfile (ผ่าน load_waveform) เมื่อไม่ได้ mock ทับ (ดูเทสต์ที่ใช้
+    _write_enroll_wav + pipeline ปลอมแทน diarize_audio ปลอม) -- no-op เดิมจะทำให้ path
+    นั้นไม่มีไฟล์อยู่เลย จึง stub เป็นการคัดลอกไฟล์ตรง ๆ แทน (ไม่ใช่ ffmpeg จริง แต่ทำให้
+    dst มีไบต์เสียงจริงรออยู่เสมอสำหรับเทสต์ที่ตั้งใจให้เดินไปถึง extract_voiceprints จริง)
     """
-    monkeypatch.setattr("src.enroll.convert_to_wav", lambda src, dst: dst)
+
+    def _copy(src, dst):
+        shutil.copy(src, dst)
+        return dst
+
+    monkeypatch.setattr("src.enroll.convert_to_wav", _copy)
 
 
 def test_enroll_dir_and_done_dir_are_derived_from_base_dir(tmp_path):
@@ -136,6 +156,27 @@ def fake_diarize(result=None, error=None):
     return _call
 
 
+class _StubEmbedder:
+    """embedder ปลอมสำหรับเทสต์ที่ mock extract_voiceprints ไปแล้ว -- ไม่เคยถูกเรียกจริง
+    มีไว้แค่ให้ analyze() ส่งต่อ (ต้องมี .checkpoint เพราะ analyze() อ่านมันตรง ๆ ตอน
+    ประกอบผล "ok") ใช้ตัวเดียวกันซ้ำในเทสต์ plumbing ที่ไม่ได้ตั้งใจตรวจค่า embedding_model
+    """
+
+    checkpoint = "stub-checkpoint"
+
+
+def _stub_extract_voiceprints(monkeypatch, mapping):
+    """แทน src.enroll.extract_voiceprints ด้วยค่าที่กำหนดเอง
+
+    เทสต์กลุ่มนี้ตรวจการเดินสายของ analyze() เอง (นับคนจาก turns / เหตุผล reject / ส่ง
+    ต่อ pipeline/model) ไม่ใช่การคำนวณเวกเตอร์จริงซึ่งมีเทสต์ละเอียดของตัวเองอยู่แล้วใน
+    tests/test_voiceprint.py -- ไฟล์เสียงปลอม (b"x") ที่เทสต์กลุ่มนี้ใช้ไม่ใช่ wav จริง
+    extract_voiceprints ตัวจริงจะ load_waveform ไม่ขึ้นแล้วเงียบ ๆ คืน {} เสมอ (ดู
+    docstring ของมันเอง) ทำให้ status "ok" ไปไม่ถึงเลยถ้าไม่ mock จุดนี้
+    """
+    monkeypatch.setattr("src.enroll.extract_voiceprints", lambda *a, **k: mapping)
+
+
 def test_analyze_accepts_a_single_speaker_who_talks_long_enough(tmp_path, monkeypatch):
     audio_path = tmp_path / "สมชาย.ogg"
     audio_path.write_bytes(b"x")
@@ -144,20 +185,30 @@ def test_analyze_accepts_a_single_speaker_who_talks_long_enough(tmp_path, monkey
             {"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"},
             {"start": 45.0, "end": 73.5, "speaker": "SPEAKER_00"},
         ],
-        embeddings={"SPEAKER_00": [0.1, 0.2, 0.3]},
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+    _stub_extract_voiceprints(
+        monkeypatch,
+        {"SPEAKER_00": Voiceprint(embedding=[0.1, 0.2, 0.3], seconds=40.0, segment_count=1)},
+    )
 
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
 
     assert analyzed["status"] == "ok"
     assert analyzed["speaker_count"] == 1
     assert analyzed["speaking_seconds"] == 68.5
     assert analyzed["suggested_name"] == "สมชาย"
     assert analyzed["embedding"] == [0.1, 0.2, 0.3]
+    assert analyzed["embedding_seconds"] == 40.0
+    assert analyzed["segment_count"] == 1
     # ผลค้างข้ามการสลับโมเดลได้ -- ป้ายนี้คือสิ่งเดียวที่บอกว่าเวกเตอร์นี้เป็นของ
     # พื้นที่ไหน ตอนที่ผู้ใช้กลับมากดยืนยันชื่อในภายหลัง
     assert analyzed["model"] == MODEL
+    # embedding_model มาจาก embedder.checkpoint ที่คำนวณจริง ไม่ใช่ model (checkpoint
+    # ของตัวแยกผู้พูด) -- สองโมเดลนี้เป็นคนละตัวกันโดยเจตนา (ดู docstring ของ analyze())
+    assert analyzed["embedding_model"] == _StubEmbedder.checkpoint
     assert "reason" not in analyzed
 
 
@@ -169,95 +220,21 @@ def test_analyze_rejects_a_file_with_more_than_one_speaker(tmp_path, monkeypatch
             {"start": 0.0, "end": 60.0, "speaker": "SPEAKER_00"},
             {"start": 60.0, "end": 140.0, "speaker": "SPEAKER_01"},
         ],
-        embeddings={"SPEAKER_00": [0.1, 0.2], "SPEAKER_01": [0.3, 0.4]},
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
 
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "multiple_speakers"
     assert analyzed["speaker_count"] == 2
     # ตัวเลขต้องยังอยู่ให้หน้าเว็บอธิบายเหตุผลได้
     assert analyzed["speaking_seconds"] == 140.0
-    # เวกเตอร์ที่ไม่ควรถูกใช้ ต้องไม่มีอยู่ในไฟล์ให้ใครหยิบไปใช้ผิด
+    # เวกเตอร์ที่ไม่ควรถูกใช้ ต้องไม่มีอยู่ในไฟล์ให้ใครหยิบไปใช้ผิด -- ด่านนี้ reject
+    # ก่อนจะเรียก extract_voiceprints เลยด้วยซ้ำ (ไม่มีการ mock มันในเทสต์นี้)
     assert "embedding" not in analyzed
-
-
-def test_analyze_ignores_a_label_pyannote_gave_no_vector_for(tmp_path, monkeypatch):
-    """รูปร่างที่วัดได้จริงจากคลิปพูดคนเดียวล้วน 67 วินาที (2026-07-29)
-
-    pyannote คืนป้ายที่สองยาว 0.5 วินาที ซ้อนอยู่กลางช่วงที่ป้ายแรกพูดอยู่ แล้ว pad
-    เวกเตอร์ศูนย์ให้ (norm 0.0 เทียบกับ 3.32 ของป้ายจริง) -- ป้ายแบบนี้เอาไปเก็บเข้า
-    ทะเบียนไม่ได้อยู่แล้ว การนับมันเป็น "คนที่สอง" ทำได้แค่ปฏิเสธไฟล์ที่ถูกต้องทิ้ง
-    """
-    audio_path = tmp_path / "อัดเสียงฉัน.ogg"
-    audio_path.write_bytes(b"x")
-    result = DiarizationResult(
-        turns=[
-            {"start": 12.8, "end": 16.5, "speaker": "SPEAKER_00"},
-            {"start": 14.6, "end": 15.1, "speaker": "SPEAKER_01"},
-            {"start": 20.0, "end": 62.0, "speaker": "SPEAKER_00"},
-        ],
-        embeddings={"SPEAKER_00": [0.1, 0.2], "SPEAKER_01": [0.0, 0.0]},
-    )
-    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
-
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
-
-    assert analyzed["status"] == "ok"
-    assert analyzed["speaker_count"] == 1
-    assert analyzed["embedding"] == [0.1, 0.2]
-    # ไม่เงียบ: ผู้ใช้ต้องเห็นได้ว่ามีป้ายถูกข้ามไป ไม่ใช่ผ่านไปเฉย ๆ
-    assert analyzed["ignored_empty_labels"] == 1
-    # เวลานับจากทุกป้าย เพราะเศษที่ข้ามไปทับอยู่บนเสียงของคนจริงอยู่แล้ว
-    assert analyzed["speaking_seconds"] == 46.2
-
-
-def test_analyze_still_rejects_a_real_second_voice_that_has_a_vector(tmp_path, monkeypatch):
-    """ด่านกันเสียงคนอื่นปนต้องไม่ถูกผ่อนไปด้วย -- คนที่พูดจริงย่อมมีเวกเตอร์เสมอ
-
-    ตั้งใจให้คนที่สองพูดแค่ 0.5 วินาทีเท่ากับเศษในเทสต์ด้านบนเป๊ะ ๆ ต่างกันแค่ตรงที่
-    เวกเตอร์ใช้ได้ -- ถ้าวันหนึ่งมีคนเผลอเปลี่ยนไปตัดทิ้งด้วย "ป้ายที่สั้นกว่า N วินาที"
-    แทนที่จะเป็น "ป้ายที่ไม่มีเวกเตอร์" เทสต์นี้จะจับได้
-    """
-    audio_path = tmp_path / "มีคนแทรก.ogg"
-    audio_path.write_bytes(b"x")
-    result = DiarizationResult(
-        turns=[
-            {"start": 0.0, "end": 45.0, "speaker": "SPEAKER_00"},
-            {"start": 20.0, "end": 20.5, "speaker": "SPEAKER_01"},
-        ],
-        embeddings={"SPEAKER_00": [0.1, 0.2], "SPEAKER_01": [0.9, 0.4]},
-    )
-    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
-
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
-
-    assert analyzed["status"] == "rejected"
-    assert analyzed["reason"] == "multiple_speakers"
-    assert analyzed["speaker_count"] == 2
-    assert "ignored_empty_labels" not in analyzed
-    assert "embedding" not in analyzed
-
-
-def test_analyze_rejects_when_every_label_lacks_a_vector(tmp_path, monkeypatch):
-    """พูดยาวพอ แต่ไม่มีป้ายไหนมีเวกเตอร์เลย -- ต้องไม่หลุดเป็น ok และไม่ใช่ too_short"""
-    audio_path = tmp_path / "เสียงแปลก.ogg"
-    audio_path.write_bytes(b"x")
-    result = DiarizationResult(
-        turns=[{"start": 0.0, "end": 45.0, "speaker": "SPEAKER_00"}],
-        embeddings={"SPEAKER_00": [0.0, 0.0]},
-    )
-    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
-
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
-
-    assert analyzed["status"] == "rejected"
-    assert analyzed["reason"] == "unusable_embedding"
-    assert analyzed["speaker_count"] == 0
-    # เวลาต้องยังรายงานตามจริง ไม่ใช่ 0.0 ซึ่งจะทำให้ดูเหมือนไฟล์สั้นเกินไป
-    assert analyzed["speaking_seconds"] == 45.0
 
 
 def test_analyze_rejects_a_long_file_holding_only_a_few_seconds_of_speech(
@@ -268,11 +245,12 @@ def test_analyze_rejects_a_long_file_holding_only_a_few_seconds_of_speech(
     # ไฟล์ยาว 5 นาที แต่มีเสียงพูดจริง 6 วินาที -- ต้องดูเวลาพูด ไม่ใช่ความยาวไฟล์
     result = DiarizationResult(
         turns=[{"start": 200.0, "end": 206.0, "speaker": "SPEAKER_00"}],
-        embeddings={"SPEAKER_00": [0.1, 0.2]},
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
 
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "too_short"
@@ -287,11 +265,20 @@ def test_analyze_accepts_speech_at_exactly_the_minimum_boundary(tmp_path, monkey
     # ไม่ใช่ถูกปฏิเสธ จึงล็อกค่านี้ไว้แทนการฝัง 10.0 ตรง ๆ เผื่อค่าคงที่เปลี่ยนในอนาคต
     result = DiarizationResult(
         turns=[{"start": 0.0, "end": MIN_SPEAKING_SECONDS, "speaker": "SPEAKER_00"}],
-        embeddings={"SPEAKER_00": [0.1, 0.2]},
     )
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+    _stub_extract_voiceprints(
+        monkeypatch,
+        {
+            "SPEAKER_00": Voiceprint(
+                embedding=[0.1, 0.2], seconds=MIN_SPEAKING_SECONDS, segment_count=1
+            )
+        },
+    )
 
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
 
     assert analyzed["status"] == "ok"
     assert analyzed["speaking_seconds"] == MIN_SPEAKING_SECONDS
@@ -302,49 +289,16 @@ def test_analyze_rejects_a_file_with_no_speech_at_all(tmp_path, monkeypatch):
     audio_path.write_bytes(b"x")
     monkeypatch.setattr(
         "src.enroll.diarize_audio",
-        fake_diarize(DiarizationResult(turns=[], embeddings={})),
+        fake_diarize(DiarizationResult(turns=[])),
     )
 
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "too_short"
     assert analyzed["speaker_count"] == 0
-
-
-def test_analyze_rejects_a_zero_vector_pyannote_padded_in(tmp_path, monkeypatch):
-    audio_path = tmp_path / "สมชาย.ogg"
-    audio_path.write_bytes(b"x")
-    # pyannote pad ศูนย์เข้ามาเมื่อจำนวน label มากกว่าจำนวน centroid -- เวกเตอร์ศูนย์
-    # "เหมือน" กับเวกเตอร์ศูนย์อื่นทุกตัว ปล่อยเข้าทะเบียนไม่ได้
-    result = DiarizationResult(
-        turns=[{"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"}],
-        embeddings={"SPEAKER_00": [0.0, 0.0, 0.0]},
-    )
-    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
-
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
-
-    assert analyzed["status"] == "rejected"
-    assert analyzed["reason"] == "unusable_embedding"
-    assert "embedding" not in analyzed
-
-
-def test_analyze_rejects_when_the_label_has_no_embedding_at_all(tmp_path, monkeypatch):
-    audio_path = tmp_path / "สมชาย.ogg"
-    audio_path.write_bytes(b"x")
-    # diarize กลืน exception ตอนอ่าน speaker_embeddings แล้วคืน {} ได้ (ดู
-    # diarize._speaker_embeddings) turns ยังมาครบ แต่ไม่มีเวกเตอร์ให้เก็บ
-    result = DiarizationResult(
-        turns=[{"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"}],
-        embeddings={},
-    )
-    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
-
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
-
-    assert analyzed["status"] == "rejected"
-    assert analyzed["reason"] == "unusable_embedding"
 
 
 def test_analyze_turns_a_pipeline_crash_into_a_rejected_result(tmp_path, monkeypatch):
@@ -354,7 +308,9 @@ def test_analyze_turns_a_pipeline_crash_into_a_rejected_result(tmp_path, monkeyp
         "src.enroll.diarize_audio", fake_diarize(error=RuntimeError("cuda oom"))
     )
 
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
 
     # เงียบไปเฉย ๆ = หน้าจอค้างที่ "กำลังวิเคราะห์" ตลอดกาล ต้องได้ผลกลับมาเสมอ
     assert analyzed["status"] == "rejected"
@@ -372,14 +328,17 @@ def test_analyze_passes_the_pipeline_through_without_loading_one(tmp_path, monke
 
     def _spy(path, hf_token, pipeline):
         seen["pipeline"] = pipeline
+        # สั้นกว่า MIN_SPEAKING_SECONDS โดยตั้งใจ: เทสต์นี้สนใจแค่ว่า pipeline ที่ส่งเข้า
+        # มาถูกส่งต่อให้ diarize_audio ตัวเดิมโดยไม่ถูกแทนที่ -- ให้ผลจบที่ too_short เร็ว
+        # ที่สุดพอ ไม่ต้องพึ่ง extract_voiceprints/embedder เลยเพื่อตัดความซับซ้อนที่ไม่
+        # เกี่ยวกับสิ่งที่เทสต์นี้ตรวจ
         return DiarizationResult(
-            turns=[{"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"}],
-            embeddings={"SPEAKER_00": [0.5]},
+            turns=[{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
         )
 
     monkeypatch.setattr("src.enroll.diarize_audio", _spy)
 
-    enroll.analyze(audio_path, pipeline=sentinel, model=MODEL)
+    enroll.analyze(audio_path, pipeline=sentinel, model=MODEL, embedder=_StubEmbedder())
 
     assert seen["pipeline"] is sentinel
 
@@ -389,6 +348,12 @@ def test_analyze_converts_to_wav_before_diarizing(tmp_path, monkeypatch):
     pipeline.process_file ก่อนส่งเข้า diarize_audio -- ไม่งั้น pyannote ได้ container ดิบ
     ที่ decode ด้วย backend ที่เดาไม่ได้ (soundfile ถอด AAC ไม่ได้) แทนที่จะผ่าน ffmpeg
     ซึ่งเป็นตัวถอดรหัสเดียวที่โปรเจกต์นี้รับประกัน
+
+    turns สั้นกว่า MIN_SPEAKING_SECONDS โดยตั้งใจ (Task 10): analyze() เวอร์ชันนี้แปลง
+    เป็น wav สองครั้ง (ครั้งที่สองก่อนสร้าง voiceprint) -- ถ้า turns ยาวพอจนถึง "ok" การ
+    แปลงครั้งที่สองจะเรียก fake_convert ซ้ำแล้วทับ seen["dst"] เดิม ทำให้เทียบกับ
+    seen["diarized_path"] (จับค่าไว้ตอนแปลงครั้งแรก) ไม่ตรงกันอย่างผิดจุดประสงค์ของเทสต์
+    นี้ ซึ่งต้องการตรวจแค่การแปลงครั้งแรกก่อน diarize เท่านั้น
     """
     audio_path = tmp_path / "สมชาย.m4a"
     audio_path.write_bytes(b"x")
@@ -402,14 +367,13 @@ def test_analyze_converts_to_wav_before_diarizing(tmp_path, monkeypatch):
     def fake_diarize(path, hf_token, pipeline):
         seen["diarized_path"] = path
         return DiarizationResult(
-            turns=[{"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"}],
-            embeddings={"SPEAKER_00": [0.1]},
+            turns=[{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
         )
 
     monkeypatch.setattr("src.enroll.convert_to_wav", fake_convert)
     monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize)
 
-    enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+    enroll.analyze(audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder())
 
     assert seen["src"] == audio_path
     assert seen["dst"].suffix == ".wav"
@@ -434,13 +398,250 @@ def test_analyze_turns_a_conversion_failure_into_a_rejected_result(tmp_path, mon
         "src.enroll.diarize_audio", lambda *a, **k: diarize_calls.append(1)
     )
 
-    analyzed = enroll.analyze(audio_path, pipeline=object(), model=MODEL)
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
 
     assert analyzed["status"] == "rejected"
     assert analyzed["reason"] == "analysis_failed"
     assert "ffmpeg exited with code 1" in analyzed["detail"]
     assert "embedding" not in analyzed
     assert diarize_calls == []
+
+
+# --- รีวิวรอบนี้: finding 1/2/3 ---
+
+
+def test_analyze_rejects_when_the_embedding_rests_on_less_than_the_minimum(
+    tmp_path, monkeypatch
+):
+    """finding 1 (ตัดสินใจแล้วโดยเจ้าของโปรเจกต์): เวกเตอร์มาจากเฉพาะช่วงเสียงสะอาดที่
+    select_intervals คัดแล้วเท่านั้น ซึ่งเป็นเซตย่อยของเวลาพูดทั้งหมด -- ก่อนหน้านี้เวกเตอร์
+    มาจาก centroid ที่ครอบคลุมเสียงพูดทั้งหมดของคน ๆ นั้น MIN_SPEAKING_SECONDS จึงเคยผูกกับ
+    เวกเตอร์ได้จริง ตอนนี้ไฟล์ที่มี speaking_seconds ผ่านด่าน (>=10) แต่เวกเตอร์จริงมาจาก
+    เสียงแค่ไม่กี่วินาทีต้องยังถูกปฏิเสธ (ทำซ้ำจาก: turns เก้าท่อน 1.0 วิ บวกอีกหนึ่งท่อน 2.0
+    วิ -- speaking_seconds 11.0 ผ่านด่าน แต่ embedding_seconds เหลือแค่ 2.0)
+    """
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    turns = [{"start": float(i), "end": float(i) + 1.0, "speaker": "SPEAKER_00"} for i in range(9)]
+    turns.append({"start": 20.0, "end": 22.0, "speaker": "SPEAKER_00"})
+    result = DiarizationResult(turns=turns)
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+    _stub_extract_voiceprints(
+        monkeypatch,
+        {"SPEAKER_00": Voiceprint(embedding=[0.1, 0.2], seconds=2.0, segment_count=1)},
+    )
+
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "too_short"
+    # ผลนี้ต้องยังมีคีย์ base ครบเหมือนการปฏิเสธอื่นทุกครั้ง
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["speaking_seconds"] == 11.0
+    assert analyzed["suggested_name"] == "สมชาย"
+    assert "embedding" not in analyzed
+
+
+def test_analyze_reports_unusable_embedding_when_extraction_omits_the_counted_label(
+    tmp_path, monkeypatch
+):
+    """finding 2: บรานช์ "extraction สำเร็จแต่ไม่มี voiceprint ของป้ายที่นับเป็นคน" (เดิม
+    ไม่มีเทสต์ตรวจเลย) -- ป้ายเดียวพูดยาวพอผ่านทั้งด่านนับคนและด่าน speaking_seconds แต่
+    extract_voiceprints (จำลองว่าทำงานจบแล้ว) ไม่มี key ของป้ายนั้นใน dict ที่คืนมา (เช่น
+    ทุกช่วงของป้ายนั้นคำนวณเวกเตอร์ไม่ได้จริง) ไฟล์ 45 วินาทีที่ extract ไม่สำเร็จต้องไม่
+    ถูกรายงานเป็น 0.0 วิแล้วปฏิเสธว่า "สั้นเกินไป" (ดู docstring ของ analyze()) --
+    speaking_seconds/speaker_count ต้องยังเป็นค่าจริง
+    """
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[{"start": 0.0, "end": 45.0, "speaker": "SPEAKER_00"}],
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+    _stub_extract_voiceprints(monkeypatch, {})  # extraction จบแล้ว แต่ไม่มี voiceprint ให้ป้ายนี้
+
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "unusable_embedding"
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["speaking_seconds"] == 45.0
+    assert "embedding" not in analyzed
+
+
+def test_analyze_reports_unusable_embedding_when_extraction_raises(tmp_path, monkeypatch):
+    """finding 2: บรานช์ "extraction raise" (เดิมไม่มีเทสต์ตรวจเลย) -- ไฟล์ 45 วินาทีที่
+    extract_voiceprints พังทั้งฟังก์ชัน (เช่น torch/pyannote โยน exception ที่ไม่ได้ถูก
+    กลืนไว้เอง) ต้องยังรายงาน speaking_seconds/speaker_count เป็นค่าจริง ไม่ใช่ 0.0 แล้ว
+    ปฏิเสธผิดเหตุผลเป็น "สั้นเกินไป"
+    """
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[{"start": 0.0, "end": 45.0, "speaker": "SPEAKER_00"}],
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("cuda oom")
+
+    monkeypatch.setattr("src.enroll.extract_voiceprints", _raise)
+
+    analyzed = enroll.analyze(
+        audio_path, pipeline=object(), model=MODEL, embedder=_StubEmbedder()
+    )
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "unusable_embedding"
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["speaking_seconds"] == 45.0
+    assert "embedding" not in analyzed
+
+
+def test_analyze_does_not_raise_when_the_embedder_has_no_checkpoint_attribute(
+    tmp_path, monkeypatch
+):
+    """finding 3: embedder.checkpoint เดิมถูกอ่านนอก try ทั้งหมด -- embedder ที่ทำงานได้ปกติ
+    ทุกอย่างแต่ไม่มี attribute นี้ (คนละกรณีกับ extract_voiceprints พัง) ทำให้ analyze()
+    raise AttributeError หลุดออกไปตรง ๆ analyze() สัญญาไว้ในชื่อฟังก์ชันของมันเองว่าไม่ raise
+    ไม่ว่าเกิดอะไรขึ้น เพราะผู้เรียกคือ watcher ที่ไม่มีมนุษย์นั่งดูอยู่ -- ไฟล์ผลที่ไม่ถูกเขียน
+    เลยคือหน้าเว็บค้างที่ "กำลังวิเคราะห์" ตลอดกาล
+    """
+    audio_path = tmp_path / "สมชาย.ogg"
+    audio_path.write_bytes(b"x")
+    result = DiarizationResult(
+        turns=[{"start": 0.0, "end": 40.0, "speaker": "SPEAKER_00"}],
+    )
+    monkeypatch.setattr("src.enroll.diarize_audio", fake_diarize(result))
+    _stub_extract_voiceprints(
+        monkeypatch,
+        {"SPEAKER_00": Voiceprint(embedding=[0.1, 0.2], seconds=40.0, segment_count=1)},
+    )
+
+    class _EmbedderWithoutCheckpoint:
+        """embedder ที่ทำงานได้ปกติทุกอย่าง ยกเว้นไม่มี .checkpoint -- จงใจไม่สืบทอดจาก
+        _StubEmbedder เพื่อไม่ให้บังเอิญมี attribute นี้ติดมา"""
+
+    analyzed = enroll.analyze(
+        audio_path,
+        pipeline=object(),
+        model=MODEL,
+        embedder=_EmbedderWithoutCheckpoint(),
+    )
+
+    assert analyzed["status"] == "rejected"
+    assert analyzed["reason"] == "unusable_embedding"
+    assert analyzed["speaker_count"] == 1
+    assert analyzed["speaking_seconds"] == 40.0
+    assert "embedding" not in analyzed
+
+
+# --- Task 10: เกณฑ์ใหม่ที่นับ "กี่คน" จาก select_intervals(clean_intervals(turns)) ---
+# เทสต์กลุ่มนี้ (จาก task-10-brief.md) ใช้ไฟล์เสียงจริง (_write_enroll_wav) กับ pipeline
+# ปลอมแทน diarize_audio ปลอม -- ปล่อยให้ diarize_audio/extract_voiceprints ตัวจริงทำงาน
+# เต็มเส้นทาง มีแค่ตัวโมเดล embedding ที่ถูกปลอม (embedder ไม่ต้องมี GPU/HF_TOKEN)
+
+
+class _FakeEmbedder:
+    checkpoint = "pyannote/wespeaker-voxceleb-resnet34-LM"
+
+    def __call__(self, waveform, intervals):
+        return [[1.0, 0.0] for _ in intervals]
+
+
+def _pipeline_returning(turns):
+    """pipeline ปลอมที่ให้ turn ตามที่กำหนด (diarize_audio อ่าน .speaker_diarization)"""
+    tracks = [(SimpleNamespace(start=t["start"], end=t["end"]), None, t["speaker"]) for t in turns]
+    diarization = MagicMock()
+    diarization.itertracks.return_value = tracks
+    return MagicMock(return_value=MagicMock(speaker_diarization=diarization))
+
+
+def _write_enroll_wav(tmp_path, seconds=40.0, sample_rate=16000):
+    directory = tmp_path / "enroll"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "satit.wav"
+    frames = int(seconds * sample_rate)
+    sf.write(path, np.sin(np.linspace(0.0, 4000.0, frames, dtype="float32")), sample_rate)
+    return path
+
+
+def test_analyze_accepts_a_clip_whose_only_extra_label_is_a_short_fragment(tmp_path):
+    # pyannote แตกป้ายเศษออกจากคลิปพูดคนเดียวจริงราว 40% ของครั้ง (วัด 2026-07-29: เศษ
+    # 0.5 วิซ้อนกลางช่วงที่ป้ายจริงพูดอยู่) เศษแบบนั้นไม่มีเสียงสะอาดถึง 1.5 วิ จึงไม่ใช่คน
+    audio = _write_enroll_wav(tmp_path, seconds=40.0)
+    pipeline = _pipeline_returning(
+        [
+            {"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"},
+            {"start": 12.8, "end": 13.3, "speaker": "SPEAKER_01"},
+        ]
+    )
+
+    result = analyze(audio, pipeline=pipeline, model="m", embedder=_FakeEmbedder())
+
+    assert result["status"] == "ok"
+    assert result["speaker_count"] == 1
+    assert result["ignored_short_labels"] == 1
+
+
+def test_analyze_still_rejects_a_clip_with_a_real_second_speaker(tmp_path):
+    # คนที่สองที่พูดสะอาด 5 วินาทีต้องยังถูกจับได้ -- นี่คือสิ่งที่ด่านนี้มีไว้กันจริง ๆ
+    audio = _write_enroll_wav(tmp_path, seconds=40.0)
+    pipeline = _pipeline_returning(
+        [
+            {"start": 0.0, "end": 20.0, "speaker": "SPEAKER_00"},
+            {"start": 25.0, "end": 30.0, "speaker": "SPEAKER_01"},
+        ]
+    )
+
+    result = analyze(audio, pipeline=pipeline, model="m", embedder=_FakeEmbedder())
+
+    assert result == {**result, "status": "rejected", "reason": "multiple_speakers"}
+    assert result["speaker_count"] == 2
+
+
+def test_analyze_stamps_the_embedding_model_it_actually_used(tmp_path):
+    # ต้องเป็นชื่อจาก embedder ที่คำนวณจริง ไม่ใช่ค่าใน config ตอนกดยืนยันทีหลัง
+    audio = _write_enroll_wav(tmp_path, seconds=40.0)
+    pipeline = _pipeline_returning([{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}])
+
+    result = analyze(audio, pipeline=pipeline, model="diar-model", embedder=_FakeEmbedder())
+
+    assert result["embedding_model"] == "pyannote/wespeaker-voxceleb-resnet34-LM"
+    assert result["model"] == "diar-model"
+    assert result["segment_count"] == 1
+    assert result["embedding_seconds"] == 30.0
+
+
+def test_analyze_rejects_a_clip_too_short_before_looking_at_vectors(tmp_path):
+    # ไฟล์ที่ไม่มีเสียงพูดเลยต้องได้เหตุผลที่ผู้ใช้ทำตามได้ ไม่ใช่ภาษาของระบบ
+    audio = _write_enroll_wav(tmp_path, seconds=40.0)
+    pipeline = _pipeline_returning([{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"}])
+
+    result = analyze(audio, pipeline=pipeline, model="m", embedder=_FakeEmbedder())
+
+    assert result["reason"] == "too_short"
+
+
+def test_analyze_reports_unusable_embedding_when_extraction_produces_nothing(tmp_path):
+    audio = _write_enroll_wav(tmp_path, seconds=40.0)
+    pipeline = _pipeline_returning([{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00"}])
+
+    class _DeadEmbedder:
+        checkpoint = "e"
+
+        def __call__(self, waveform, intervals):
+            return [None for _ in intervals]
+
+    result = analyze(audio, pipeline=pipeline, model="m", embedder=_DeadEmbedder())
+
+    assert result["reason"] == "unusable_embedding"
 
 
 def make_audio(tmp_path, name="สมชาย.ogg"):

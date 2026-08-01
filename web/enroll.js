@@ -41,6 +41,10 @@ const UI = {
       "กรุณาย้ายไฟล์ด้วยตัวเอง",
     errName: "ชื่อนี้ใช้ไม่ได้ ลองใหม่",
     errSave: "บันทึกไม่สำเร็จ ไฟล์ยังอยู่ที่เดิม ลองใหม่ได้",
+    // ผลวิเคราะห์ที่มาจากก่อนอัปเดตระบบจำเสียง (หรือถูกแก้มือ) ไม่มีป้ายพื้นที่เวกเตอร์เลย
+    // -- ต้องบอกให้วิเคราะห์ใหม่ ไม่ใช่พูดเหมือนระบบพัง (missing_embedding_model)
+    errMissingEmbeddingModel:
+      "ผลวิเคราะห์นี้มาจากก่อนอัปเดตระบบจำเสียง ไม่มีข้อมูลพอจะบันทึกได้ -- กดวิเคราะห์ไฟล์นี้ใหม่อีกครั้ง",
     errLoad: "โหลดรายการไฟล์ไม่สำเร็จ อาจเป็นเพราะเซิร์ฟเวอร์หยุดทำงานหรือการเชื่อมต่อขาด",
     retry: "ลองใหม่",
     errAction: "การทำงานนี้ไม่สำเร็จ อาจเป็นเพราะการเชื่อมต่อขาด ลองใหม่อีกครั้ง",
@@ -113,6 +117,11 @@ const UI = {
       "enroll\\done\\. Please move it by hand",
     errName: "That name cannot be used, try another",
     errSave: "Could not save. The file is untouched, you can try again",
+    // Analysis results from before the voice-recognition upgrade (or hand-edited) carry
+    // no embedding-space stamp -- say "analyze again", not "system is broken"
+    errMissingEmbeddingModel:
+      "This analysis predates the voice-recognition upgrade and lacks what's needed to save " +
+      "-- analyze this file again",
     errLoad: "Could not load the file list. The server may be down or the connection dropped",
     retry: "Retry",
     errAction: "That did not go through, possibly a dropped connection. Try again",
@@ -330,7 +339,16 @@ function renderFile(file) {
             : fill(t().savedAs, { name: body.name });
         setNotice(text, body.warning !== "archive_failed");
       } else {
-        setNotice(body.error === "bad_name" ? t().errName : t().errSave, false);
+        // finding: missing_embedding_model ต้องได้ข้อความของตัวเอง ไม่ใช่ตกไปที่ errSave
+        // ทั่วไปที่บอกให้ "ลองใหม่" -- กดยืนยันซ้ำไม่มีทางช่วยอะไรเลยตราบใดที่ผลนี้ยังไม่มี
+        // ป้ายพื้นที่เวกเตอร์ ต้องวิเคราะห์ใหม่เท่านั้น
+        const message =
+          body.error === "bad_name"
+            ? t().errName
+            : body.error === "missing_embedding_model"
+            ? t().errMissingEmbeddingModel
+            : t().errSave;
+        setNotice(message, false);
       }
     } catch (err) {
       // fetch เองพังก่อนถึง response ได้ (เน็ตหลุด/เซิร์ฟเวอร์ตาย) -- ต้องไม่ปล่อย

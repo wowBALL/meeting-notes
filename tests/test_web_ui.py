@@ -59,6 +59,72 @@ def test_ui_catalogs_have_the_same_keys_in_both_languages():
 
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _model_ids_offered_by(text: str, as_list: bool = False):
+    """id ของโมเดลจากรายการ models: [...] ของ catalog ภาษาไทย
+
+    as_list=True เมื่อผู้เรียกต้องเห็นรายการซ้ำด้วย (set กลืนมันไป)
+    """
+    block = _extract_object_block(text, "th")
+    models = re.search(r"models: \[(.*?)\n    \]", block, re.DOTALL)
+    assert models, "ไม่พบรายการ models ใน catalog -- โครงสร้าง app.js อาจเปลี่ยนไป"
+    ids = re.findall(r'\["([^"]+)"', models.group(1))
+    return ids if as_list else set(ids)
+
+
+def _model_ids_offered_by_the_bat() -> set[str]:
+    text = (PROJECT_ROOT / "start-meeting.bat").read_text(encoding="utf-8")
+    return set(re.findall(r'set "MODEL_ID=([^"]+)"', text))
+
+
+def test_every_model_the_menus_offer_actually_exists():
+    """เมนูเลือกโมเดลมีอยู่สามที่ (หน้าเว็บ th, หน้าเว็บ en, start-meeting.bat) และไม่มี
+    ที่ไหนเช็คกับ registry เลย -- ชื่อที่พิมพ์ผิดจะเงียบสนิทจนกว่าประชุมจะจบแล้วล้มที่
+    ขั้นสรุป ซึ่งเป็นตอนที่แพงที่สุดที่จะรู้ (อัดใหม่ไม่ได้)
+
+    transcript-only ไม่อยู่ใน PROVIDERS โดยเจตนา มันคือโหมด ไม่ใช่โมเดล (ดู job.py)
+    """
+    from src.job import NO_SUMMARY_MODEL
+    from src.llm import PROVIDERS
+
+    known = set(PROVIDERS) | {NO_SUMMARY_MODEL}
+    from_web = _model_ids_offered_by(APP_JS_PATH.read_text(encoding="utf-8"))
+    from_bat = _model_ids_offered_by_the_bat()
+
+    assert from_web, "ไม่พบ id ของโมเดลใน web/app.js เลย"
+    assert from_bat, "ไม่พบ id ของโมเดลใน start-meeting.bat เลย"
+    assert from_web <= known, f"หน้าเว็บเสนอโมเดลที่ระบบไม่รู้จัก: {from_web - known}"
+    assert from_bat <= known, f"เมนู .bat เสนอโมเดลที่ระบบไม่รู้จัก: {from_bat - known}"
+
+
+def test_both_menus_offer_the_same_models():
+    """เมนูสองที่ต้องเสนอชุดเดียวกัน ไม่งั้นคนที่อัดผ่านหน้าเว็บกับผ่าน .bat จะเลือกได้ไม่เท่ากัน
+    โดยไม่มีอะไรฟ้อง"""
+    web_list = _model_ids_offered_by(APP_JS_PATH.read_text(encoding="utf-8"), as_list=True)
+    from_web, from_bat = set(web_list), _model_ids_offered_by_the_bat()
+
+    assert from_web == from_bat, (
+        f"เว็บมีแต่ .bat ไม่มี={from_web - from_bat} | "
+        f".bat มีแต่เว็บไม่มี={from_bat - from_web}"
+    )
+    # เทียบด้วย set อย่างเดียวมองไม่เห็นรายการที่ซ้ำในเมนูเดียวกัน (จะเรนเดอร์สองแถวบน
+    # หน้าจอ และเทสต์ข้างบนก็ยังผ่าน) -- จับตรงนี้แทน
+    assert len(web_list) == len(from_web), f"หน้าเว็บมีรุ่นซ้ำในเมนู: {web_list}"
+
+
+def test_both_languages_offer_the_same_models():
+    text = APP_JS_PATH.read_text(encoding="utf-8")
+    th_block = _extract_object_block(text, "th")
+    en_block = _extract_object_block(text, "en")
+
+    def ids(block: str) -> list[str]:
+        models = re.search(r"models: \[(.*?)\n    \]", block, re.DOTALL)
+        return re.findall(r'\["([^"]+)"', models.group(1))
+
+    # เทียบเป็น list ไม่ใช่ set: ลำดับที่ต่างกันแปลว่าสองภาษาเห็นเมนูเรียงคนละแบบ
+    assert ids(th_block) == ids(en_block)
 
 
 def test_index_html_has_no_inline_style_block():

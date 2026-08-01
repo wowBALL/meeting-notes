@@ -1,7 +1,7 @@
 import re
 import shutil
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from itertools import count
 from pathlib import Path
 
@@ -34,6 +34,33 @@ _UNNAMED_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-\d{2}$")
 _NAMED_RE = re.compile(r"^(?P<topic>.+)-(\d{2})-(\d{2})-\d{2}$")
 
 
+def recording_day(stem: str, finished_at: datetime) -> date:
+    """วันที่ประชุมนี้ "ถูกอัด" ไม่ใช่วันที่มันถูกประมวลผล
+
+    stem ของประชุมที่ตั้งชื่อมีแค่ HH-MM-SS ไม่มีวันที่ (ดูรูปแบบด้านบน) ของเดิมจึงเติม
+    วันที่ของวันที่รันเข้าไป ซึ่งตรงก็ต่อเมื่อถอดเสียงวันเดียวกับที่อัด -- ไฟล์ที่ค้างข้ามคืน
+    ได้โฟลเดอร์ที่ระบุวันผิดไปเลย (Meet22 อัด 2026-07-31 ได้ชื่อ 2026-08-01)
+
+    `finished_at` คือตอนที่ไฟล์เสียงถูกเขียนเสร็จ ซึ่งก็คือตอนที่ประชุม *จบ* -- การอัดจบ
+    ก่อนเริ่มไม่ได้ ดังนั้นถ้า HH-MM ในชื่อไฟล์ตกหลังเวลานั้น แปลว่ามันเป็นของเมื่อวาน
+    (ประชุมที่คร่อมเที่ยงคืน) กติกาข้อนี้ทำให้ทั้งสองทิศทางถูก ไม่ใช่แค่ทิศที่เพิ่งเจอ
+    """
+    unnamed = _UNNAMED_RE.match(stem)
+    if unnamed:
+        # stem รู้วันของตัวเองอยู่แล้ว ไม่ต้องเดาจากไฟล์
+        return date.fromisoformat(unnamed.group(1))
+    named = _NAMED_RE.match(stem)
+    if not named:
+        # ไฟล์ที่ผู้ใช้หย่อนเข้ามาเอง ไม่มี HH-MM ให้เทียบ เหลือแค่วันของไฟล์
+        return finished_at.date()
+    started = finished_at.replace(
+        hour=int(named.group(2)), minute=int(named.group(3)), second=0, microsecond=0
+    )
+    if started > finished_at:
+        started -= timedelta(days=1)
+    return started.date()
+
+
 def meeting_folder_name(stem: str, today: date) -> str:
     """Build 'YYYY-MM-DD_HH-MM-<topic>' from a recording's file stem."""
     unnamed = _UNNAMED_RE.match(stem)
@@ -61,7 +88,15 @@ def create_meeting_folder(
     collision gets a suffix, which that parser still reads as a title ("test-2").
     """
     today = today or date.today()
-    base = meeting_folder_name(audio_path.stem, today)
+    # วันของไฟล์เสียงเอง ไม่ใช่วันที่รัน -- `today` เหลือไว้เป็นทางถอยเมื่อ stat ไม่ได้
+    # (ไฟล์หายไประหว่างทาง/สิทธิ์ไม่พอ) ซึ่งเสียแค่ความแม่นของวันที่ ไม่ควรล้มทั้งงาน
+    try:
+        finished_at = datetime.fromtimestamp(audio_path.stat().st_mtime)
+    except OSError:
+        day = today
+    else:
+        day = recording_day(audio_path.stem, finished_at)
+    base = meeting_folder_name(audio_path.stem, day)
     for attempt in count(1):
         candidate = meetings_dir / (base if attempt == 1 else f"{base}-{attempt}")
         try:
@@ -87,6 +122,89 @@ def _busiest_first(counts: dict[str, int]) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
+# หัวข้อที่โมเดลเขียนไว้ใน summary แต่ไม่ใช่เนื้อหาการประชุม -- มันคือรายงานคุณภาพของ
+# การถอดเสียง (คำไหนน่าจะเพี้ยน ช่วงไหนควรย้อนไปฟังเอง) ซึ่งเป็นเรื่องของระบบ ไม่ใช่
+# เรื่องที่คนในห้องคุยกัน คนที่เปิด summary.md เพื่อส่งต่อให้หัวหน้าไม่ควรต้องเลื่อนผ่าน
+# สองหัวข้อนี้ทุกครั้ง -- เหตุผลเดียวกับที่ footer ถูกแยกออกมาก่อนหน้านี้
+#
+# ยังให้โมเดลเขียนต่อไปเหมือนเดิม (prompt ไม่เปลี่ยน) แค่ย้ายปลายทางตอนบันทึก:
+# ตัดขั้นตอนที่โมเดลเขียนออกไปเลยแปลว่าไม่มีใครรู้ว่าตรงไหนฟังไม่ชัด ซึ่งแย่กว่ามาก
+#
+# ต้องตรงกับหัวข้อใน prompts/single.md และ prompts/reduce.md เป๊ะ ๆ (ยึด prefix
+# เพราะอันแรกมีวงเล็บต่อท้ายที่โมเดลเขียนไม่เหมือนกันทุกครั้ง)
+TRANSCRIPT_QUALITY_HEADINGS = (
+    "## คำที่น่าจะถอดเพี้ยน",
+    "## จุดที่ควรตรวจเอง",
+)
+
+# ป้ายที่ขั้น map เขียนไว้หน้าบรรทัด (ดู prompts/map.md) แล้วหลุดมาถึง summary.md ทาง
+# หัวข้อไทม์ไลน์ ซึ่งวางสรุปรายช่วงตามที่โมเดลเขียนทุกตัวอักษร -- สองหัวข้อข้างบนคือ
+# ผลของการที่ขั้น reduce ยุบป้ายพวกนี้ให้แล้ว แต่ตัวต้นฉบับในไทม์ไลน์ยังอยู่ครบ
+# คนที่เปิด summary.md จึงยังเจอรายงานคุณภาพเหมือนเดิม แค่เลื่อนลงไปอีกหน่อย
+#
+# เป็นเนื้อหาประเภทเดียวกับ TRANSCRIPT_QUALITY_HEADINGS เป๊ะ ๆ (`[คำเพี้ยน?]` ยุบเป็น
+# "คำที่น่าจะถอดเพี้ยน" และ `[ไม่มั่นใจ]` ยุบเป็น "จุดที่ควรตรวจเอง" ตาม reduce.md:47)
+# ย้ายแค่ฝั่งที่ยุบแล้วโดยทิ้งต้นฉบับไว้ จึงเป็นการแก้ครึ่งเดียว
+#
+# ป้ายอื่น (`[หัวข้อ]` `[ตกลงแล้ว]` `[ต้องทำ]` ฯลฯ) ไม่ย้าย -- พวกนั้นคือเนื้อหาประชุม
+TIMELINE_QUALITY_TAGS = (
+    "[คำเพี้ยน?]",
+    "[ไม่มั่นใจ]",
+)
+
+TIMELINE_QUALITY_HEADING = "## ป้ายคุณภาพที่ค้างอยู่ในไทม์ไลน์รายช่วง"
+
+
+def _split_out_quality_sections(summary_markdown: str) -> tuple[str, list[str]]:
+    """(สรุปที่เหลือ, หัวข้อคุณภาพที่ถูกดึงออกมา)
+
+    เดินทีละบรรทัดแทน regex ด้วยเหตุผลเดียวกับ carryover._section_body: summary.md
+    บน Windows เป็น CRLF และการยึด `$` ทำให้ match พลาดแบบเงียบ ๆ
+
+    หัวข้อที่ไม่มีอยู่ = ข้ามไปเฉย ๆ ไม่ใช่ error: โมเดลอาจไม่เขียนมาให้ครบทุกครั้ง
+    และประชุมที่ถูกสรุปด้วย prompt รุ่นเก่ากว่านี้ก็ไม่มีหัวข้อพวกนี้เลย
+
+    บรรทัดที่ติดป้ายใน TIMELINE_QUALITY_TAGS ถูกดึงออกมาพร้อมหัวข้อ `###` ของช่วงที่มัน
+    อยู่ ไม่ใช่ดึงมากองรวมกัน -- คำที่ถอดเพี้ยนมีค่าตอนย้อนกลับไปฟัง การทิ้งช่วงเวลาไป
+    ทำให้ต้องไล่หาเองว่าคำนั้นอยู่ตรงไหนของไฟล์เสียงยาวสองชั่วโมงครึ่ง
+    """
+    lines = summary_markdown.splitlines()
+    kept: list[str] = []
+    pulled: list[str] = []
+    current: list[str] | None = None
+    tagged: list[str] = []
+    section: str | None = None
+    labelled: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            # ปิดหัวข้อคุณภาพที่กำลังเก็บอยู่ (ถ้ามี) ก่อนตัดสินใจเรื่องหัวข้อใหม่
+            current = None
+            section = None
+            if any(stripped.startswith(h) for h in TRANSCRIPT_QUALITY_HEADINGS):
+                current = []
+                pulled.append(current)
+        elif stripped.startswith("### "):
+            section = stripped
+        # ป้ายที่อยู่ใต้หัวข้อคุณภาพอยู่แล้วไม่ต้องดึงซ้ำ มันกำลังจะถูกย้ายทั้งหัวข้อ
+        if current is None and stripped.startswith(TIMELINE_QUALITY_TAGS):
+            if section is not None and section != labelled:
+                if tagged:
+                    tagged.append("")
+                tagged.append(section)
+                labelled = section
+            tagged.append(stripped)
+            continue
+        if current is not None:
+            current.append(line)
+        else:
+            kept.append(line)
+    blocks = ["\n".join(block).strip() for block in pulled]
+    if tagged:
+        blocks.append(f"{TIMELINE_QUALITY_HEADING}\n\n" + "\n".join(tagged))
+    return "\n".join(kept).strip(), [b for b in blocks if b]
+
+
 def save_summary(
     meeting_dir: Path,
     summary_markdown: str,
@@ -94,15 +212,24 @@ def save_summary(
     glossary_counts: dict[str, int] | None = None,
     fuzzy_seen: dict[str, int] | None = None,
     profile: str | None = None,
+    speaker_table: str | None = None,
 ) -> Path:
     # `model` is required, not optional: the point of choosing a model per meeting
     # is being able to judge afterwards whether the pricier one was worth it, and
-    # a summary.md with no attribution cannot be judged at all.
+    # summary.meta.md with no attribution cannot be judged at all.
     #
     # อีกสองค่าเป็น optional และจะไม่เขียนบรรทัดอะไรเลยเมื่อว่าง -- คนที่ยังไม่มี
     # glossary.md ต้องได้ไฟล์หน้าตาเดิมเป๊ะ ไม่ใช่บรรทัดเปล่าที่อ่านไม่ได้ความ
+    #
+    # เมตาดาต้า (โมเดล, ประเภทประชุม, คำที่แก้ตาม glossary) แยกไปอยู่ summary.meta.md
+    # คนละไฟล์กับ summary.md โดยเจตนา: summary.md คือของที่ส่งต่อให้คนอ่าน (หัวหน้า,
+    # ทีม) ไม่ควรมีรายละเอียดเชิงเทคนิคของระบบปนอยู่ท้ายไฟล์ -- ดู carryover._profile_of
+    # ที่อ่านค่า "ประเภทประชุม:" จากไฟล์นี้ (ตกกลับไปอ่านจาก summary.md เองถ้าเป็น
+    # ประชุมเก่าก่อนมีไฟล์นี้)
     path = meeting_dir / "summary.md"
-    body = summary_markdown.rstrip("\n")
+    body, quality_sections = _split_out_quality_sections(summary_markdown)
+    path.write_text(f"{body}\n", encoding="utf-8")
+
     footer = [f"สรุปด้วย {model}"]
     if profile:
         # ต้องเห็นย้อนหลังได้ว่าสรุปนี้ใช้กฎชุดไหน -- เผลอกด dev ในประชุมข้ามฝ่ายแล้ว
@@ -117,14 +244,25 @@ def save_summary(
         footer.append(f"แก้คำตาม glossary: {corrected}")
     if fuzzy_seen:
         # "เจอ แต่ไม่ได้แก้" -- ชั้น fuzzy โมเดลเป็นคนตีความ บรรทัดนี้เป็นหลักฐาน
-        # ชิ้นเดียวที่บอกได้ว่าคำไหนเลิกใช้ไปแล้ว จึงควรตัดออกจาก prompt (มันกิน
-        # token ทุกครั้งที่สรุป) ต้องแยกจากบรรทัดบนเพราะความหมายต่างกัน
+        # ชิ้นเดียวที่บอกได้ว่าคำใน fuzzy คำไหนตายแล้วควรลบ ต้องแยกจากบรรทัดบนเพราะ
+        # ความหมายต่างกัน
         seen = ", ".join(
             f"{term} {count} ครั้ง" for term, count in _busiest_first(fuzzy_seen)
         )
         footer.append(f"คำ fuzzy ที่เจอในห้อง: {seen}")
-    joined = "\n".join(footer)
-    path.write_text(f"{body}\n\n---\n{joined}\n", encoding="utf-8")
+    meta_path = meeting_dir / "summary.meta.md"
+    meta = "\n".join(footer)
+    if speaker_table:
+        # ตัวเลขรายผู้พูดเป็นเครื่องมือตัดสินคุณภาพการแยกเสียง ไม่ใช่เนื้อหาประชุม --
+        # เหตุผลเดียวกับ TRANSCRIPT_QUALITY_HEADINGS ส่วนบรรทัดสรุปสั้น ๆ ที่คนอ่านจริง
+        # อยู่บนหัว summary.md แล้ว (render.replace_participants_line)
+        meta += "\n\n" + speaker_table
+    if quality_sections:
+        # บรรทัดสรุปสั้น ๆ อยู่บน หัวข้อยาวอยู่ล่าง คนเปิดไฟล์นี้ส่วนใหญ่มาดูว่าใช้โมเดล
+        # อะไร ไม่ใช่มาอ่านรายงานคุณภาพ -- สิ่งที่ถูกถามบ่อยกว่าควรอยู่บรรทัดแรก
+        meta += "\n\n" + "\n\n".join(quality_sections)
+    meta_path.write_text(meta + "\n", encoding="utf-8")
+
     return path
 
 

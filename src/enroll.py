@@ -19,8 +19,15 @@ from typing import Any
 
 from src.audio_convert import convert_to_wav
 from src.diarize import diarize_audio
-from src.speakers import MIN_SPEAKING_SECONDS, clean_name, is_usable_embedding
+from src.speakers import (
+    MIN_SPEAKING_SECONDS,
+    as_number,
+    as_str,
+    clean_name,
+    drop_numeric_vectors,
+)
 from src.storage import replace_with_retry
+from src.voiceprint import clean_intervals, extract_voiceprints, select_intervals
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +132,19 @@ def _seconds_by_speaker(turns: list[dict]) -> dict[str, float]:
     return seconds
 
 
-def analyze(audio_path: Path, pipeline: Any, model: str) -> dict:
+def analyze(audio_path: Path, pipeline: Any, model: str, embedder) -> dict:
     """ไฟล์เสียงหนึ่งไฟล์ -> ผลที่พร้อมเขียนลง <ชื่อ>.result.json
 
-    `model` คือชื่อ checkpoint ที่ `pipeline` ถูกโหลดมา -- ถูกบันทึกไปกับผลเพื่อให้
-    ตัวอย่างที่ถูกเก็บเข้าทะเบียนทีหลังติดป้ายโมเดลที่สร้างมันจริง ๆ ไม่ใช่โมเดลที่
+    `model` คือชื่อ checkpoint ที่ `pipeline` (แยกผู้พูด) ถูกโหลดมา -- ถูกบันทึกไปกับผล
+    เพื่อให้ตัวอย่างที่ถูกเก็บเข้าทะเบียนทีหลังติดป้ายโมเดลที่สร้างมันจริง ๆ ไม่ใช่โมเดลที่
     ตั้งอยู่ ณ ตอนที่ผู้ใช้กดยืนยัน (ดู speakers.add_sample) ผลที่วิเคราะห์ค้างไว้ข้าม
     การสลับโมเดลจึงยังผูกกับพื้นที่เวกเตอร์ที่ถูกต้องเสมอ
+
+    `embedder` คือตัวคำนวณ voiceprint จริง (ดู voiceprint.PyannoteEmbedder) -- ผลลัพธ์
+    เก็บ `embedder.checkpoint` ไว้เป็น `embedding_model` เพราะนั่นคือป้ายที่บอกว่า
+    เวกเตอร์นี้อยู่ในพื้นที่ไหนจริง ๆ ไม่ใช่ค่าใน config ตอนที่ผู้ใช้กดยืนยันชื่อทีหลัง
+    (เหตุผลเดียวกับ `model` ด้านบน แต่คนละโมเดลกัน: `model` คือโมเดลแยกผู้พูด ส่วน
+    `embedder.checkpoint` คือโมเดล speaker verification ที่สร้างเวกเตอร์)
 
     รับ pipeline เข้ามาไม่โหลดเอง: ผู้เรียกคือ watcher ซึ่งโหลด pyannote ค้างไว้แล้ว
     และการโหลดซ้ำต่อไฟล์กินเวลา 10-20 วินาทีโดยไม่ได้อะไรกลับมา ผลพลอยได้ที่ตั้งใจ
@@ -167,67 +180,122 @@ def analyze(audio_path: Path, pipeline: Any, model: str) -> dict:
         }
 
     seconds = _seconds_by_speaker(result.turns)
-    # ป้ายที่ pyannote ไม่ได้คำนวณเวกเตอร์ให้ (pad ศูนย์มา ดู speakers.is_usable_embedding)
-    # ไม่ใช่ "คนที่สอง" -- มันคือเศษที่โผล่ทับช่วงที่คนคนเดียวกันกำลังพูดอยู่ วัดจริงกับ
-    # คลิปพูดคนเดียวล้วน 67 วินาที (2026-07-29): ได้ป้ายที่สองยาว 0.5 วินาที ซ้อนอยู่
-    # กลางช่วง 12.8-16.5s ที่ป้ายแรกพูดอยู่ norm ของมันเป็น 0.0000 ขณะที่ป้ายจริงได้ 3.32
-    # การนับมันเป็นคนแปลว่าปฏิเสธไฟล์ที่ถูกต้องทิ้ง ซึ่งเกิดบ่อยพอที่จะทำให้ลงทะเบียน
-    # ไม่สำเร็จสักครั้ง
+    # ตัวนับ "กี่คน" เคยเป็น "label ที่มี centroid ที่ใช้ได้" (pyannote pad ศูนย์เข้ามา
+    # เมื่อจำนวน label มากกว่าจำนวน centroid) ซึ่งไม่มีอีกแล้วหลังย้าย voiceprint ออกจาก
+    # pipeline ไปเป็นโมเดล speaker verification แยกต่างหาก (ดู src/voiceprint.py) --
+    # ตอนนี้คือ "label ที่มีเสียงสะอาดไม่มีใครพูดทับถึง 1.5 วินาที" คำนวณจาก turns ล้วน
+    # ไม่ผ่านโมเดล embedding เลย จึงไม่ปนกับความสำเร็จของการ extract ด้านล่าง
     #
-    # นี่ไม่ใช่การผ่อนด่าน multiple_speakers: เสียงคนอื่นที่ปนมาจริงมีเวกเตอร์ของตัวเอง
-    # (norm ระดับเดียวกับป้ายจริง) จึงยังถูกนับและยังถูกปฏิเสธเหมือนเดิมทุกประการ ป้ายที่
-    # ไม่มีเวกเตอร์ต่างหากที่เอาไปทำอะไรต่อไม่ได้อยู่แล้ว -- เก็บไว้นับก็ได้แค่ปฏิเสธของดี
-    #
-    # จงใจไม่ตัดป้ายที่ "พูดสั้นกว่า N วินาที" ทิ้งไปด้วย ทั้งที่เศษพวกนี้มักสั้น: เกณฑ์
-    # เวลาจะกลืนคนที่สองที่พูดจริงแค่แวบเดียวไปด้วย ซึ่งเป็นการผ่อนด่านของจริง ส่วนเกณฑ์
-    # "ไม่มีเวกเตอร์" ไม่กลืนใครเลยเพราะคนที่พูดจริงย่อมมีเวกเตอร์เสมอ
-    usable = {
-        label: total
-        for label, total in seconds.items()
-        if is_usable_embedding(result.embeddings.get(label))
-    }
-    ignored = len(seconds) - len(usable)
-    if ignored:
+    # คอมเมนต์เดิมที่นี่ห้ามใส่เกณฑ์เวลาไว้ที่ด่านนี้ เพราะกลัวกลืนคนที่สองที่พูดจริงแค่
+    # แวบเดียว -- เหตุผลนั้นหมดอายุแล้ว: สิ่งที่ด่านนี้มีไว้กันคือ voiceprint ที่ปนเสียง
+    # คนอื่น และการตัดช่วงทับ (clean_intervals) + ทิ้งท่อนสั้นกว่า 1.5 วิ (select_intervals)
+    # กันตรงนั้นตรง ๆ อยู่แล้วโดยไม่ต้องพึ่งด่านนี้เลย คนที่สองที่พูดสะอาด 5 วินาทีขึ้นไป
+    # ยังมีคีย์ในผลลัพธ์และยังถูกนับเป็นคน ยังถูกปฏิเสธเหมือนเดิมทุกประการ ที่หลุดผ่าน
+    # ด่านนี้ไปได้คือคนที่พูดทับคนอื่นตลอดหรือพูดสั้นกว่า 1.5 วินาที ซึ่งเสียงของเขาไม่เคย
+    # เข้าไปอยู่ใน voiceprint อยู่แล้วไม่ว่าด่านนี้จะนับเขาเป็นคนหรือไม่
+    usable_labels = select_intervals(clean_intervals(result.turns))
+    ignored = len(seconds) - len(usable_labels)
+    if ignored > 0:
         logger.info(
-            "ข้ามป้ายผู้พูดที่ไม่มีเวกเตอร์ %d ป้ายในไฟล์ %s (เหลือ %d ป้ายที่นับเป็นคนจริง)",
+            "ข้ามป้ายผู้พูดที่ไม่มีเสียงสะอาดยาวพอ %d ป้ายในไฟล์ %s (เหลือ %d ป้ายที่นับเป็นคนจริง)",
             ignored,
             audio_path.name,
-            len(usable),
+            len(usable_labels),
         )
 
     base = {
         "suggested_name": suggested_name,
-        "speaker_count": len(usable),
+        "speaker_count": len(usable_labels),
         # นับเวลาจากทุกป้าย ไม่ใช่เฉพาะที่นับเป็นคน: เศษที่ถูกข้ามไปทับอยู่บนช่วงที่คน
-        # จริงพูดอยู่แล้ว (วัดได้: 14.6-15.1s ซ้อนใน 12.8-16.5s) เวลานั้นจึงเป็นเสียงของ
-        # คนนั้นจริง ๆ ตัดออกเท่ากับรายงานต่ำกว่าความจริง -- และที่สำคัญกว่านั้น ถ้านับ
-        # เฉพาะป้ายที่ใช้ได้ ไฟล์ที่มีคนพูด 45 วินาทีแต่เวกเตอร์เสียจะรายงานเป็น 0.0
-        # วินาที แล้วตกด้วยเหตุผล "สั้นเกินไป" ซึ่งเป็นคำอธิบายที่ผิดและแก้ตามไม่ได้
+        # จริงพูดอยู่แล้ว เวลานั้นจึงเป็นเสียงของคนนั้นจริง ๆ ตัดออกเท่ากับรายงานต่ำกว่า
+        # ความจริง -- และที่สำคัญกว่านั้น ถ้านับเฉพาะป้ายที่ใช้ได้ ไฟล์ที่มีคนพูด 45
+        # วินาทีแต่ extract เสียจะรายงานเป็น 0.0 วินาที แล้วตกด้วยเหตุผล "สั้นเกินไป"
+        # ซึ่งเป็นคำอธิบายที่ผิดและแก้ตามไม่ได้
         "speaking_seconds": round(sum(seconds.values()), 1),
     }
-    if ignored:
-        base["ignored_empty_labels"] = ignored
+    if ignored > 0:
+        base["ignored_short_labels"] = ignored
 
-    if len(usable) > 1:
+    if len(usable_labels) > 1:
         return {**base, "status": "rejected", "reason": "multiple_speakers"}
     # เรียงก่อน unusable_embedding โดยเจตนา: ไฟล์ที่ไม่มีเสียงพูดเลย (0.0 วินาที) ต้อง
     # ได้เหตุผล "สั้นเกินไป" ซึ่งผู้ใช้ทำตามได้ ไม่ใช่ "เวกเตอร์ใช้ไม่ได้" ที่เป็นภาษา
     # ของระบบและไม่บอกว่าต้องทำอะไรต่อ
     if base["speaking_seconds"] < MIN_SPEAKING_SECONDS:
         return {**base, "status": "rejected", "reason": "too_short"}
-    # มีเสียงพูดยาวพอ แต่ไม่มีป้ายไหนมีเวกเตอร์ให้เก็บเลย
-    if not usable:
+    # มีเสียงพูดยาวพอ แต่ไม่มีป้ายไหนมีเสียงสะอาดพอจะนับเป็นคนเลย
+    if not usable_labels:
         return {**base, "status": "rejected", "reason": "unusable_embedding"}
 
-    # ผ่านตัวกรอง usable มาแล้ว จึงการันตีว่าใช้ได้ ไม่ต้องเช็คซ้ำอีกชั้น (การเช็คซ้ำ
-    # ตรงนี้จะเป็นโค้ดที่ไม่มีวันทำงาน ซึ่งอ่านเหมือนมีการป้องกันทั้งที่ไม่มี)
-    embedding = result.embeddings[next(iter(usable))]
+    # ด่านนับคนใช้ turns ล้วน ไม่รู้จักโมเดล embedding เลย -- การคำนวณเวกเตอร์จริง (ซึ่ง
+    # พึ่ง GPU/โมเดลภายนอก) จึงเพิ่งเริ่มตรงนี้ และยังพังได้อิสระจากด่านข้างบน แปลงเป็น
+    # wav อีกครั้งเป็นครั้งที่สอง (ครั้งแรกอยู่ในบล็อก diarize ด้านบน) แทนที่จะรวมเป็น
+    # ครั้งเดียว: ffmpeg บนไฟล์ enroll สั้น ๆ ราคาไม่กี่ร้อย ms ส่วนการรวมเป็นครั้งเดียว
+    # ต้องขยายอายุของ TemporaryDirectory ให้ครอบทั้งฟังก์ชัน ซึ่งจะทำให้ path การ reject
+    # ทุกทางด้านบน (multiple_speakers/too_short/unusable_embedding) ถือ temp dir ไว้โดย
+    # ไม่จำเป็น -- ถ้าวัดแล้วช้าจริงค่อยรวมทีหลัง
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        wav_path = Path(tmp_dir) / f"{audio_path.stem}.wav"
+        try:
+            convert_to_wav(audio_path, wav_path)
+        except Exception as e:
+            # finding 4 ของรีวิวรอบนี้: การแปลงรอบสองนี้คือ convert_to_wav ตัวเดียวกับรอบแรก
+            # เป๊ะ ๆ (ถอดรหัส container เดิมด้วย ffmpeg ตัวเดียวกัน) ต่างกันแค่เวลาที่เรียก --
+            # สาเหตุที่มันพังจึงเป็นสาเหตุเดียวกับตอนพังรอบแรกทุกประการ (ffmpeg ถอดรหัสไม่ได้/
+            # ไฟล์เสีย) เดิมโค้ดตรงนี้ปนอยู่ในบล็อกเดียวกับ extract_voiceprints แล้วรายงาน
+            # "unusable_embedding" ซึ่งบอกผู้ใช้ผิด ๆ ว่า "ลองอัดใหม่ให้เสียงชัดกว่านี้" ทั้งที่
+            # ปัญหาคือแปลงไฟล์ไม่ได้ เหมือนรอบแรกที่รายงาน "analysis_failed" -- เหตุเดียวกัน
+            # ต้องได้เหตุผลเดียวกัน แยก try นี้ออกมาต่างหากจาก extract_voiceprints ด้านล่าง
+            logger.warning(
+                "แปลงเสียงของ %s เป็น wav ไม่สำเร็จ (รอบที่สอง ก่อนสร้าง voiceprint): %s",
+                audio_path.name,
+                e,
+            )
+            return {
+                **base,
+                "status": "rejected",
+                "reason": "analysis_failed",
+                "detail": str(e),
+            }
+        try:
+            voiceprints = extract_voiceprints(wav_path, result.turns, embedder)
+            # finding 3 ของรีวิวรอบนี้: เดิม embedder.checkpoint ถูกอ่านนอก try ทั้งหมด (ตอน
+            # ประกอบผล "ok" ด้านล่าง) -- embedder ที่ใช้งานได้ปกติทุกอย่างแต่ไม่มี attribute นี้
+            # ทำให้ analyze() raise AttributeError หลุดออกไปตรง ๆ ทั้งที่ docstring ของ
+            # ฟังก์ชันนี้เองสัญญาไว้ว่าไม่ raise ไม่ว่าเกิดอะไรขึ้น เพราะผู้เรียกคือ watcher ที่
+            # ไม่มีมนุษย์นั่งดูอยู่ -- ไฟล์ผลที่ไม่ถูกเขียนเลยคือหน้าเว็บค้างที่ "กำลังวิเคราะห์"
+            # ตลอดกาล อ่านมันไว้ในนี้ ในโซนที่มี except คุ้มกันอยู่แล้ว แทนที่จะอ่านทีหลังตอน
+            # ไม่มีการ์ดอะไรคุ้มกันเลย
+            embedding_model = embedder.checkpoint
+        except Exception as e:
+            logger.warning("สร้าง voiceprint ของ %s ไม่สำเร็จ: %s", audio_path.name, e)
+            return {**base, "status": "rejected", "reason": "unusable_embedding"}
+
+    voiceprint = voiceprints.get(next(iter(usable_labels)))
+    if voiceprint is None:
+        return {**base, "status": "rejected", "reason": "unusable_embedding"}
+
+    # finding 1 (ตัดสินใจแล้วโดยเจ้าของโปรเจกต์): MIN_SPEAKING_SECONDS เดิมผูกกับเวลาพูด
+    # ทั้งหมดได้จริง เพราะเวกเตอร์เคยมาจาก centroid ที่ครอบคลุมเสียงพูดทั้งหมดของคนคนนั้น --
+    # ตอนนี้เวกเตอร์มาจากเฉพาะช่วงสะอาดที่ select_intervals คัดแล้วเท่านั้น ซึ่งเป็นเซตย่อย
+    # ของเวลาพูดทั้งหมดเสมอ ไฟล์ที่มี speaking_seconds ผ่านด่านข้างบน (>=10) จึงยังมีทางได้
+    # เวกเตอร์จากเสียงแค่ไม่กี่วินาที (ทำซ้ำจาก: turns เก้าท่อน 1.0 วิ บวกอีกหนึ่งท่อน 2.0 วิ
+    # -- speaking_seconds 11.0 ผ่านด่าน แต่ embedding_seconds เหลือแค่ 2.0) กฎ 10 วินาทีเดิม
+    # จึงต้องถูกนำมาใช้กับเสียงที่ *เข้าไปในเวกเตอร์จริง* (voiceprint.seconds) ด้วย ไม่ใช่แค่
+    # เวลาพูดทั้งหมดอีกต่อไป -- นี่คือสิ่งที่กฎ 10 วินาทีพยายามพูดมาตลอด ใช้ค่าคงที่ตัวเดิม
+    # ไม่เพิ่มตัวที่สอง สำหรับคลิปพูดคนเดียว เสียงสะอาดกับเวลาพูดทั้งหมดใกล้เคียงกันจนแทบไม่
+    # กระทบ ส่วนคลิปที่ส่วนใหญ่พูดทับกัน ด่านนี้จะปฏิเสธถูกต้อง
+    if voiceprint.seconds < MIN_SPEAKING_SECONDS:
+        return {**base, "status": "rejected", "reason": "too_short"}
 
     return {
         **base,
         "status": "ok",
         "model": model,
-        "embedding": [float(value) for value in embedding],
+        "embedding_model": embedding_model,
+        "embedding": list(voiceprint.embedding),
+        "embedding_seconds": voiceprint.seconds,
+        "segment_count": voiceprint.segment_count,
     }
 
 
@@ -754,11 +822,55 @@ def archive(base_dir: Path, audio_file: str) -> Path | None:
     return candidate
 
 
+_RESULT_LEAF_TYPES = {
+    "status": as_str,
+    "reason": as_str,
+    "speaking_seconds": as_number,
+    "speaker_count": as_number,
+    "suggested_name": as_str,
+}
+"""ชื่อคีย์ที่ยอมให้ออกจาก result.json *และ* ชนิดของค่าที่แต่ละคีย์ประกาศไว้
+
+allowlist ไม่ใช่ denylist: เดิม list_entries ตัดแค่คีย์ "embedding" ทิ้ง (denylist ตัวเดียว)
+ซึ่งเป็นรูรั่วเมื่อ result.json (แก้มือได้ตามดีไซน์ของโปรเจกต์นี้) มีเวกเตอร์แอบอยู่ใต้ชื่อคีย์
+อื่น (เช่น "embedding_backup") -- คีย์นั้นจะหลุดผ่าน denylist ไปเงียบ ๆ รายการข้างบนคือทุกคีย์
+ของ result ที่ web/enroll.js อ่านจริง (ดู renderFile/chipFor ใน enroll.js) คีย์อื่นของ analyze()
+(model, embedding_model, embedding, embedding_seconds, segment_count, detail,
+ignored_short_labels) เป็นของฝั่งเซิร์ฟเวอร์ล้วน ไม่มีเหตุผลต้องออกไปเลย
+
+รีวิวรอบที่หก: allowlist ชื่อคีย์ยังอยู่ครบ (มันคือชุดคีย์ของ dict นี้) แต่ตอนนี้แต่ละคีย์
+พก *ชนิดของค่า* มาด้วย และค่าที่ไม่ใช่ชนิดนั้นถูกทิ้ง ไม่ใช่ปล่อยผ่าน -- ห้ารอบก่อนหน้าไล่ปิด
+ทีละแกน (ชื่อคีย์ -> ความลึก -> ค่าของคีย์ใน allowlist -> รูปทรง) แล้วโดนแกนใหม่ทุกครั้ง
+รูปทรงก็เป็นแกนที่ห้าเช่นกัน ไม่ใช่ค่าคงที่ของข้อมูล (ดู docstring ของ
+speakers.drop_numeric_vectors สำหรับหกรูปแบบที่ทำซ้ำได้จริง) การประกาศชนิดของใบเป็นแกนเดียว
+ที่คนแก้ไฟล์เลือกไม่ได้ เพราะเวกเตอร์ไม่ใช่ str และไม่ใช่ตัวเลขเดี่ยว ไม่ว่าจะห่อมาแบบไหน
+
+*ทิ้ง* คีย์ทิ้งเมื่อชนิดไม่ตรง ไม่ใช่ส่ง None ออกไป -- ต่างจากฝั่งคิวใน session_service ที่
+เลือก None เพราะ enroll.js เช็คด้วย `!== undefined` ตรง ๆ สองที่ (speaking_seconds และ
+speaker_count ดู renderFile) การส่ง null ออกไปจะทำให้หน้าเว็บพิมพ์ "พูดไป null วินาที" แทนที่
+จะข้ามบรรทัดนั้นไปเงียบ ๆ ซึ่งเป็นทางที่หน้านั้นรองรับอยู่แล้วสำหรับผลที่ยังไม่มีค่านั้น
+เช่นเดียวกับ status/reason ที่ chipFor/renderFile ถือว่า "ไม่มี" = ยังไม่ผ่าน และ
+suggested_name ที่ถ้าทิ้งของปลอมไป ค่าที่เซิร์ฟเวอร์คำนวณจากชื่อไฟล์เองจะรอดไม่ถูกทับ
+"""
+
+
 def list_entries(base_dir: Path) -> list[dict]:
     """ทุกไฟล์ที่รอลงทะเบียน พร้อมสถานะ ในรูปที่ส่งออกหน้าเว็บได้
 
-    ตัด embedding ออกเสมอแบบเดียวกับ session_service._public_speaker -- หน้าเว็บไม่ได้ใช้
-    และเวกเตอร์เสียงเป็นข้อมูล biometric ที่ไม่ควรมีสำเนาเพิ่มในที่ที่ไม่จำเป็น
+    รีวิวรอบที่หก: allowlist ยังอยู่ แต่ตอนนี้ทุกใบ *ประกาศชนิด* ไว้แล้วบังคับตามนั้น
+    (ดู _RESULT_LEAF_TYPES ด้านบน) -- การกรองด้วยรูปทรงของรอบที่ห้าแพ้ให้รูปทรงที่ไม่ใช่
+    "list ตัวเลขล้วน" ตั้งแต่ตัวแปรที่สองที่ลอง เพราะรูปทรงเป็นแกนที่คนแก้ result.json
+    เลือกได้ ไม่ใช่ค่าคงที่ของข้อมูล drop_numeric_vectors ยังถูกเรียกอยู่ในฐานะชั้นรอง
+
+    ผลจาก result.json ถูกกรองผ่าน _RESULT_LEAF_TYPES (allowlist) ก่อนออกไปเสมอ --
+    หน้าเว็บไม่ได้ใช้เวกเตอร์เสียง และมันเป็นข้อมูล biometric ที่ไม่ควรมีสำเนาเพิ่มในที่ที่
+    ไม่จำเป็น เดิมใช้ denylist (ตัดแค่คีย์ "embedding" ทิ้ง) ซึ่งกันได้แค่คีย์ชื่อนั้นเป๊ะ ๆ
+
+    finding 1 ของรีวิวรอบที่ห้า: allowlist ชื่อคีย์อย่างเดียวยังไม่พอ เพราะมันกรอง "ชื่อ" แล้ว
+    คืน "ค่า" ดิบ ๆ -- เวกเตอร์ที่ถูกวางเป็นค่าของ speaking_seconds/speaker_count/
+    suggested_name หรือเป็นซับทรีทั้งก้อนใต้ reason จึงหลุดออกไปได้ทั้งที่ allowlist ทำงาน
+    ถูกทุกประการ ตอนนี้ทุกอย่างผ่าน speakers.drop_numeric_vectors ซึ่งกรองด้วยรูปทรงของค่า
+    ไม่ใช่ชื่อคีย์ (ดู docstring ของมันสำหรับประวัติสี่รอบก่อนหน้า)
 
     กวาด sidecar กำพร้าทิ้งทุกครั้งที่เรียก (finding 1) เพราะจุดนี้กำลังแจกแจงโฟลเดอร์
     enroll/ อยู่แล้ว และเป็นจุดที่หน้าเว็บ poll ถี่ที่สุด
@@ -800,11 +912,22 @@ def list_entries(base_dir: Path) -> list[dict]:
             request_queued = False
         result = read_result(base_dir, audio_file)
         if result is not None:
+            # finding 1 ของรีวิวรอบที่ห้า: กรองด้วยรูปทรงตั้งแต่ตรงนี้ ก่อน allowlist ชื่อคีย์
+            # ด้านล่าง ไม่ใช่หลัง -- ทำหลังจะได้ผลเหมือนกันเรื่องเวกเตอร์ แต่จะทิ้ง
+            # suggested_name ที่ถูกต้อง (มาจากชื่อไฟล์ ดู entry ด้านล่าง) ให้กลายเป็นช่องว่าง
+            # เมื่อ result.json ที่ถูกแก้มือเอาเวกเตอร์มาทับคีย์เดียวกัน กรองก่อนแล้ว update
+            # จึงไม่มีอะไรมาทับ ค่าที่เซิร์ฟเวอร์คำนวณเองรอด
+            result = drop_numeric_vectors(result)
             state = "done"
         elif request_queued:
             state = "queued"
         else:
             state = "idle"
+        # สี่ใบนี้ประกอบขึ้นบนเซิร์ฟเวอร์ล้วน ไม่ได้มาจากไฟล์ที่แก้มือได้: audio_file คือ
+        # path.name (str) state เป็นสตริงคงที่สามค่า size_bytes คือ st_size (int) และ
+        # suggested_name มาจาก suggested_name_from() ชนิดของทั้งสี่จึงถูกการันตีตั้งแต่ตอน
+        # สร้าง ไม่ต้องมีตัวบังคับซ้ำ -- เขียนไว้ให้ชัดเพื่อไม่ให้อ่านเหมือนว่ามันหลุดการ
+        # ตรวจไป (ต่างจากค่าที่มาจาก result.json ด้านล่างซึ่งต้องบังคับชนิดจริง ๆ)
         entry = {
             "audio_file": audio_file,
             "state": state,
@@ -812,10 +935,22 @@ def list_entries(base_dir: Path) -> list[dict]:
             "suggested_name": suggested_name_from(audio_file),
         }
         if _consume_changed_marker(base_dir, audio_file):
+            # ธงนี้ enroll.js อ่านด้วย `if (file.changed_during_analysis)` และเซิร์ฟเวอร์
+            # ใส่คีย์นี้เฉพาะตอนเป็นจริงเท่านั้นมาแต่ไหนแต่ไร -- ค่าเป็น bool ตายตัวตรงนี้
             entry["changed_during_analysis"] = True
         if result is not None:
-            entry.update(
-                {key: value for key, value in result.items() if key != "embedding"}
-            )
-        entries.append(entry)
+            # allowlist ชื่อคีย์ + บังคับชนิดของค่า ในลูปเดียวกัน (ดู _RESULT_LEAF_TYPES)
+            # ชนิดไม่ตรง = ไม่มีคีย์นั้นเลย ซึ่งเป็นรูปร่างเดียวกับ "ผลยังไม่มีค่านี้" ที่
+            # enroll.js รองรับอยู่แล้ว -- ไม่ใช่ None ที่หน้าเว็บจะพิมพ์ออกมาตรง ๆ
+            for key, declared in _RESULT_LEAF_TYPES.items():
+                if key not in result:
+                    continue
+                value = declared(result[key])
+                if value is None:
+                    continue
+                entry[key] = value
+        # ตาข่ายชั้นล่างอีกครั้งบน entry ทั้งก้อน ไม่ใช่แค่ result: คีย์ที่ใครเพิ่มเข้า
+        # _RESULT_LEAF_TYPES ทีหลัง (หรือคีย์ใหม่ที่ประกอบขึ้นตรงนี้) ต้องปลอดภัยเองตั้งแต่
+        # ต้น ไม่ต้องรอให้มีคนมาเขียนชั้นของมันเป็นรีวิวรอบที่หก
+        entries.append(drop_numeric_vectors(entry))
     return entries

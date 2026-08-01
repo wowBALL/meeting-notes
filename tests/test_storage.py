@@ -1,4 +1,5 @@
-from datetime import date
+import os
+from datetime import date, datetime
 from unittest.mock import patch
 
 from src.job import JOB_SUFFIX, read_model, write_job
@@ -7,6 +8,7 @@ from src.storage import (
     create_meeting_folder,
     meeting_folder_name,
     move_to_failed,
+    recording_day,
     save_summary,
     save_transcript,
 )
@@ -35,6 +37,48 @@ def test_folder_name_for_an_unnamed_recording_has_no_topic():
 def test_folder_name_for_a_user_dropped_file_keeps_the_whole_name():
     # no recorder timestamp to parse; just date-stamp whatever was dropped in
     assert meeting_folder_name("weekly-standup", TODAY) == "2026-07-22_weekly-standup"
+
+
+def test_recording_day_is_the_day_it_was_recorded_not_the_day_it_was_processed():
+    # Meet22 was recorded on 07-31 but only reached the watcher on 08-01, and the
+    # folder claimed 08-01. A named stem carries HH-MM-SS and no date, so the day
+    # has to come from the file itself, not from whenever the run happens to be.
+    finished_at = datetime(2026, 7, 31, 22, 46, 0)
+
+    assert recording_day("Meet22-19-59-59", finished_at) == date(2026, 7, 31)
+
+
+def test_recording_day_rolls_back_a_day_when_the_meeting_crossed_midnight():
+    # started 23:30, ffmpeg finished writing at 00:15 the next day. Taking the
+    # file's own day would date the folder a day AFTER the meeting -- the same
+    # class of error, just in the other direction. A recording cannot end before
+    # it starts, so an HH-MM later than the write time belongs to the day before.
+    finished_at = datetime(2026, 8, 1, 0, 15, 0)
+
+    assert recording_day("Retro-23-30-00", finished_at) == date(2026, 7, 31)
+
+
+def test_recording_day_prefers_the_date_an_unnamed_stem_already_carries():
+    # an unnamed stem is "YYYY-MM-DD_HH-MM-SS" -- it knows its own day, so no
+    # guessing from the file is needed or wanted
+    finished_at = datetime(2026, 8, 1, 9, 0, 0)
+
+    assert recording_day("2026-07-24_19-01-45", finished_at) == date(2026, 7, 24)
+
+
+def test_create_meeting_folder_dates_the_folder_from_the_audio_not_the_clock(tmp_path):
+    # the Meet22 bug end to end: recorded 07-31, processed 08-01, folder said 08-01
+    meetings_dir = tmp_path / "meetings"
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    audio_path = inbox / "Meet22-19-59-59.ogg"
+    audio_path.write_bytes(b"")
+    finished_at = datetime(2026, 7, 31, 22, 46, 0).timestamp()
+    os.utime(audio_path, (finished_at, finished_at))
+
+    result = create_meeting_folder(audio_path, meetings_dir, today=date(2026, 8, 1))
+
+    assert result == meetings_dir / "2026-07-31_19-59-Meet22"
 
 
 def test_create_meeting_folder_builds_the_new_format_and_makes_the_dir(tmp_path):
@@ -107,27 +151,163 @@ def test_save_transcript_writes_the_transcript_file(tmp_path):
     assert path.read_text(encoding="utf-8") == "# Transcript"
 
 
-def test_save_summary_writes_the_summary_file_with_the_model_footer(tmp_path):
+def test_save_summary_writes_the_summary_file_without_metadata(tmp_path):
+    """summary.md คือของที่ส่งต่อให้คนอ่าน -- ต้องไม่มีอะไรของระบบปนอยู่ท้ายไฟล์"""
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
     path = save_summary(meeting_dir, "# Summary", "claude-sonnet-5")
 
     assert path == meeting_dir / "summary.md"
-    assert path.read_text(encoding="utf-8") == (
-        "# Summary\n\n---\nสรุปด้วย claude-sonnet-5\n"
-    )
+    assert path.read_text(encoding="utf-8") == "# Summary\n"
 
 
-def test_save_summary_does_not_stack_blank_lines_before_the_footer(tmp_path):
+def test_save_summary_does_not_stack_blank_lines(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
     path = save_summary(meeting_dir, "# Summary\n\n\n", "claude-opus-5")
 
-    assert path.read_text(encoding="utf-8") == (
-        "# Summary\n\n---\nสรุปด้วย claude-opus-5\n"
-    )
+    assert path.read_text(encoding="utf-8") == "# Summary\n"
+
+
+def test_save_summary_writes_the_model_to_a_separate_meta_file(tmp_path):
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    save_summary(meeting_dir, "# Summary", "claude-sonnet-5")
+
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta == "สรุปด้วย claude-sonnet-5\n"
+
+
+_WITH_QUALITY = """## หัวข้อที่คุยกัน
+- เรื่องที่คุยกัน
+
+## ต้องคุยต่อครั้งหน้า
+- เรื่องค้าง
+
+## คำที่น่าจะถอดเพี้ยน (ยังไม่อยู่ใน glossary)
+- Payload → เดาว่าคือ Payroll (ได้ยิน 6 ครั้ง)
+
+## จุดที่ควรตรวจเอง
+- 08:00-16:20: เสียงทับกัน ควรฟังเอง
+"""
+
+
+def test_the_transcript_quality_sections_leave_the_summary(tmp_path):
+    """สองหัวข้อนี้เป็นรายงานคุณภาพการถอดเสียง ไม่ใช่เรื่องที่คนในห้องคุยกัน
+    คนที่เปิด summary.md เพื่อส่งต่อให้หัวหน้าไม่ควรต้องเลื่อนผ่านมันทุกครั้ง"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, _WITH_QUALITY, "GLM-5.2")
+
+    summary = path.read_text(encoding="utf-8")
+    assert "## คำที่น่าจะถอดเพี้ยน" not in summary
+    assert "## จุดที่ควรตรวจเอง" not in summary
+    assert "Payload" not in summary
+    assert "เสียงทับกัน" not in summary
+    # เนื้อหาการประชุมต้องอยู่ครบเหมือนเดิม
+    assert "## หัวข้อที่คุยกัน" in summary
+    assert "- เรื่องที่คุยกัน" in summary
+
+
+def test_the_transcript_quality_sections_land_in_the_meta_file(tmp_path):
+    """ย้ายที่เก็บ ไม่ใช่ทิ้ง -- ถ้าหายไปเลยจะไม่มีใครรู้ว่าตรงไหนฟังไม่ชัด"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    save_summary(meeting_dir, _WITH_QUALITY, "GLM-5.2")
+
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta.startswith("สรุปด้วย GLM-5.2")
+    assert "## คำที่น่าจะถอดเพี้ยน (ยังไม่อยู่ใน glossary)" in meta
+    assert "- Payload → เดาว่าคือ Payroll (ได้ยิน 6 ครั้ง)" in meta
+    assert "## จุดที่ควรตรวจเอง" in meta
+    assert "- 08:00-16:20: เสียงทับกัน ควรฟังเอง" in meta
+
+
+def test_carryover_still_finds_its_section_after_the_split(tmp_path):
+    """"ต้องคุยต่อครั้งหน้า" ต้องอยู่ใน summary.md ต่อไป -- carryover อ่านจากไฟล์นั้น
+    ถ้าเผลอย้ายไปด้วย ความต่อเนื่องข้ามประชุมจะขาดเงียบ ๆ"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, _WITH_QUALITY, "GLM-5.2", profile="dev")
+
+    summary = path.read_text(encoding="utf-8")
+    assert "## ต้องคุยต่อครั้งหน้า" in summary
+    assert "- เรื่องค้าง" in summary
+
+
+_WITH_TIMELINE_TAGS = """## หัวข้อที่คุยกัน
+- เรื่องที่คุยกัน
+
+## ไทม์ไลน์ตามช่วง
+
+### [00:00–20:00]
+
+[หัวข้อ] อัปเดตงาน Payroll
+[ตกลงแล้ว] ใช้ Final Payslip เป็น source of truth — สรุปโดย: สอง
+[คำเพี้ยน?] PlayLight → เดาว่าคือ Playwright
+[ไม่มั่นใจ] ช่วง 12:30 เสียงทับกัน
+
+### [20:00–40:00]
+
+[หัวข้อ] เรื่อง BMAD
+[คำเพี้ยน?] Bmat → เดาว่าคือ BMAD
+"""
+
+
+def test_the_map_stage_quality_tags_leave_the_summary(tmp_path):
+    """หัวข้อไทม์ไลน์วางสรุปรายช่วงตามที่โมเดลเขียนทุกตัวอักษร ป้ายคุณภาพจึงหลุดมาถึง
+    summary.md ทางนี้ ทั้งที่ฝั่งที่ถูกยุบรวมแล้วถูกย้ายออกไปตั้งแต่ก่อนหน้านี้"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, _WITH_TIMELINE_TAGS, "GLM-5.2")
+
+    summary = path.read_text(encoding="utf-8")
+    assert "[คำเพี้ยน?]" not in summary
+    assert "[ไม่มั่นใจ]" not in summary
+    # ป้ายที่เป็นเนื้อหาประชุมต้องอยู่ครบ ไม่ใช่โดนกวาดไปด้วย
+    assert "[หัวข้อ] อัปเดตงาน Payroll" in summary
+    assert "[ตกลงแล้ว] ใช้ Final Payslip เป็น source of truth — สรุปโดย: สอง" in summary
+    # หัวข้อช่วงต้องยังอยู่ในไทม์ไลน์ แม้บรรทัดใต้มันจะถูกดึงออกไปบางส่วน
+    assert "### [00:00–20:00]" in summary
+    assert "### [20:00–40:00]" in summary
+
+
+def test_the_map_stage_quality_tags_keep_their_time_range_in_the_meta_file(tmp_path):
+    """คำที่ถอดเพี้ยนมีค่าตอนย้อนกลับไปฟัง -- ดึงมากองรวมกันโดยทิ้งช่วงเวลาไป แปลว่า
+    ต้องไล่หาเองว่าคำนั้นอยู่ตรงไหนของไฟล์เสียงยาวสองชั่วโมงครึ่ง"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    save_summary(meeting_dir, _WITH_TIMELINE_TAGS, "GLM-5.2")
+
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "## ป้ายคุณภาพที่ค้างอยู่ในไทม์ไลน์รายช่วง" in meta
+    assert "[คำเพี้ยน?] PlayLight → เดาว่าคือ Playwright" in meta
+    assert "[ไม่มั่นใจ] ช่วง 12:30 เสียงทับกัน" in meta
+    assert "[คำเพี้ยน?] Bmat → เดาว่าคือ BMAD" in meta
+    # แต่ละคำต้องอยู่ใต้ช่วงของตัวเอง ไม่ใช่กองรวมกันหมด
+    first = meta.index("### [00:00–20:00]")
+    second = meta.index("### [20:00–40:00]")
+    assert first < meta.index("PlayLight") < second < meta.index("Bmat")
+
+
+def test_a_summary_without_quality_sections_is_unchanged(tmp_path):
+    """สรุปจาก prompt รุ่นเก่าที่ไม่มีสองหัวข้อนี้ ต้องได้ไฟล์หน้าตาเดิมเป๊ะ"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, "## ประเด็นสำคัญ\n- ทดสอบ", "GLM-5.2")
+
+    assert path.read_text(encoding="utf-8") == "## ประเด็นสำคัญ\n- ทดสอบ\n"
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta == "สรุปด้วย GLM-5.2\n"
 
 
 def test_save_summary_records_glossary_corrections_per_term(tmp_path):
@@ -135,15 +315,15 @@ def test_save_summary_records_glossary_corrections_per_term(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
-    path = save_summary(
+    save_summary(
         meeting_dir,
         "# Summary",
         "GLM-5.2",
         glossary_counts={"PostgreSQL": 3, "Railway": 1},
     )
 
-    text = path.read_text(encoding="utf-8")
-    assert "แก้คำตาม glossary: PostgreSQL 3 จุด, Railway 1 จุด" in text
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 3 จุด, Railway 1 จุด" in meta
 
 
 def test_save_summary_keeps_fuzzy_sightings_on_their_own_line(tmp_path):
@@ -152,7 +332,7 @@ def test_save_summary_keeps_fuzzy_sightings_on_their_own_line(tmp_path):
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
-    path = save_summary(
+    save_summary(
         meeting_dir,
         "# Summary",
         "GLM-5.2",
@@ -160,21 +340,22 @@ def test_save_summary_keeps_fuzzy_sightings_on_their_own_line(tmp_path):
         fuzzy_seen={"Electron": 2},
     )
 
-    text = path.read_text(encoding="utf-8")
-    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in text
-    assert "คำ fuzzy ที่เจอในห้อง: Electron 2 ครั้ง" in text
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "แก้คำตาม glossary: PostgreSQL 1 จุด" in meta
+    assert "คำ fuzzy ที่เจอในห้อง: Electron 2 ครั้ง" in meta
 
 
-def test_save_summary_footer_is_untouched_when_the_glossary_did_nothing(tmp_path):
+def test_save_summary_meta_is_untouched_when_the_glossary_did_nothing(tmp_path):
     """คนที่ยังไม่มี glossary.md ต้องได้ไฟล์หน้าตาเดิมเป๊ะ ไม่มีบรรทัดเปล่าโผล่มา"""
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
     meeting_dir.mkdir(parents=True)
 
-    path = save_summary(
+    save_summary(
         meeting_dir, "# Summary", "GLM-5.2", glossary_counts={}, fuzzy_seen={}
     )
 
-    assert path.read_text(encoding="utf-8") == "# Summary\n\n---\nสรุปด้วย GLM-5.2\n"
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert meta == "สรุปด้วย GLM-5.2\n"
 
 
 def test_archive_audio_moves_the_recording_into_the_meeting_folder(tmp_path):

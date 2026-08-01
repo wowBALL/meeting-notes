@@ -29,6 +29,19 @@ def _wrong_to_correct(mapping: dict[str, list[str]]) -> dict[str, str]:
 
 _HEADER_GROUP = "segment_header"
 
+# งบของ hotwords ที่ส่งให้ faster-whisper วัดกับ tokenizer ของ large-v3 จริง
+# (2026-07-31): glossary.md ของ repo นี้ 76 คีย์ = 832 อักขระ = 277 token ขณะที่
+# get_prompt() ตัดที่ max_length // 2 = 224 token -- ล้นอยู่แล้ววันนี้
+#
+# อัตราที่วัดได้คือ ~3.0 อักขระ/token (ศัพท์เทคนิคอังกฤษปนไทย) 600 อักขระจึงอยู่ราว
+# 200 token เหลือขอบกันไว้ เพราะอัตรานี้เป็นค่าเฉลี่ย คำที่ tokenizer ไม่รู้จักจะกิน
+# token มากกว่านั้นต่ออักขระ
+#
+# นับเป็นอักขระไม่ใช่ token โดยเจตนา: การนับ token ต้องโหลด tokenizer ของโมเดล ซึ่ง
+# ผูกโมดูลนี้เข้ากับ faster-whisper และกับ WHISPER_MODEL ที่เลือกไว้ ทั้งที่ผลต่างกัน
+# แค่จำนวนคำท้าย ๆ ที่รอด -- ของที่ถูกตัดทิ้งอยู่ท้ายลิสต์เสมอไม่ว่าจะนับด้วยหน่วยไหน
+HOTWORDS_MAX_CHARS = 600
+
 
 def _compile(lookup: dict[str, str]) -> re.Pattern | None:
     """regex ตัวเดียวที่ครอบทุกคำผิด -- None เมื่อไม่มีคำเลย
@@ -108,6 +121,49 @@ class Glossary:
         counts: dict[str, int] = {}
         _substitute(text, merged, counts)
         return counts
+
+    def hotwords_text(self) -> str:
+        """คำถูกทั้งหมดคั่นด้วยจุลภาค สำหรับ bias decoder ของ faster-whisper
+
+        ทำงานคนละชั้นกับ apply_exact/format_for_prompt: สองตัวนั้นกู้ตัวอักษร*หลัง*
+        ถอดเสียงเสร็จ ซึ่งกู้ได้แค่ตัวสะกด คำที่ถอดผิดทำให้ Whisper ตัด segment
+        ผิดตำแหน่งไปแล้ว และตัวเลขที่เพี้ยนตามคำผิดก็กู้ไม่ได้เลย
+
+        เอาคีย์ (คำถูก) ของ fuzzy + project-names + exact ไม่เอา aliases:
+        aliases คือชื่อที่คนละฝ่ายเรียกคนละอย่าง ไม่ใช่คำที่ ASR ถอดเพี้ยน
+        การยัดเข้าไปคือเปลือง budget ที่จำกัดมากไปกับคำที่ decoder ไม่เคยพลาด
+
+        ลำดับสำคัญเพราะงบไม่พอใส่ทุกคำ (ของจริงล้น 24 คำ) และของที่ล้นถูกตัดจากท้าย:
+        `fuzzy` กับ `project-names` มาก่อนเพราะไม่มีอะไรกู้ให้เลยหลังถอดเสียง ส่วน
+        `exact` มี apply_exact แทนที่ให้ในโค้ดอยู่แล้ว -- ตอนแรกเรียง exact ก่อนตาม
+        ลำดับ section ในไฟล์ แล้วพบว่าคำที่หลุดคือ branch, Git, production, Role
+        ซึ่งวัดแล้วว่าเป็นคำที่ถอดเพี้ยนบ่อยที่สุดในประชุมจริง
+        """
+        terms: list[str] = []
+        for mapping in (self.fuzzy, self.project_names, self.exact):
+            for correct in mapping:
+                if correct not in terms:
+                    terms.append(correct)
+
+        kept: list[str] = []
+        length = 0
+        for term in terms:
+            # +2 คือ ", " ที่จะตามมา ไม่นับให้กับคำแรก
+            addition = len(term) + (2 if kept else 0)
+            if length + addition > HOTWORDS_MAX_CHARS:
+                break
+            kept.append(term)
+            length += addition
+        if len(kept) < len(terms):
+            logger.info(
+                "hotwords เกินงบ %d อักขระ ใช้ %d คำแรกจาก %d คำ (ตัดท้ายทิ้ง %d คำ) "
+                "-- เรียงคำที่สำคัญที่สุดไว้ต้น glossary.md ถ้าคำที่ต้องการหลุด",
+                HOTWORDS_MAX_CHARS,
+                len(kept),
+                len(terms),
+                len(terms) - len(kept),
+            )
+        return ", ".join(kept)
 
     def format_for_prompt(self, include_cross_team_context: bool = False) -> str:
         """ตารางศัพท์สำหรับยัดเข้า prompt -- สตริงว่างเมื่อไม่มีอะไรจะบอก

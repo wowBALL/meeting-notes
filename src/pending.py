@@ -8,13 +8,26 @@
 service ลบทีละคน สองกระบวนการนี้จึงไม่มีวันแตะไฟล์เดียวกันพร้อมกัน
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from src.speakers import MIN_SPEAKING_SECONDS, REGISTRY_DIRNAME, is_usable_embedding
+from src.speakers import MIN_SPEAKING_SECONDS, REGISTRY_DIRNAME
 from src.storage import replace_with_retry
+
+if TYPE_CHECKING:
+    # ใช้เป็น type annotation อย่างเดียว ไม่มีโค้ดใน runtime แตะคลาสนี้เลย -- import
+    # จริงจะลาก src.voiceprint -> src.waveform -> torch เข้ามา และ session_service
+    # import โมดูลนี้ตอนสตาร์ท ทำให้หน้าเว็บทั้งหน้า (ที่ไม่เคยเรียก pyannote เลย) ต้อง
+    # โหลด torch 500MB ก่อน Flask จะ bind พอร์ต แถม start-ui.bat เรียก
+    # `python -m src.session_service` ตรง ๆ ซึ่งไม่มีบล็อก add_dll_directory ของ
+    # src/main.py -- บนเครื่องที่ DLL ของ torch ไม่ resolve หน้าเว็บจะตายตั้งแต่ import
+    # ทั้งที่เดิมพังแค่ watcher
+    from src.voiceprint import Voiceprint
 
 logger = logging.getLogger(__name__)
 
@@ -62,19 +75,25 @@ def _longest_samples(segments: list[dict], count: int) -> list[dict]:
 def build_pending_speakers(
     merged_segments: list[dict],
     labels: dict[str, str],
-    embeddings: dict[str, list[float]],
+    voiceprints: dict[str, Voiceprint],
     model: str,
+    embedding_model: str,
     matches: dict | None = None,
     min_seconds: float = MIN_SPEAKING_SECONDS,
 ) -> list[dict]:
     """ผู้พูดในการประชุมนี้ที่ควรถามผู้ใช้ว่าเป็นใคร
 
-    ข้ามสามกลุ่ม: คนที่จำได้แล้วอย่างมั่นใจ (ไม่ต้องถามซ้ำ), คนที่ไม่มีเวกเตอร์ที่ใช้ได้
-    (ถามไปก็เก็บเข้าทะเบียนไม่ได้), และคนที่พูดสั้นเกินกว่าจะเชื่อเวกเตอร์ได้
+    ข้ามสามกลุ่ม: คนที่จำได้แล้วอย่างมั่นใจ (ไม่ต้องถามซ้ำ), คนที่ไม่มี voiceprint (ถามไปก็
+    เก็บเข้าทะเบียนไม่ได้), และคนที่พูดสั้นเกินกว่าจะเชื่อเวกเตอร์ได้
 
-    `model` คือโมเดลที่สร้าง `embeddings` ติดไปกับทุกคนในคิว เพราะคิวนี้อยู่ข้ามวันได้
-    ผู้ใช้สลับ DIARIZATION_MODEL ก่อนกลับมากดตั้งชื่อได้ -- ป้ายที่ติดตอนสร้างคิวคือ
-    ป้ายเดียวที่บอกความจริงเรื่องพื้นที่เวกเตอร์ (ดู speakers.add_sample)
+    `model` กับ `embedding_model` ติดไปกับทุกคนในคิว เพราะคิวนี้อยู่ข้ามวันได้และผู้ใช้แก้
+    .env ก่อนกลับมากดตั้งชื่อได้ -- ป้ายที่ติดตอนสร้างคิวคือป้ายเดียวที่บอกความจริงเรื่อง
+    พื้นที่เวกเตอร์ ตัวที่ match ใช้คือ `embedding_model` ส่วน `model` เป็น provenance
+    (ดู speakers.add_sample)
+
+    ไม่เช็ค is_usable_embedding ที่นี่อีกแล้ว: การมี Voiceprint อยู่ในมือคือหลักฐานว่ามันผ่าน
+    ด่านนั้นไปแล้วตอน extract -- การเช็คซ้ำจะเป็นโค้ดที่ไม่มีวันทำงาน ซึ่งอ่านเหมือนมีการ
+    ป้องกันทั้งที่ไม่มี
     """
     matches = matches or {}
     seconds: dict[str, float] = {}
@@ -91,8 +110,8 @@ def build_pending_speakers(
         match = matches.get(key)
         if match is not None and match.confident:
             continue
-        embedding = embeddings.get(key)
-        if not is_usable_embedding(embedding):
+        voiceprint = voiceprints.get(key)
+        if voiceprint is None:
             continue
         if total < min_seconds:
             continue
@@ -101,7 +120,10 @@ def build_pending_speakers(
                 "label": labels.get(key, key),
                 "diarization_id": key,
                 "model": model,
-                "embedding": [float(value) for value in embedding],
+                "embedding_model": embedding_model,
+                "embedding": list(voiceprint.embedding),
+                "embedding_seconds": voiceprint.seconds,
+                "segment_count": voiceprint.segment_count,
                 "speaking_seconds": round(total, 1),
                 "samples": _longest_samples(lines[key], SAMPLE_COUNT),
                 "guess": None,

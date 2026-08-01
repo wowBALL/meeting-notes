@@ -1,7 +1,8 @@
 import logging
+import re
 
 from src.chunk import parse_transcript_segments
-from src.glossary import load
+from src.glossary import HOTWORDS_MAX_CHARS, load
 
 GLOSSARY_SAMPLE = """# Glossary
 
@@ -29,6 +30,71 @@ TEAMS_SAMPLE = """# ฝ่ายของผู้เข้าร่วม
 Business: สมชาย, สุดา
 dev: บอล
 """
+
+
+def test_hotwords_lists_correct_spellings_from_the_sections_whisper_can_be_biased_on(
+    tmp_path,
+):
+    """hotwords ป้อน "คำถูก" ให้ decoder ไม่ใช่ตารางแก้คำ
+
+    `aliases` ไม่เข้าเพราะไม่ใช่คำที่ถอดเพี้ยน -- เป็นชื่อที่คนละฝ่ายเรียกคนละอย่าง
+    การยัดเข้าไปคือเปลือง budget ที่มีจำกัดมากไปกับคำที่ ASR ไม่เคยถอดผิด
+    """
+    glossary_path, teams_path = _write(tmp_path)
+    glossary = load(glossary_path, teams_path)
+
+    text = glossary.hotwords_text()
+
+    assert "PostgreSQL" in text  # exact
+    assert "Railway" in text  # exact
+    assert "Electron" in text  # fuzzy
+    assert "DungImage" in text  # project-names
+    assert "โพสเกรส" not in text  # คำผิดห้ามเข้า decoder
+    assert "ระบบชำระเงิน" not in text  # aliases ไม่ใช่คำถอดเพี้ยน
+
+
+def test_hotwords_spends_the_budget_on_words_the_code_cannot_repair_later(tmp_path):
+    """`fuzzy` ต้องมาก่อน `exact` เมื่องบไม่พอ ไม่ใช่ตามลำดับ section ในไฟล์
+
+    `exact` ถูก apply_exact แทนที่ให้ในโค้ดอยู่แล้วหลังถอดเสียง แต่ `fuzzy` ไม่ถูกแตะ
+    เลย (คำสั้นเกินกว่าจะ substring match ได้อย่างปลอดภัย) -- ถ้ามันถอดเพี้ยน ไม่มี
+    อะไรมากู้ให้ การใช้งบไปกับ `exact` จนคำ `fuzzy` หลุด คือจ่ายให้กลุ่มที่มีตาข่าย
+    รองอยู่แล้ว แล้วปล่อยกลุ่มที่ไม่มีตกพื้น
+
+    เจอจากของจริง: glossary.md ของ repo นี้ล้นงบ 24 คำ และคำที่หลุดคือ branch, Git,
+    production, Role ซึ่งวัดแล้วว่าเป็นคำที่ถอดเพี้ยนบ่อยที่สุดในประชุมจริง
+    """
+    exact_terms = "\n".join(f"ExactTerm{i:03d}: ผิด{i}" for i in range(300))
+    glossary_path, teams_path = _write(
+        tmp_path,
+        glossary=f"## exact\n{exact_terms}\n\n## fuzzy\nElectron: อิเล็กตรอน\n",
+    )
+    glossary = load(glossary_path, teams_path)
+
+    text = glossary.hotwords_text()
+
+    assert "Electron" in text
+
+
+def test_hotwords_stops_at_the_budget_and_only_at_a_term_boundary(tmp_path):
+    """faster-whisper ตัด hotwords ที่ max_length // 2 (~224 token) เงียบ ๆ
+
+    วัดกับ tokenizer ของ large-v3 จริง (2026-07-31): glossary.md ของ repo นี้
+    76 คีย์ = 832 อักขระ = 277 token -- ล้น budget อยู่แล้ววันนี้ ปล่อยให้มันตัดเอง
+    คือปล่อยให้คำท้ายหายแบบไม่มีใครรู้ และตัดกลางโทเคนได้ด้วย ตัดเองที่ขอบคำ
+    จึงคุมได้ว่าคำไหนรอด และคำที่รอดยังเป็นคำเต็มเสมอ
+    """
+    many = "\n".join(f"Term{i:03d}: ผิด{i}" for i in range(300))
+    glossary_path, teams_path = _write(tmp_path, glossary="## exact\n" + many)
+    glossary = load(glossary_path, teams_path)
+
+    text = glossary.hotwords_text()
+
+    assert len(text) <= HOTWORDS_MAX_CHARS
+    assert text.startswith("Term000")
+    assert "Term299" not in text
+    # ทุกคำที่รอดต้องเป็นคำเต็ม ไม่ใช่เศษที่ถูกหั่นกลาง
+    assert all(re.fullmatch(r"Term\d{3}", term) for term in text.split(", "))
 
 
 def _write(tmp_path, glossary=GLOSSARY_SAMPLE, teams=TEAMS_SAMPLE):

@@ -6,6 +6,7 @@ from src.config import (
     DEFAULT_CHUNK_MAX_TOKENS,
     DEFAULT_CHUNK_OVERLAP_TOKENS,
     DEFAULT_DIARIZATION_MODEL,
+    DEFAULT_EMBEDDING_MODEL,
     DEFAULT_SPEAKER_MATCH_HIGH,
     DEFAULT_SPEAKER_MATCH_LOW,
     LEGACY_DIARIZATION_MODEL,
@@ -54,7 +55,7 @@ def test_load_config_reads_required_env_vars(tmp_path, monkeypatch):
     config = load_config(base_dir=tmp_path)
 
     assert config.hf_token == "hf-test-token"
-    assert config.claude_model == "GLM-5.2"
+    assert config.claude_model == "Qwen/Qwen3.6-35B-A3B"
     assert config.whisper_model == "small"
     assert config.inbox_dir == tmp_path / "inbox"
     assert config.failed_dir == tmp_path / "failed"
@@ -148,6 +149,34 @@ def test_an_unreadable_carryover_value_warns_and_keeps_the_default(
     assert "flase" in caplog.text
 
 
+def test_speaker_turn_merging_is_on_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("MERGE_SPEAKER_TURNS", raising=False)
+
+    assert load_config(base_dir=tmp_path).merge_speaker_turns is True
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "off"])
+def test_speaker_turn_merging_can_be_switched_off(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MERGE_SPEAKER_TURNS", value)
+
+    assert load_config(base_dir=tmp_path).merge_speaker_turns is False
+
+
+def test_an_unreadable_merge_value_warns_and_keeps_the_default(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("MERGE_SPEAKER_TURNS", "ture")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(base_dir=tmp_path)
+
+    assert config.merge_speaker_turns is True
+    assert "ture" in caplog.text
+
+
 def test_chunk_overlap_defaults_to_ten_percent_of_a_chunk(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")
     monkeypatch.delenv("CHUNK_OVERLAP_TOKENS", raising=False)
@@ -232,6 +261,77 @@ def test_batched_whisper_can_be_turned_back_on(tmp_path, monkeypatch):
     assert load_config(base_dir=tmp_path).whisper_batched is True
 
 
+def test_hotwords_are_on_after_the_full_file_confirmed_it(tmp_path, monkeypatch):
+    """ยืนยันบนไฟล์เต็ม 84 นาทีแล้ว: ถอดถูก 28.9% -> 54.2% เนื้อหาหายแค่ 3.5%
+    และบรรทัดซ้ำสุด 0.6% (รอบที่พังคือ 98.6%)
+
+    ใช้ได้ก็ต่อเมื่อ whisper_condition_on_previous_text เป็น False เท่านั้น --
+    load_config เตือนเมื่อตั้งคู่ที่อันตราย
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("WHISPER_HOTWORDS", raising=False)
+
+    assert load_config(base_dir=tmp_path).whisper_hotwords is True
+
+
+def test_the_shipped_defaults_are_never_the_pair_that_destroys_transcripts(
+    tmp_path, monkeypatch
+):
+    """กันไว้ตรง ๆ ว่าค่าเริ่มต้นสองตัวจะไม่กลายเป็นคู่ที่พังพร้อมกัน
+
+    คนแก้ค่าใดค่าหนึ่งในอนาคตโดยไม่ได้อ่านคอมเมนต์ของอีกตัว จะทำให้ทุกเครื่องที่ไม่ได้
+    ตั้ง .env เอง ถอดเสียงออกมาเป็นประโยคเดียววนซ้ำทั้งไฟล์
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("WHISPER_HOTWORDS", raising=False)
+    monkeypatch.delenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", raising=False)
+
+    config = load_config(base_dir=tmp_path)
+
+    assert not (config.whisper_hotwords and config.whisper_condition_on_previous_text)
+
+
+def test_hotwords_can_be_turned_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_HOTWORDS", "true")
+
+    assert load_config(base_dir=tmp_path).whisper_hotwords is True
+
+
+def test_conditioning_on_previous_text_is_off_by_default(tmp_path, monkeypatch):
+    """ตัวตัดวงวนซ้ำคำ -- ครึ่งหนึ่งของคู่ที่วัดแล้วว่าได้ผล
+
+    ค่าเริ่มต้นนี้ต่างจาก faster-whisper (ซึ่งเป็น True) โดยเจตนา
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", raising=False)
+
+    assert load_config(base_dir=tmp_path).whisper_condition_on_previous_text is False
+
+
+def test_conditioning_on_previous_text_can_be_turned_back_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", "true")
+
+    assert load_config(base_dir=tmp_path).whisper_condition_on_previous_text is True
+
+
+def test_the_combination_that_destroys_transcripts_warns(tmp_path, monkeypatch, caplog):
+    """hotwords เปิด + conditioning เปิด = เนื้อหาหาย 60-67% (วัดแล้วสองรอบ)
+
+    ไม่ห้าม เพราะเจ้าของเครื่องอาจอยากวัดซ้ำเอง แต่ต้องไม่ใช่กับดักเงียบ -- ตั้งค่านี้
+    ทิ้งไว้แล้วประชุมที่อัดซ้ำไม่ได้จะออกมาพังโดยไม่มีอะไรบอกล่วงหน้า
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("WHISPER_HOTWORDS", "true")
+    monkeypatch.setenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", "true")
+
+    with caplog.at_level(logging.WARNING):
+        load_config(base_dir=tmp_path)
+
+    assert any("HOTWORDS" in record.message for record in caplog.records)
+
+
 def test_load_config_reads_whisper_model_override(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("HF_TOKEN", "hf-test-token")
@@ -286,11 +386,11 @@ def test_load_config_falls_back_when_the_port_is_not_a_number(tmp_path, monkeypa
 
 
 def test_load_config_works_without_an_anthropic_key(tmp_path, monkeypatch):
-    """GLM จะเป็นค่าเริ่มต้น -- คนที่ตั้งเครื่องใหม่ต้องเริ่มงานได้โดยไม่มี key ของ Anthropic
+    """โมเดลในบริษัทเป็นค่าเริ่มต้น -- คนตั้งเครื่องใหม่ต้องเริ่มงานได้โดยไม่มี key ของ Anthropic
 
     Config ไม่มี field anthropic_api_key อีกแล้ว (ไม่มีใครอ่านมันในโค้ดจริง --
     ดู src/llm.py ที่อ่าน ANTHROPIC_API_KEY ตรงจาก os.environ เอง) เทสต์นี้จึงยืนยัน
-    แค่ว่า load_config ไม่ raise และยังได้ค่าเริ่มต้น GLM ตามเดิมแม้ไม่มี key นี้เลย
+    แค่ว่า load_config ไม่ raise และยังได้ค่าเริ่มต้นที่ไม่ต้องใช้ key นี้เลย
     """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("HF_TOKEN", "hf_test")
@@ -298,7 +398,7 @@ def test_load_config_works_without_an_anthropic_key(tmp_path, monkeypatch):
 
     config = load_config(tmp_path)
 
-    assert config.claude_model == "GLM-5.2"
+    assert config.claude_model == "Qwen/Qwen3.6-35B-A3B"
 
 
 def test_the_default_summary_model_is_the_one_that_keeps_data_in_house():
@@ -306,13 +406,16 @@ def test_the_default_summary_model_is_the_one_that_keeps_data_in_house():
 
     ถ้า Claude เป็นค่าเริ่มต้น การกด Enter ผ่านเมนูจะส่ง transcript ออกนอกบริษัททุกครั้ง
     โดยไม่มีใครตัดสินใจเรื่องนั้นเลย -- ค่าเริ่มต้นจึงต้องเป็น provider ที่ข้อมูลไม่ออกไปไหน
+
+    ในสองตัวที่ข้อมูลไม่ออกนอกบริษัท ตรึงไว้ที่ Qwen ไม่ใช่ GLM-5.2: GLM คืน content
+    ว่างเปล่ากับงานสรุป 10 ครั้งจาก 10 ครั้ง (วัด 2026-07-31) ส่วนตัวนี้เสร็จใน 4 วินาที
     """
     from src.config import DEFAULT_SUMMARY_MODEL
     from src.llm import resolve
 
-    assert DEFAULT_SUMMARY_MODEL == "GLM-5.2"
+    assert DEFAULT_SUMMARY_MODEL == "Qwen/Qwen3.6-35B-A3B"
     # ต้องอยู่ใน registry จริง ไม่ใช่แค่สตริงที่พิมพ์ถูก
-    assert resolve(DEFAULT_SUMMARY_MODEL).model_id == "GLM-5.2"
+    assert resolve(DEFAULT_SUMMARY_MODEL).model_id == "Qwen/Qwen3.6-35B-A3B"
 
 
 def test_the_misnamed_claude_default_constant_is_gone():
@@ -344,8 +447,24 @@ def test_load_config_uses_default_speaker_thresholds(tmp_path, monkeypatch):
 
     # ค่าตัวเลขเขียนตรง ๆ ที่นี่ที่เดียว: การขยับเกณฑ์ต้องเป็นการตัดสินใจที่มีคนแก้
     # เทสต์ตาม ไม่ใช่สิ่งที่เลื่อนไปเองเพราะทุกที่อ้างค่าคงที่ตัวเดียวกันหมด
-    assert config.speaker_match_high == 0.80
-    assert config.speaker_match_low == 0.50
+    assert config.speaker_match_high == 0.62
+    assert config.speaker_match_low == 0.58
+
+
+def test_the_default_thresholds_bracket_the_measured_gap():
+    # หลักฐาน 2026-07-31 วัดผ่านทางที่ระบบเดินจริง (แปลงเป็น wav 16k ก่อน diarize เหมือน
+    # pipeline.process_file/enroll.analyze) บน Meet1900 เต็มไฟล์ + คลิป enroll ทั้ง 6 ป้าย
+    # ยืนยันด้วยหูโดยเจ้าของเสียงเอง ไม่ใช่อนุมานจากคะแนน:
+    #   0.6679  คนเดียวกันข้ามการบันทึก (n=1)  <- ขอบบน
+    #   0.5711  คนละคน สูงสุดจาก 20 คู่          <- ขอบล่าง
+    #
+    # HIGH ต้องอยู่ในหน้าต่างนี้ นอกหน้าต่างคือผิดแน่นอน ไม่ใช่แค่ไม่เหมาะ: สูงกว่า 0.6679
+    # = ไม่จำคนที่ลงทะเบียนไว้เลยสักคน ต่ำกว่า 0.5711 = ใส่ชื่อผิดคนที่คู่ซึ่งวัดได้จริงแล้ว
+    # เทสต์นี้จะแดงถ้ามีคนขยับค่าโดยไม่ได้วัดใหม่ ซึ่งคือวิธีที่ 0.80 กลายเป็นค่าที่ผิดมาแล้ว
+    assert 0.5711 < DEFAULT_SPEAKER_MATCH_HIGH <= 0.6679
+    # LOW เหนือเพดานของกองคนละคนเช่นกัน -- คนที่ไม่ใช่ต้องไม่โผล่แม้แต่ในโซน "เสนอให้ยืนยัน"
+    # ช่องระหว่างสองค่าจึงแคบโดยธรรมชาติ ไม่ใช่ความผิดพลาด
+    assert 0.5711 < DEFAULT_SPEAKER_MATCH_LOW < DEFAULT_SPEAKER_MATCH_HIGH
 
 
 def test_load_config_falls_back_when_a_threshold_is_not_a_number(tmp_path, monkeypatch):
@@ -402,3 +521,26 @@ def test_load_config_accepts_equal_thresholds_as_the_degenerate_but_coherent_cas
 
     assert config.speaker_match_high == 0.6
     assert config.speaker_match_low == 0.6
+
+
+def test_embedding_model_defaults_when_the_env_var_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+
+    assert load_config(tmp_path).embedding_model == DEFAULT_EMBEDDING_MODEL
+
+
+def test_embedding_model_comes_from_the_env_var(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("EMBEDDING_MODEL", "speechbrain/spkrec-ecapa-voxceleb")
+
+    assert load_config(tmp_path).embedding_model == "speechbrain/spkrec-ecapa-voxceleb"
+
+
+def test_a_blank_embedding_model_falls_back_to_the_default(tmp_path, monkeypatch):
+    # `EMBEDDING_MODEL=` ที่ลืมเติมค่าต้องไม่ส่งสตริงว่างไปให้ Model.from_pretrained
+    # ตายเอาตอนเปิดโปรแกรม -- กฎเดียวกับ DIARIZATION_MODEL
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv("EMBEDDING_MODEL", "   ")
+
+    assert load_config(tmp_path).embedding_model == DEFAULT_EMBEDDING_MODEL

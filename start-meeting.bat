@@ -58,29 +58,40 @@ if errorlevel 1 (
 
 echo.
 echo เลือกโมเดลสรุป:
-echo   [1] GLM 5.2 - ข้อมูลไม่ออกนอกบริษัท (ช้ากว่า)
-echo   [2] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
-echo   [3] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
-echo   [4] ถอดเสียงอย่างเดียว - ไม่สรุป (ไม่เสียเงิน)
-rem Anything that is not "2", "3" or "4" lands on GLM 5.2, so a typo cannot reach
+echo   [1] Qwen 3.6  - ข้อมูลไม่ออกนอกบริษัท (เร็วที่สุด)
+echo   [2] GLM 5.2   - ข้อมูลไม่ออกนอกบริษัท (ช้ากว่า)
+echo   [3] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
+echo   [4] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
+echo   [5] ถอดเสียงอย่างเดียว - ไม่สรุป (ไม่เสียเงิน)
+rem Anything that is not "2".."5" lands on Qwen 3.6, so a typo cannot reach
 rem Python as an invalid model id. set /p rather than choice: choice takes a single
 rem keypress and ignores Enter, and pressing Enter for the default is the point here.
-rem GLM is the default because the transcript stays on company infrastructure with
-rem it -- the private path has to be the one that needs no decision.
+rem Qwen is the default because the transcript stays on company infrastructure with
+rem it -- the private path has to be the one that needs no decision -- and of the two
+rem in-house options it is the one that actually finishes (see src/llm.py: GLM-5.2
+rem spent its whole budget on reasoning and returned empty content 10 times out of 10).
+rem
+rem The numbering matches web/app.js top to bottom, so the two entry points read the
+rem same. That moved transcript-only from [4] to [5] on purpose -- a "4" typed from
+rem muscle memory now records with Sonnet 5 instead of skipping the summary.
 set "MODEL_CHOICE=1"
-set /p MODEL_CHOICE=เลือก [1/2/3/4] (Enter=1):
+set /p MODEL_CHOICE=เลือก [1/2/3/4/5] (Enter=1):
 if "%MODEL_CHOICE%"=="2" (
-    set "MODEL_ID=claude-opus-5"
+    rem Must stay byte-identical to the registry key in src/llm.py -- the endpoint
+    rem rejects a lowercased id.
+    set "MODEL_ID=GLM-5.2"
 ) else if "%MODEL_CHOICE%"=="3" (
-    set "MODEL_ID=claude-sonnet-5"
+    set "MODEL_ID=claude-opus-5"
 ) else if "%MODEL_CHOICE%"=="4" (
+    set "MODEL_ID=claude-sonnet-5"
+) else if "%MODEL_CHOICE%"=="5" (
     rem Must stay byte-identical to job.NO_SUMMARY_MODEL: the pipeline decides
     rem whether to skip summarizing by comparing against this exact string.
     set "MODEL_ID=transcript-only"
 ) else (
-    rem Must stay byte-identical to the registry key in src/llm.py -- the endpoint
-    rem rejects a lowercased id.
-    set "MODEL_ID=GLM-5.2"
+    rem Must stay byte-identical to the registry key in src/llm.py, "Qwen/" and
+    rem capitalisation included -- the endpoint rejects anything else.
+    set "MODEL_ID=Qwen/Qwen3.6-35B-A3B"
 )
 rem "ใช้โมเดล: transcript-only" would name a model that does not exist, so the
 rem confirmation line follows the mode rather than the value.

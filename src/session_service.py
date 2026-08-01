@@ -17,6 +17,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 
 from src import activity, enroll, pending, speakers
+from src.logsetup import UI_LOG, configure_logging
 from src.messages import render
 from src.record import run_recording
 from src.storage import rename_speaker_in_transcript, safe_meeting_dir
@@ -116,24 +117,259 @@ class RecorderState:
             }
 
 
+def _public_sample(sample) -> dict | None:
+    """ตัวอย่างเสียงหนึ่งช่วง -- ทุกใบประกาศชนิดไว้แล้วบังคับตามนั้น
+
+    text เป็นสตริงที่ผู้ใช้อ่าน (app.js pendingHtml: esc(sample.text)) ส่วน start/end เป็น
+    วินาทีตัวเลขเดี่ยวที่ app.js playSample() เอาไปตั้ง audioEl.currentTime ตรง ๆ
+
+    ใช้ None ไม่ใช่การทิ้งคีย์: audioEl.currentTime = undefined โยน TypeError ("non-finite")
+    ทั้งการ์ด ส่วน = null กลายเป็น 0 ซึ่งเป็นค่าที่ปุ่มเล่นเสียงรับได้ -- ทั้งไฟล์นี้เลือก
+    None เป็นค่าปริยายด้วยเหตุผลเดียวกัน: หน้าเว็บถูกเขียนบนสัญญาที่ว่าคีย์เหล่านี้มีเสมอ
+    (esc(x), x || 0, x || "") การหายไปของคีย์เป็นรูปร่างที่ยังไม่เคยมีใครทดสอบ
+    """
+    if not isinstance(sample, dict):
+        return None
+    return {
+        "text": speakers.as_str(sample.get("text")),
+        "start": speakers.as_number(sample.get("start")),
+        "end": speakers.as_number(sample.get("end")),
+    }
+
+
+def _public_guess(guess) -> dict | None:
+    if not isinstance(guess, dict):
+        return None
+    # ทั้งคู่เป็นสตริงที่ app.js เอาไปใส่ esc() ตรง ๆ (pendingHtml) -- evidence คือเหตุผล
+    # ที่โมเดลเดาชื่อนี้ ซึ่งเป็นข้อความให้คนอ่าน ไม่ใช่โครงสร้างข้อมูล
+    return {
+        "name": speakers.as_str(guess.get("name")),
+        "evidence": speakers.as_str(guess.get("evidence")),
+    }
+
+
+def _public_suggested(suggested) -> dict | None:
+    if not isinstance(suggested, dict):
+        return None
+    # web/app.js อ่านแค่ suggested.name (ดู pendingHtml) -- speaker_id/score ที่
+    # pending.build_pending_speakers ติดมาด้วยเป็นของฝั่งเซิร์ฟเวอร์ล้วน (ใช้ match_known
+    # ตอนสร้างคิวเท่านั้น) จึงไม่มีเหตุผลต้องออกไปเลย ต่างจาก _public_guess ตรงนี้ที่ guess
+    # ยังมี evidence ให้ผู้ใช้อ่านจริง
+    return {"name": speakers.as_str(suggested.get("name"))}
+
+
 def _public_speaker(speaker: dict) -> dict:
     """ผู้พูดหนึ่งคนในรูปที่ส่งออกหน้าเว็บได้
 
-    ตัด embedding ออกเสมอ: หน้าเว็บไม่ได้ใช้ และเวกเตอร์เสียงเป็นข้อมูล biometric
-    ที่ไม่ควรมีสำเนาเพิ่มในที่ที่ไม่จำเป็น
+    allowlist ของ *ชื่อคีย์* อย่างเดียวไม่พอ (finding 1 ของรีวิวรอบที่สี่): เวอร์ชันก่อนหน้า
+    เลือกคีย์ guess/samples/suggested ถูกแล้ว แต่คืน "ค่า" ของสามคีย์นั้นตรง ๆ โดยไม่กรอง
+    อะไรเลย -- ไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้ (ดู pending.py) ใครใส่เวกเตอร์ไว้ใต้
+    ชื่อคีย์ที่ไม่มีคำว่า "embedding" เลย (เช่น "voiceprint") ใน guess/samples[]/suggested
+    จะหลุดออก endpoint ไปเงียบ ๆ เหมือนที่ระดับการประชุมเคยหลุดมาก่อนหน้านี้ (ดู
+    _public_pending_meeting) ตอนนี้ทั้งสามจุดเป็น allowlist ของค่าจริง ๆ ผ่าน
+    _public_guess/_public_sample/_public_suggested ข้างบน ตรงกับที่ web/app.js อ่านจริง
+    (ดู pendingHtml/speakerAt ใน app.js): label, guess{name,evidence},
+    samples[]{text,start,end}, suggested{name}, speaking_seconds -- คีย์อื่นทั้งหมด
+    (diarization_id, model, embedding_model, embedding_seconds, segment_count, suggested.
+    speaker_id/score, embedding หรือเวกเตอร์ใต้ชื่อไหนก็ตาม) เป็นของฝั่งเซิร์ฟเวอร์ล้วน
+    ไม่มีเหตุผลต้องออกไปเลย ใช้ .get() และเช็ค isinstance ทุกชั้นเพราะไฟล์คิวที่แก้มือหรือ
+    มาจากเวอร์ชันเก่ากว่านี้อาจไม่มีคีย์พวกนี้ครบ หรือมีแต่ผิดชนิด -- หน้าเว็บรับค่า None/[]
+    ของทุกคีย์เหล่านี้ได้อยู่แล้ว (guess ? ... : "", samples || [], suggested ? ... : "")
+
+    finding 1 ของรีวิวรอบที่ห้า: allowlist ข้างบนยังอยู่ต่อทั้งหมด แต่ผลลัพธ์ผ่าน
+    speakers.drop_numeric_vectors อีกชั้น เพราะ allowlist กรอง "ชื่อคีย์" แล้วคืน "ค่า" ของ
+    คีย์นั้นดิบ ๆ -- เวกเตอร์ที่ถูกวางเป็นค่าของ label / speaking_seconds / guess.evidence /
+    samples[].start / suggested.name (ห้าจุดที่ทำซ้ำได้จริงบน endpoint ที่รันอยู่) หลุดออกไป
+    ได้ทั้งที่ทุกคีย์อยู่ใน allowlist ถูกต้องแล้ว การแจกแจงชื่อคีย์เพิ่มอีกชั้นกันกรณีนี้ไม่ได้
+    ไม่ว่าจะไล่ไปกี่ชั้น (ดู docstring ของ drop_numeric_vectors)
+
+    รีวิวรอบที่หก: การกรองด้วยรูปทรงของรอบที่ห้าก็แพ้เหมือนกัน เพราะ "รูปทรง" เป็นแกนที่ห้า
+    ที่คนแก้ไฟล์เลือกได้ ไม่ใช่ค่าคงที่ของข้อมูล (หกรูปแบบที่ทำซ้ำได้จริง ดู docstring ของ
+    drop_numeric_vectors) ตอนนี้ทุกใบที่ออกจากฟังก์ชันนี้ *ประกาศชนิด* ไว้แล้วบังคับตามนั้น:
+    label เป็น str, speaking_seconds เป็นตัวเลขเดี่ยว, ที่เหลืออยู่ใน _public_guess/
+    _public_sample/_public_suggested -- ค่าที่ไม่ใช่ชนิดที่ประกาศไว้กลายเป็น None ทั้งหมด
+    ตรงกับที่ app.js รับได้อยู่แล้ว (esc(speaker.label), speaker.speaking_seconds || 0)
+    allowlist ชื่อคีย์และ drop_numeric_vectors ยังอยู่ครบทั้งคู่ในฐานะชั้นรอง ไม่ใช่ด่านหลัก
     """
-    return {key: value for key, value in speaker.items() if key != "embedding"}
+    samples = speaker.get("samples")
+    return speakers.drop_numeric_vectors(
+        {
+            "label": speakers.as_str(speaker.get("label")),
+            "guess": _public_guess(speaker.get("guess")),
+            "samples": [
+                public_sample
+                for public_sample in (
+                    _public_sample(item)
+                    for item in (samples if isinstance(samples, list) else [])
+                )
+                if public_sample is not None
+            ],
+            "suggested": _public_suggested(speaker.get("suggested")),
+            "speaking_seconds": speakers.as_number(speaker.get("speaking_seconds")),
+        }
+    )
+
+
+def _public_pending_meeting(meeting: dict) -> dict:
+    """การประชุมหนึ่งรายการในคิว ในรูปที่ส่งออกหน้าเว็บได้ (finding ที่สามของรีวิวรอบนี้)
+
+    allowlist ไม่ใช่ {**meeting, ...}: จุดที่แก้ไปแล้วสองจุด (_public_speaker ข้างบน กับ
+    list_entries ใน enroll.py) เป็น allowlist แล้ว แต่ list_pending_speakers ยังสเปรดคีย์
+    ระดับการประชุมทุกตัวตรง ๆ ผ่าน {**meeting, "speakers": ...} อยู่ดี -- ชั้นนี้อยู่เหนือ
+    _public_speaker หนึ่งชั้น (มันกรอง speaker แต่ละคนแล้ว แต่ dict การประชุมที่ห่อ list
+    นั้นไว้ไม่ถูกกรองเลย) _read_pending_file คืน JSON ดิบของไฟล์คิวทั้งก้อนไม่กรองคีย์อะไร
+    เลย และไฟล์คิวแก้มือได้ตามดีไซน์ของโปรเจกต์นี้ -- ใครใส่ "embedding"/"voiceprint" ไว้
+    ระดับบนสุดของ record (นอก speakers[]) จะหลุดออก endpoint ไปเงียบ ๆ
+
+    รายการข้างล่างคือทุกคีย์ระดับการประชุมที่ web/app.js อ่านจริง (ดู pendingHtml/speakerAt
+    ใน app.js: meeting.meeting_dir, meeting.speakers) คีย์อื่น (audio_file, created) เป็น
+    ของฝั่งเซิร์ฟเวอร์ล้วน ไม่มีเหตุผลต้องออกไปเลย
+
+    finding 1 ของรีวิวรอบที่ห้า: allowlist ชื่อคีย์ยังอยู่ต่อ (มันกันฟิลด์ที่ UI ไม่ได้ใช้)
+    แต่ตอนนี้ผลลัพธ์ผ่าน speakers.drop_numeric_vectors อีกชั้น -- เวกเตอร์ที่วางเป็น *ค่า*
+    ของ meeting_dir เอง (ซึ่งอยู่ใน allowlist) ไม่มีทางถูกกันด้วยการแจกแจงชื่อคีย์เพิ่มอีกกี่
+    ชั้นก็ตาม ดู docstring ของ drop_numeric_vectors สำหรับประวัติสี่รอบที่ผ่านมา
+
+    รีวิวรอบที่หก: meeting_dir ประกาศเป็น str แล้วบังคับตามนั้น -- app.js ใช้มันสามที่และ
+    เป็นสตริงทั้งสามที่ (speakerKey() ต่อสตริง, esc(meeting.meeting_dir), และ
+    encodeURIComponent(found.meeting) ตอนยิง /api/speakers/audio/) ไม่มีทางที่รูปทรงไหน
+    ของเวกเตอร์จะเป็น str ได้ จึงไม่เหลือรูปทรงให้เลือกอีก
+    """
+    queued = meeting.get("speakers")
+    return speakers.drop_numeric_vectors(
+        {
+            "meeting_dir": speakers.as_str(meeting.get("meeting_dir")),
+            "speakers": [
+                _public_speaker(s)
+                for s in (queued if isinstance(queued, list) else [])
+                if isinstance(s, dict)
+            ],
+        }
+    )
+
+
+# ความยาวสูงสุดของค่า param หนึ่งตัวที่ยอมให้ไปโผล่ในข้อความที่ render ออกมา (และใน
+# params.path ที่ส่งออก)
+#
+# ทำไมต้องมีเพดาน: params เป็นฟิลด์ปลายเปิดฟิลด์เดียวที่เหลืออยู่ -- render() เอาค่าใน
+# params ไปเติมลงเทมเพลต ("เสร็จแล้ว: {path}") ผลลัพธ์จึงเป็น str จริง ๆ ตามชนิดที่ text
+# ประกาศไว้ การประกาศชนิดของใบจึงจับไม่ได้ตามนิยาม คนที่แก้ state/activity.jsonl ด้วยมือ
+# วางสตริงที่เป็นเวกเตอร์ serialize แล้วไว้ใต้ {path} ได้ตรง ๆ
+#
+# ทำไม 512: param จริงในโปรเจกต์นี้มีแค่ชื่องาน (~20 ตัวอักษร) พาธไฟล์ (MAX_PATH ของ
+# Windows คือ 260) ตัวนับเล็ก ๆ และข้อความ error จาก ffmpeg/OSError -- 512 กว้างพอสำหรับ
+# ทุกตัวโดยยังไม่ต้องตัดอะไรที่มีประโยชน์ทิ้ง ส่วนเวกเตอร์ 256 มิติที่ serialize แล้วยาว
+# เกินสองพันตัวอักษร (วัดแล้วที่ความละเอียดของ float จริง: 5,324) จึงถูกตัดจนกู้คืนไม่ได้
+# เสมอ -- ตัดได้ดีที่สุดราว 9% ของเวกเตอร์เท่านั้น เพดานนี้เป็นชั้นที่สอง
+# เท่านั้น -- ชั้นแรกคือ _render_param ที่ไม่ยอมให้ค่าที่ไม่ใช่ scalar ถูกเติมลงเทมเพลตเลย
+# (str([0.11, 0.12]) คือการขนเวกเตอร์ออกไปในรูปสตริง จึงห้ามเด็ดขาด)
+PARAM_VALUE_MAX_CHARS = 512
+
+
+def _render_param(value) -> str | None:
+    """ค่า param หนึ่งตัวในรูปสตริงที่เอาไปเติมเทมเพลตได้ -- None แปลว่าไม่เอาไปเติมเลย
+
+    รับเฉพาะ scalar: สตริง ตัวเลขเดี่ยว หรือ bool ไม่มี param จริงตัวไหนในโปรเจกต์นี้ที่
+    เป็น list หรือ dict (ดู activity.append/on_event ทุกจุดเรียก) ค่าที่ไม่ใช่ scalar จึง
+    ถูกทิ้ง ไม่ใช่ str() ทับ -- render() รับมือกับ param ที่หายไปได้อยู่แล้วโดยไม่ raise
+    (คืนเทมเพลตดิบกลับมาเมื่อ format() โยน KeyError ดู src/messages.py)
+    """
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    elif isinstance(value, str):
+        text = value
+    elif speakers.as_number(value) is not None:
+        text = str(speakers.as_number(value))
+    else:
+        return None
+    return text[:PARAM_VALUE_MAX_CHARS]
+
+
+def _public_activity(entry: dict, lang: str) -> dict:
+    """หนึ่งบรรทัดของ state/activity.jsonl ในรูปที่ส่งออกหน้าเว็บได้
+
+    finding 2 ของรีวิวรอบที่ห้า -- รอบที่สี่ "ตัด job/params ทิ้ง" เพื่อกันเวกเตอร์ที่อาจแอบ
+    อยู่ใน params ของบรรทัดที่ถูกแก้มือ โดยอ้าง grep ของ renderLog ตัวเดียวว่าไม่มีใครอ่าน
+    สองคีย์นี้ grep นั้นไม่ครบ และการตัดทิ้งเป็น regression จริงที่ผู้ใช้เจอ ไม่ใช่รูรั่วเฉย ๆ:
+
+      web/app.js jobProgress()                     อ่าน e.job  (แถบความคืบหน้าหลังปิดห้อง)
+      web/app.js poll()                            อ่าน e.job  (สัญญาณ speakers_pending)
+      COWORK Desktop/meetingrun.js progressOf()    อ่าน e.job
+      COWORK Desktop/meetingrun.js finishedMeetingId()  อ่าน e.job และ e.params.path
+
+    ผลจริงเมื่อ job หายไป: หน้าจอค้างที่ "กำลังประมวลผล" ขั้นที่ 1 ตลอดกาล viewDone ไปไม่ถึง
+    และเพราะ viewProcessing ไม่ได้ render pendingHtml() คิวตั้งชื่อผู้พูด -- เหตุผลทั้งหมดที่
+    ฟีเจอร์นี้มีอยู่ -- จึงเข้าไม่ถึงจากหน้าเว็บเลย ฝั่งวิดเจ็ตแถบความคืบหน้าไม่ขยับ และปุ่ม
+    "เปิดโฟลเดอร์ประชุม" คืน null (tests/meetingrun.test.js ยึดฟิลด์พวกนี้ไว้เป็นสัญญา)
+
+    ทั้งคู่จึงกลับมา แล้วให้ speakers.drop_numeric_vectors เป็นตัวทำให้ปลอดภัยแทนการตัดทิ้ง
+    -- อนึ่ง job เป็นสตริงชื่องาน การตัดมันทิ้งจึงไม่เคยกันเวกเตอร์อะไรได้ตั้งแต่แรก
+
+    กรองก่อน render ไม่ใช่หลัง: render() เอาค่าใน params ไปเติมลงเทมเพลตข้อความ ("เสร็จแล้ว:
+    {path}") ถ้าส่ง params ดิบเข้าไป เวกเตอร์ที่วางไว้ใต้ {path} จะออกไปเป็น *สตริง* ในคีย์
+    text ซึ่งการ์ดรูปทรงจับไม่ได้เพราะไม่ใช่ array อีกต่อไป
+
+    coercion ที่เหลือเป็นของถูก ๆ ที่ป้องกัน 500 ตรง ๆ: code ที่ไม่ใช่สตริงทำให้
+    catalog.get(code) โยน TypeError (unhashable) และ params ที่ไม่ใช่ dict ทำให้
+    format(**params) โยน TypeError ทั้งสองตัวหลุดออกไปเป็น 500 ทั้งหน้าจากบรรทัดเดียวที่ถูก
+    แก้มือ ทั้งที่ฟังก์ชันนี้อ่านไฟล์ที่ "แก้มือได้ตามดีไซน์" อยู่แล้ว
+
+    รีวิวรอบที่หก -- สองการรั่วคนละทาง ต้องปิดคนละแบบ:
+
+    (1) params ที่ส่งออก: ตรวจครบทั้งสามฝั่งที่บริโภค /api/state แล้ว (web/app.js,
+        web/enroll.js, D:\\COWORK\\COWORK Desktop\\meetingrun.js) ไม่มีใครอ่านอะไรใน params
+        นอกจาก params.path ซึ่งเป็นสตริง (meetingrun.js finishedMeetingId: e.params &&
+        e.params.path แล้ว String(last.params.path).split(...)) การส่ง params ทั้งก้อนออกไป
+        จึงเป็นการเปิดฟิลด์ปลายเปิดไว้เปล่า ๆ -- ตอนนี้ออกไปแค่ path ตัวเดียวและเฉพาะเมื่อ
+        มันเป็นสตริงจริง params ที่ไม่มี path กลายเป็น {} ซึ่ง meetingrun.js กรองทิ้งเองอยู่แล้ว
+
+    (2) text: render() เอาค่าใน params ไปเติมลงเทมเพลต ผลลัพธ์จึงเป็น str ตามชนิดที่ text
+        ประกาศไว้เป๊ะ ๆ การประกาศชนิดของใบจับทางนี้ไม่ได้ตามนิยาม ต้องกรองที่ *ขาเข้า* ของ
+        render แทน: _render_param ทิ้งทุกค่าที่ไม่ใช่ scalar และตัดความยาวที่
+        PARAM_VALUE_MAX_CHARS (ดูเหตุผลของตัวเลขที่นั่น)
+    """
+    safe = speakers.drop_numeric_vectors(entry)
+    code = speakers.as_str(safe.get("code")) or ""
+    raw_params = safe.get("params")
+    raw_params = raw_params if isinstance(raw_params, dict) else {}
+    render_params = {}
+    for key, value in raw_params.items():
+        # คีย์ที่ไม่ใช่สตริงทำให้ format(**params) โยน TypeError -- และไม่มีเทมเพลตไหน
+        # อ้างถึงมันได้อยู่แล้ว
+        if not isinstance(key, str):
+            continue
+        text = _render_param(value)
+        if text is not None:
+            render_params[key] = text
+    path = _render_param(speakers.as_str(raw_params.get("path")))
+    return {
+        "ts": speakers.as_str(safe.get("ts")),
+        "job": speakers.as_str(safe.get("job")),
+        "code": code,
+        "level": speakers.as_str(safe.get("level")),
+        "params": {} if path is None else {"path": path},
+        "text": render(code, render_params, lang),
+    }
 
 
 def _speaker_summary(speaker: dict) -> dict:
     """คนหนึ่งคนในทะเบียน ในรูปสรุปที่ /api/speakers และ /api/enroll ใช้ร่วมกัน (finding C
     ของรีวิวรอบสุดท้าย -- คนละรอบกับ finding 1-6 ที่แก้ไปก่อนหน้านี้)
 
-    ไม่ใช้ _public_speaker ตรง ๆ เพราะ shape ต่างกัน: _public_speaker เก็บทุกคีย์ยกเว้น
-    embedding ซึ่งใช้ได้กับผู้พูดที่รอตั้งชื่อ (embedding อยู่ระดับบนสุด) แต่ entry ใน
-    ทะเบียนไม่มี embedding ระดับบนสุดเลย -- มันซ้อนอยู่ใน samples[].embedding ถ้าเอา
-    _public_speaker มาใช้ตรงนี้ "samples" ทั้งก้อน (พร้อมเวกเตอร์เสียงทุกตัวข้างใน) จะ
-    หลุดออกไปทั้งดุ้นแทนที่จะเหลือแค่ sample_count
+    ไม่ใช้ _public_speaker ตรง ๆ เพราะคนละ shape กันคนละเรื่อง (finding 3 ของรีวิวรอบที่ห้า
+    -- ข้อความเดิมตรงนี้บอกว่า _public_speaker "เก็บทุกคีย์ยกเว้น embedding" ซึ่งเลิกจริง
+    มาตั้งแต่รีวิวรอบที่สองแล้ว: มันเป็น allowlist ของ label/guess/samples/suggested/
+    speaking_seconds มาสองรอบ ไม่ใช่ denylist ของ embedding อีกต่อไป) ที่ใช้แทนกันไม่ได้คือ
+    รูปของข้อมูล: ผู้พูดที่รอตั้งชื่อมีตัวอย่างเสียงเป็น samples[]{text,start,end} ที่ผู้ใช้
+    ต้องอ่าน ส่วน entry ในทะเบียนมี samples[] เป็นเวกเตอร์เสียงล้วน (samples[].embedding)
+    ซึ่งไม่มีอะไรให้ผู้ใช้อ่านเลยและเป็นข้อมูล biometric ทั้งก้อน -- ที่นี่จึงเหลือแค่จำนวน
+
+    ไม่มี drop_numeric_vectors ห่อไว้ (เอาออกในรีวิวรอบที่หก) เพราะมันไม่เคยกันอะไรได้ตรงนี้
+    เลยและการปล่อยไว้ทำให้รายงานอ่านเหมือนมีการป้องกันที่ไม่มีจริง: ทั้งสามค่าถูกกำหนดชนิด
+    ตั้งแต่ต้นทาง -- load_registry ปล่อยผ่านเฉพาะ entry ที่ id/name เป็น str และ samples
+    เป็น list (isinstance ครบทั้งสามคีย์) ส่วน sample_count คือ len() ซึ่งเป็น int เสมอ
+    นี่คือแพตเทิร์นเดียวกับที่ทำให้ /api/speakers เป็น endpoint เดียวที่ไม่เคยถูกเจาะเลย
+    ตลอดหกรอบ -- ประกาศชนิดที่ขอบแล้วบังคับตามนั้น ไม่ใช่ไล่เดาว่าค่าไหนหน้าตาเหมือนเวกเตอร์
     """
     return {
         "id": speaker["id"],
@@ -173,8 +409,11 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             {**w, "text": render(w["code"], w.get("params"), lang)}
             for w in body["warnings"]
         ]
+        # allowlist ไม่ใช่ {**e, ...}: entry มาจาก state/activity.jsonl ตรง ๆ (activity.tail)
+        # ซึ่งแก้มือได้ตามดีไซน์เดียวกับไฟล์คิว (ดู activity.append) -- ฟิลด์ที่ออกไปกับ
+        # เหตุผลที่ job/params ต้องอยู่ต่อ ดูที่ _public_activity ด้านบน
         body["activity"] = [
-            {**e, "text": render(e.get("code", ""), e.get("params"), lang)}
+            _public_activity(e, lang)
             for e in activity.tail(config.base_dir, ACTIVITY_LIMIT)
         ]
         return jsonify(body)
@@ -272,7 +511,7 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
     @app.get("/api/speakers/pending")
     def list_pending_speakers():
         meetings = [
-            {**meeting, "speakers": [_public_speaker(s) for s in meeting["speakers"]]}
+            _public_pending_meeting(meeting)
             for meeting in pending.load_all_pending(config.base_dir)
         ]
         return jsonify({"meetings": meetings})
@@ -365,6 +604,14 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         if not speakers.is_usable_embedding(entry.get("embedding")):
             return jsonify({"error": "bad_embedding"}), 400
 
+        # ป้ายพื้นที่เวกเตอร์เป็นเงื่อนไขก่อนแตะทะเบียน ไม่ใช่หลังจากนั้น: sample ที่ไม่มีป้าย
+        # จะถูก match_known ข้ามตลอดกาล ผู้ใช้จะเห็นเป็น "กดยืนยันแล้วแต่ระบบไม่จำ" ซึ่งไม่มี
+        # อะไรอธิบายได้เลย -- ปฏิเสธตรงนี้พร้อมเหตุผลเสียหายน้อยกว่ามาก ต้องเป็นรหัสของตัวเอง
+        # ไม่ใช่ bad_embedding ข้างบน: เวกเตอร์ตัวนี้ใช้ได้ (ผ่านด่านนั้นมาแล้ว) ปัญหาคือไม่รู้ว่า
+        # มันอยู่พื้นที่ไหน ซึ่งเป็นคนละเหตุผลกันโดยสิ้นเชิงและต้องบอกผู้ใช้คนละเรื่อง
+        if speakers.sample_embedding_model(entry) is None:
+            return jsonify({"error": "missing_embedding_model"}), 400
+
         name = payload.get("name")
         speaker_id = payload.get("speaker_id")
         # ล็อกคุมช่วง อ่านทะเบียน -> แก้ -> เขียนทับ เท่านั้น: service รันด้วย
@@ -386,13 +633,21 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                 speakers.add_sample(
                     registry,
                     cleaned,
-                    entry["embedding"],
+                    {
+                        "embedding": entry["embedding"],
+                        # ป้ายจากคิว ไม่ใช่ config.embedding_model ตอนนี้ -- คิวอยู่ข้ามวันได้
+                        # ผู้ใช้สลับ EMBEDDING_MODEL ระหว่างนั้นได้ ป้ายที่ติดตอนสร้างคิวคือ
+                        # ป้ายเดียวที่บอกความจริงเรื่องพื้นที่เวกเตอร์ (ผ่านด่านข้างบนมาแล้ว
+                        # ว่าไม่ใช่ None)
+                        "embedding_model": speakers.sample_embedding_model(entry),
+                        "embedding_seconds": entry.get("embedding_seconds"),
+                        "segment_count": entry.get("segment_count"),
+                        # โมเดลแยกผู้พูด (diarization) ที่ติดมากับคิว -- เป็น provenance
+                        # เสริมเท่านั้นตอนนี้ (ดู speakers.add_sample) ไม่ใช่ป้ายที่
+                        # match_known ใช้กรองอีกต่อไป นั่นคือ embedding_model ด้านบน
+                        "model": entry.get("model"),
+                    },
                     source=meeting,
-                    # โมเดลที่ติดมากับคิว ไม่ใช่ config.diarization_model ตอนนี้ --
-                    # คิวอยู่ข้ามวันได้ ผู้ใช้สลับโมเดลระหว่างนั้นแล้วเวกเตอร์ตัวนี้
-                    # ยังเป็นของพื้นที่เดิมอยู่ดี คิวเก่าที่ไม่มีป้ายตกไปที่ 3.1 ตาม
-                    # speakers.sample_model ซึ่งเป็นความจริงของ repo นี้ก่อนมีป้าย
-                    model=speakers.sample_model(entry),
                 ),
             )
 
@@ -469,22 +724,39 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             embedding = result.get("embedding") if result else None
             if not speakers.is_usable_embedding(embedding):
                 continue
+            # ผลที่ไม่มีป้ายพื้นที่เวกเตอร์ (มาจากก่อนฟีเจอร์นี้ หรือถูกแก้มือ) ต้องถูกข้าม
+            # ไปเงียบ ๆ ตรงนี้ ไม่ใช่ raise เหมือน confirm_speaker/confirm_enroll -- endpoint
+            # นี้แค่โชว์คะแนนความคล้ายให้ดูเฉย ๆ ไม่ได้เขียนอะไรลงทะเบียนเลย ไฟล์ที่ยืนยันพื้นที่
+            # ไม่ได้ก็แค่ไม่มีคะแนนให้โชว์ ไม่ใช่เหตุผลที่ทำให้ทั้งหน้าพัง
+            stamp = speakers.sample_embedding_model(result)
+            if stamp is None:
+                continue
             matches = speakers.match_known(
                 {entry["audio_file"]: embedding},
                 registry,
                 config.speaker_match_high,
                 config.speaker_match_low,
                 # เวกเตอร์นี้มาจาก result.json ที่วิเคราะห์ไว้ตอนไหนก็ได้ -- เทียบกับ
-                # ทะเบียนในพื้นที่ของ *มัน* ไม่ใช่ของโมเดลที่ตั้งอยู่ตอนนี้
-                model=speakers.sample_model(result),
+                # ทะเบียนในพื้นที่ของ *มัน* ไม่ใช่ของโมเดลที่ตั้งอยู่ตอนนี้ ป้ายมาจาก
+                # ผลลัพธ์เอง (เช็คผ่านด่านข้างบนแล้วว่าไม่ใช่ None) ไม่ใช่ config.embedding_model
+                embedding_model=stamp,
             )
             match = matches.get(entry["audio_file"])
             if match is not None:
-                entry["match"] = {
-                    "name": match.name,
-                    "score": round(match.score, 2),
-                    "confident": match.confident,
-                }
+                # ประกาศชนิดเหมือนทุกใบอื่น แม้ค่าทั้งสามจะมาจาก Match ที่ประกอบขึ้นบน
+                # เซิร์ฟเวอร์เอง (name มาจากทะเบียนซึ่ง load_registry การันตีว่าเป็น str
+                # แล้ว) -- score ต่างจากใบอื่นตรงที่ทิ้งทั้ง match ไม่ใช่ปล่อยเป็น None
+                # เพราะ enroll.js เรียก file.match.score.toFixed(2) โดยไม่มีการ์ด ทั้ง
+                # null และ undefined จะทำให้ทั้งหน้าพัง ส่วน "ไม่มี match" เป็นสถานะที่
+                # หน้านั้นรองรับอยู่แล้ว (if (file.match))
+                score = speakers.as_number(match.score)
+                name = speakers.as_str(match.name)
+                if score is not None and name is not None:
+                    entry["match"] = {
+                        "name": name,
+                        "score": round(score, 2),
+                        "confident": speakers.as_bool(match.confident),
+                    }
         return jsonify(
             {
                 "files": entries,
@@ -542,6 +814,13 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
         if not speakers.is_usable_embedding(result.get("embedding")):
             return jsonify({"error": "bad_embedding"}), 400
 
+        # เหมือนกับ confirm_speaker ทุกประการ (ดูคอมเมนต์ที่นั่น): ผลที่ไม่มีป้ายพื้นที่
+        # เวกเตอร์เลยต้องถูกปฏิเสธก่อนแตะทะเบียน ไม่ใช่หลังจากนั้น -- ไม่งั้นจะได้ sample ที่
+        # match_known ข้ามตลอดกาลอย่างเงียบ ๆ ต้องเป็นรหัสของตัวเอง ไม่ใช่ bad_embedding
+        # (เวกเตอร์ใช้ได้ ปัญหาคือไม่รู้ว่ามันอยู่พื้นที่ไหน)
+        if speakers.sample_embedding_model(result) is None:
+            return jsonify({"error": "missing_embedding_model"}), 400
+
         name = payload.get("name")
         if not isinstance(name, str) or not speakers.clean_name(name):
             return jsonify({"error": "bad_name"}), 400
@@ -555,11 +834,19 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                     speakers.add_sample(
                         registry,
                         cleaned,
-                        result["embedding"],
+                        {
+                            "embedding": result["embedding"],
+                            # ป้ายพื้นที่เวกเตอร์จริงที่ enroll.analyze บันทึกไว้ (ผ่านด่าน
+                            # ข้างบนแล้วว่าไม่ใช่ None) ไม่ใช่ค่าใน config ตอนกดยืนยัน --
+                            # ผลค้างข้ามการสลับ EMBEDDING_MODEL ได้
+                            "embedding_model": speakers.sample_embedding_model(result),
+                            "embedding_seconds": result.get("embedding_seconds"),
+                            "segment_count": result.get("segment_count"),
+                            # โมเดลแยกผู้พูดที่วิเคราะห์ไฟล์นี้จริง ๆ -- provenance เสริม
+                            # เท่านั้น ไม่ใช่ป้ายที่ match_known ใช้กรองอีกต่อไป
+                            "model": result.get("model"),
+                        },
                         source=f"enroll:{audio_file}",
-                        # โมเดลที่วิเคราะห์ไฟล์นี้จริง ๆ (enroll.analyze บันทึกไว้)
-                        # ไม่ใช่ค่าใน config ตอนกดยืนยัน -- ผลค้างข้ามการสลับโมเดลได้
-                        model=speakers.sample_model(result),
                     ),
                 )
             except OSError as e:
@@ -629,8 +916,12 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
 def main() -> None:
     from src.config import load_config
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = load_config()
+    # ไฟล์แยกจาก watcher.log โดยเจตนา -- คนละ process กัน ดูเหตุผลใน src/logsetup.py
+    # (RotatingFileHandler หมุนไฟล์ด้วยการ rename ซึ่งชนกันบน Windows)
+    log_file = configure_logging(config.base_dir, UI_LOG)
+    if log_file is not None:
+        logging.info("Writing logs to %s", log_file)
     app = create_app(config)
     # 127.0.0.1 เท่านั้น -- ขอบเขตความปลอดภัยของ service นี้คือการไม่รับจากนอกเครื่อง
     app.run(host="127.0.0.1", port=config.ui_port, threaded=True)

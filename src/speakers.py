@@ -11,20 +11,20 @@
 import json
 import logging
 import math
+import numbers
 import sys
 import uuid
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from src.config import LEGACY_DIARIZATION_MODEL
 from src.storage import replace_with_retry
 
 logger = logging.getLogger(__name__)
 
 REGISTRY_DIRNAME = "speakers"
 REGISTRY_FILENAME = "registry.json"
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 2
 
 # เก็บหลายตัวอย่างต่อคน เพราะเสียงคนเดียวกันผ่านไมค์ตรงหน้ากับผ่าน codec ของแอป
 # ประชุมให้เวกเตอร์ต่างกันจริง -- ตัวอย่างเดียวจะจำได้เฉพาะทางที่เคยได้ยินมา
@@ -37,6 +37,157 @@ MAX_NAME_LENGTH = 60
 # ผู้พูดที่พูดรวมกันน้อยกว่านี้ไม่ถูกเสนอให้ตั้งชื่อและไม่ถูกเก็บเข้าทะเบียน --
 # เวกเตอร์จากเสียงไม่กี่วินาทีเชื่อถือไม่ได้พอที่จะเอาไปเทียบข้ามการประชุม
 MIN_SPEAKING_SECONDS = 10.0
+
+
+def as_str(value) -> str | None:
+    """ค่านี้ถ้าเป็นสตริงจริง ๆ ไม่งั้น None -- ไม่แปลงชนิดให้ ไม่ str() ทับ
+
+    หัวใจของการปิดบั๊กเวกเตอร์รั่วรอบที่หก (ดู drop_numeric_vectors ด้านล่างสำหรับประวัติ
+    ห้ารอบก่อนหน้า): ที่ขอบของการส่งออก ให้ *ประกาศชนิดของใบ* แล้วบังคับตามนั้น แทนการ
+    พยายามเดาว่าค่าไหน "หน้าตาเหมือนเวกเตอร์" -- คนที่แก้ไฟล์บนดิสก์เลือกชื่อคีย์ ความลึก
+    และรูปทรงได้อิสระ แต่เลือกไม่ได้ว่าเวกเตอร์จะกลายเป็น str ตัวเดียว เพราะมันไม่ใช่
+
+    ห้าม str(value) เด็ดขาด: str([0.11, 0.12]) คือการขนเวกเตอร์ออกไปในรูปสตริงแบบกู้คืนได้
+    ซึ่งแย่กว่าปล่อยผ่านเสียอีก เพราะการ์ดที่จับ "รูปทรง" มองไม่เห็นมันแล้ว
+
+    ใช้แพตเทิร์นเดียวกับ load_registry (isinstance(entry.get("name"), str)) ซึ่งเป็นเหตุผล
+    เดียวที่ /api/speakers เป็น endpoint เดียวที่ไม่เคยถูกเจาะเลยตลอดหกรอบที่ผ่านมา
+    """
+    return value if isinstance(value, str) else None
+
+
+def as_number(value) -> int | float | None:
+    """ค่านี้ถ้าเป็นตัวเลข *เดี่ยว* จริง ๆ ไม่งั้น None
+
+    bool ไม่นับ (subclass ของ int ใน Python) และ list/dict ของตัวเลขไม่นับ -- ไม่มี endpoint
+    ไหนในโปรเจกต์นี้ที่ประกาศใบเป็น "รายการตัวเลข" เลยสักตัว (speaking_seconds,
+    samples[].start/end, speaker_count, size_bytes, sample_count, score ล้วนเป็นตัวเลข
+    เดี่ยว) ถ้าวันหนึ่งมีจริง ให้ประกาศชนิดของใบนั้นแยกออกมา ไม่ใช่ผ่อนตัวนี้ให้หลวมลง
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return None
+    # numpy.float32 ฯลฯ เป็น numbers.Real แต่ json.dumps ไม่รู้จัก -- คืนเป็นชนิดของ
+    # Python เสมอเพื่อให้ค่าที่ออกไปเป็นค่าที่ serialize ได้จริง
+    return value if isinstance(value, (int, float)) else float(value)
+
+
+def as_bool(value) -> bool | None:
+    """ค่านี้ถ้าเป็น bool จริง ๆ ไม่งั้น None -- ไม่แปลงความจริง/เท็จให้จากค่าอื่น
+
+    bool(value) จะทำให้ [0.11, 0.12] กลายเป็น True เงียบ ๆ ซึ่งเป็นการโกหกหน้าเว็บ
+    คนละแบบกับที่การ์ดนี้มีไว้กัน
+    """
+    return value if isinstance(value, bool) else None
+
+
+def _is_numeric_vector(value) -> bool:
+    """ค่านี้มี "รูปทรง" ของเวกเตอร์เสียงบนสายหรือไม่
+
+    bool ไม่นับเป็นตัวเลขแม้จะเป็น subclass ของ int ใน Python -- [true, false] คือธง
+    ไม่ใช่เวกเตอร์ และ list ว่างก็ไม่นับ เพราะ [] คือ "ไม่มีตัวอย่างเสียง/ไม่มีคำเตือน"
+    ที่หน้าเว็บต้องได้เห็นตามปกติ (samples || [], warnings || []) ไม่ใช่ข้อมูล biometric
+
+    numbers.Real ไม่ใช่ (int, float): numpy.float32 ไม่ได้สืบทอด float ของ Python (ต่างจาก
+    numpy.float64 ที่สืบทอด) list ของ float32 จึงเคยหลุดผ่านตัวนี้ไปทั้งก้อน วันนี้ยัง
+    latent เพราะ src/voiceprint.py แปลงด้วย float() ก่อนบันทึกลงไฟล์เสมอ แต่การเดาชนิด
+    แบบนั้นคือรากเดียวกับที่ทำให้บั๊กนี้กลับมาห้ารอบ ในของที่เรียกตัวเองว่ากรองด้วยรูปทรง
+    """
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(
+            isinstance(item, numbers.Real) and not isinstance(item, bool)
+            for item in value
+        )
+    )
+
+
+def drop_numeric_vectors(value):
+    """ตาข่ายชั้นล่าง: ตัด list ที่เป็นตัวเลขล้วนออกจากสิ่งที่กำลังจะถูกส่งออกทาง HTTP
+
+    *ไม่ใช่* หลักประกันหลักอีกต่อไป -- หลักประกันหลักคือการประกาศชนิดของใบที่ขอบของการ
+    ส่งออก (as_str/as_number/as_bool ด้านบน แล้วบังคับตามนั้นใน src/session_service.py กับ
+    src/enroll.py) ตัวนี้เหลือไว้เป็นชั้นรองสำหรับใบที่ยังไม่มีใครประกาศชนิด และสำหรับ
+    endpoint ใหม่ที่อาจถูกเพิ่มเข้ามาโดยยังไม่ได้ผ่านขอบที่ประกาศชนิด
+
+    ประวัติของบั๊กนี้ -- ห้ารอบ ห้าแกน ทุกรอบแก้แกนที่เพิ่งโดน แล้วรอบถัดไปโดนแกนใหม่:
+
+      รอบ 1 -- ตัดคีย์ชื่อ "embedding" ทิ้ง (denylist หนึ่งชื่อ)
+               แพ้ให้ *ชื่อคีย์อื่น* เช่น embedding_backup / voiceprint
+      รอบ 2 -- allowlist ชื่อคีย์ระดับผู้พูด (_public_speaker) และระดับไฟล์ (list_entries)
+               แพ้ให้ *ความลึก* ที่สูงขึ้นหนึ่งชั้น (ระดับการประชุม, {**meeting, ...})
+      รอบ 3 -- allowlist ชื่อคีย์ระดับการประชุม (_public_pending_meeting)
+               แพ้ให้ *ความลึก* ที่ต่ำลงหนึ่งชั้น (guess / samples[] / suggested)
+      รอบ 4 -- allowlist ชื่อคีย์ของ guess/samples[]/suggested และตัด params ของ activity
+               แพ้ให้เวกเตอร์ที่เป็น *ค่า* ของคีย์ที่อยู่ใน allowlist เองอยู่แล้ว
+      รอบ 5 -- ตัดทุก list ที่เป็นตัวเลขล้วน (ตัวนี้เอง) โดยอ้างว่า "สิ่งเดียวที่คนวาง
+               เวกเตอร์เลือกไม่ได้คือรูปทรงของเวกเตอร์เอง"
+               แพ้ให้ *รูปทรง* ตั้งแต่ตัวแปรที่สองที่ลอง
+
+    ข้ออ้างของรอบที่ห้าผิด และมันคือสิ่งที่ค้ำดีไซน์ทั้งรอบไว้ จึงต้องเขียนทิ้งตรงนี้ให้ชัด
+    ไม่ใช่ปล่อยไว้ให้รอบที่เจ็ดเชื่อตาม -- รูปแบบทั้งหกข้างล่างทำซ้ำได้จริงบน endpoint ที่
+    รันอยู่ ทุกตัวขนเวกเตอร์เดิมออกไปแบบกู้คืนได้ และทุกตัวไม่ใช่ "list ตัวเลขล้วน":
+
+      [0.11, 0.12, 0.13, "x"]        ["x", 0.11, 0.12, 0.13]
+      {"0": 0.11, "1": 0.12}         ["0.11", "0.12", "0.13"]
+      [0.11, null, 0.12, null]       [{"v": 0.11}, {"v": 0.12}]
+
+    รูปทรงจึงเป็นแกนที่ห้า ไม่ใช่ค่าคงที่ของข้อมูล เหมือนชื่อคีย์และความลึกก่อนหน้ามัน
+    แกนเดียวที่คนแก้ไฟล์เลือกไม่ได้คือ "ชนิดที่ปลายทางประกาศว่าจะรับ" เพราะเวกเตอร์ไม่ใช่
+    สตริง ไม่ใช่ตัวเลขเดี่ยว และไม่ใช่ bool ไม่ว่าจะห่อมาแบบไหน -- นั่นคือด่านหลักวันนี้
+    ตัวนี้ไม่ได้กันหกรูปแบบข้างบนและไม่เคยกันได้ อย่านับมันเป็นด่านที่กันเรื่องนั้น
+
+    ยังคุ้มที่จะเก็บไว้: มันไม่ต้องรู้จักชื่อคีย์หรือความลึกใด ๆ จึงทำให้ซับทรีที่ยังไม่มีใคร
+    ประกาศชนิด (และ endpoint ที่จะถูกเพิ่มทีหลัง) ปลอดภัยจากเคสตรงไปตรงมาโดยไม่ต้องรอ
+
+    (เดิม) ทำไมไม่กรองด้วยชื่อคีย์อีกต่อไป: บั๊กเดียวกันนี้ถูกแก้มาแล้วสี่รอบ และทั้งสี่รอบ
+    แก้ด้วยวิธีเดียวกันหมด คือ "แจกแจงชื่อคีย์เพิ่มอีกหนึ่งชั้น" แล้วรีวิวรอบถัดไปก็เจอรูรั่ว
+    ที่ลึกลงไปอีกหนึ่งชั้นทุกครั้ง:
+
+      รอบ 1 -- ตัดคีย์ชื่อ "embedding" ทิ้ง (denylist หนึ่งชื่อ)
+               แพ้ให้เวกเตอร์ที่วางไว้ใต้ชื่ออื่น เช่น embedding_backup / voiceprint
+      รอบ 2 -- allowlist ชื่อคีย์ระดับผู้พูด (_public_speaker) และระดับไฟล์ (list_entries)
+               แพ้ให้ระดับการประชุมซึ่งอยู่เหนือขึ้นไปอีกหนึ่งชั้น ({**meeting, ...})
+      รอบ 3 -- allowlist ชื่อคีย์ระดับการประชุม (_public_pending_meeting)
+               แพ้ให้ค่าที่ซ้อนอยู่ใต้ guess / samples[] / suggested ซึ่งลึกลงไปอีกหนึ่งชั้น
+      รอบ 4 -- allowlist ชื่อคีย์ของ guess/samples[]/suggested และตัด params ของ activity
+               แพ้ให้เวกเตอร์ที่เป็น "ค่า" ของคีย์ที่อยู่ใน allowlist เองอยู่แล้ว
+               (meeting_dir, label, speaking_seconds, guess.evidence, samples[].start,
+               suggested.name, speaker_count, suggested_name, reason.<ซับทรีทั้งก้อน>)
+
+    การไล่ชื่อคีย์แพ้เสมอเพราะไฟล์ต้นทางทุกไฟล์ (speakers/pending/*.json,
+    enroll/*.result.json, state/activity.jsonl) แก้มือได้ตามดีไซน์ของโปรเจกต์นี้เอง คนแก้
+    จึงเลือก *ชื่อคีย์* และ *ความลึก* ได้อิสระไม่มีขอบ -- รอบที่ห้าพิสูจน์ด้วย reason ที่เป็น
+    dict ทั้งก้อนว่าซับทรีอะไรก็ได้ที่ห้อยใต้คีย์ใน allowlist ออกไปได้ทั้งดุ้น ตัวนี้จึงเดิน
+    ทั้งโครงสร้างแล้วตัดทุก list ที่เป็นตัวเลขล้วนทิ้ง ไม่ว่าจะอยู่ใต้ชื่อคีย์อะไรหรือลึกแค่ไหน
+    -- กฎเดียวกันเป๊ะกับการ์ดฝั่งเทสต์ (_assert_no_numeric_vector_leaks ใน
+    tests/test_session_service.py) ซึ่งเดินทั้ง response body อยู่แล้ว การ์ดตัวนั้นก็ตาบอด
+    กับหกรูปแบบข้างบนเช่นกัน จึงมี _assert_declared_leaf_types คู่กับมันตั้งแต่รอบที่หก
+
+    ไม่ได้มาแทน allowlist ชื่อคีย์ที่มีอยู่ และไม่ได้มาแทนการประกาศชนิดของใบ -- สามอย่างนี้
+    ทำคนละหน้าที่: allowlist กันไม่ให้ส่งฟิลด์ที่หน้าเว็บไม่ได้ใช้ออกไปเปล่า ๆ, การประกาศชนิด
+    ของใบเป็นด่านหลักที่ทำให้ไม่มีรูปทรงเหลือให้เลือก, ส่วนตัวนี้เป็นตาข่ายชั้นล่างของทั้งสอง
+
+    ตรวจแล้วว่าไม่มี endpoint ไหนในโปรเจกต์นี้ที่ต้องส่ง numeric array ที่ชอบธรรมออกไปเลย
+    (samples[].start/end, speaking_seconds, elapsed_seconds, sample_count, match.score
+    ล้วนเป็นตัวเลขเดี่ยว ไม่ใช่ array) ถ้าวันหนึ่งมีจริง ให้เพิ่มข้อยกเว้นเจาะจงเป็นราย path
+    ไม่ใช่ผ่อนกฎนี้ให้หลวมลงทั้งหมด
+    """
+    if _is_numeric_vector(value):
+        return None
+    if isinstance(value, dict):
+        return {
+            key: drop_numeric_vectors(item)
+            for key, item in value.items()
+            if not _is_numeric_vector(item)
+        }
+    if isinstance(value, list):
+        return [
+            drop_numeric_vectors(item)
+            for item in value
+            if not _is_numeric_vector(item)
+        ]
+    return value
 
 
 def registry_path(base_dir: Path) -> Path:
@@ -154,16 +305,19 @@ def is_usable_embedding(vector) -> bool:
     return math.isfinite(total) and total >= sys.float_info.min
 
 
-def sample_model(sample: dict) -> str:
-    """โมเดลที่สร้างเวกเตอร์ของตัวอย่างนี้
+def sample_embedding_model(sample: dict) -> str | None:
+    """โมเดลที่สร้างเวกเตอร์ของตัวอย่างนี้ -- None เมื่อไม่รู้
 
-    ตัวอย่างที่ไม่มีคีย์ "model" คือตัวอย่างที่ถูกเก็บก่อนที่ทะเบียนจะเริ่มติดป้าย ซึ่ง
-    ตอนนั้นโปรเจกต์นี้มีโมเดลเดียวคือ 3.1 -- เดาไม่ได้ก็จริงในทางทฤษฎี แต่ในทางประวัติ
-    ของ repo นี้มันเป็นข้อเท็จจริง การถือว่า "ไม่รู้" แล้วทิ้งไปจะลบความจำของผู้ใช้เดิม
-    ที่ยังใช้ 3.1 อยู่ทิ้งทั้งหมดโดยไม่มีเหตุผล
+    ไม่มี fallback โดยเจตนา ต่างจาก sample_model() เดิมที่เดาเป็น 3.1: ตอนนั้นการเดา
+    เป็นข้อเท็จจริงของประวัติ repo (มีโมเดลเดียว) แต่ตัวอย่างที่ไม่มีป้ายนี้มาจาก centroid
+    ของ diarization pipeline ซึ่งไม่ใช่พื้นที่นี้แน่นอนไม่ว่ากรณีใด การเดาว่า "น่าจะตรง"
+    แล้วเอาไปหา cosine จะได้ตัวเลขที่ไม่มีความหมาย ซึ่ง "บังเอิญสูง" ได้พอ ๆ กับ
+    "บังเอิญต่ำ" -- และค่าที่บังเอิญสูงคือชื่อผิดคนใน transcript ที่ไม่มีใครสังเกต
     """
-    model = sample.get("model")
-    return model if isinstance(model, str) and model else LEGACY_DIARIZATION_MODEL
+    model = sample.get("embedding_model")
+    if not isinstance(model, str):
+        return None
+    return model.strip() or None
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -202,19 +356,38 @@ def match_known(
     speakers: list[dict],
     high: float,
     low: float,
-    model: str,
+    *,
+    embedding_model: str,
 ) -> dict[str, Match]:
     """จับคู่ผู้พูดในไฟล์นี้กับคนในทะเบียน คีย์เป็น label ของ pyannote
 
     label ที่ไม่ถึงเกณฑ์ล่างจะไม่มีใน dict เลย (ไม่ใช่ค่า None) -- ผู้เรียกจึงเขียน
     `label in matches` ได้ตรงไปตรงมา
 
-    `model` คือโมเดลที่สร้าง `embeddings` ชุดที่ส่งเข้ามา ตัวอย่างในทะเบียนที่มาจาก
-    โมเดลอื่นถูกข้ามทิ้ง ไม่ใช่เอามาเทียบแล้วให้คะแนนต่ำ -- เวกเตอร์ข้ามพื้นที่ให้เลข
-    ที่ไม่มีความหมาย ซึ่ง "บังเอิญสูง" ได้พอ ๆ กับ "บังเอิญต่ำ" พารามิเตอร์นี้จึงบังคับ
-    (ไม่มี default) โดยเจตนา: ผู้เรียกที่ลืมส่งต้องพังตอนเขียนโค้ด ไม่ใช่ตอนที่ชื่อผิด
-    คนไปโผล่ใน transcript แล้ว
+    `embedding_model` คือโมเดลที่สร้าง `embeddings` ชุดที่ส่งเข้ามา ตัวอย่างในทะเบียนที่มา
+    จากโมเดลอื่น -- รวมถึงตัวอย่างที่ไม่มีป้ายเลย (มาจาก centroid ของ diarization pipeline
+    ยุคก่อนฟีเจอร์นี้) -- ถูกข้ามทิ้ง ไม่ใช่เอามาเทียบแล้วให้คะแนนต่ำ: เวกเตอร์ข้ามพื้นที่
+    ให้เลขที่ไม่มีความหมาย ซึ่ง "บังเอิญสูง" ได้พอ ๆ กับ "บังเอิญต่ำ"
+
+    พารามิเตอร์นี้เป็น keyword-only โดยเจตนา: หัวฟังก์ชันเดิมมี `str` ติดกันหลายตัว ซึ่ง
+    เป็นรูปทรงที่สลับตำแหน่งกันได้เงียบ ๆ การสลับ embedding_model กับพารามิเตอร์อื่นทำให้
+    ทั้งทะเบียนถูกเทียบข้ามพื้นที่โดยไม่มีอะไรพังตอนเขียนโค้ด -- ผู้เรียกที่ลืมส่งหรือส่ง
+    ผิดตำแหน่งต้องพังตอนนั้น ไม่ใช่ตอนที่ชื่อผิดคนไปโผล่ใน transcript แล้ว
+
+    ต้องเป็น str ที่ไม่ว่างเปล่าหลัง strip เท่านั้น -- ผู้เรียกจริงสองราย (Task 11, 12)
+    อ่านค่านี้มาจาก payload ที่เก็บไว้ก่อนฟีเจอร์นี้ ผ่าน sample_embedding_model() ซึ่งคืน
+    None ให้ทุก sample ที่ไม่มีป้าย ถ้าปล่อยให้ None ไหลเข้ามาถึงตรงนี้ `stamp != None`
+    จะเป็นเท็จพอดีกับ sample ที่ไม่มีป้ายเช่นกัน (stamp เป็น None ด้วย) -- ทุก legacy sample
+    จะกลายเป็นจับคู่ได้หมด ซึ่งเป็นช่องโหว่เดียวกับที่ฟีเจอร์นี้ทั้งฟีเจอร์มีไว้ปิด จุดนี้เป็น
+    fail-closed component ที่ถูกออกแบบไว้ที่เดียว การเช็คจึงอยู่ตรงนี้ ไม่ใช่ให้ผู้เรียก
+    แต่ละรายเช็คเอง ค่าที่รับมาถูก strip ก่อนเทียบเช่นเดียวกับค่าที่เก็บไว้ (ผ่าน
+    sample_embedding_model) -- ไม่งั้นตัวอย่างที่ถูกต้องแต่ผู้เรียกส่งมาพร้อมช่องว่างรอบ ๆ
+    จะไม่ถูกจับคู่กับใครในทะเบียนเลยทั้งชุด
     """
+    if not isinstance(embedding_model, str) or not embedding_model.strip():
+        raise ValueError("embedding_model ต้องเป็น string ที่ไม่ว่างเปล่า")
+    wanted_model = embedding_model.strip()
+
     matches: dict[str, Match] = {}
     skipped_models: set[str] = set()
     for label, embedding in embeddings.items():
@@ -223,8 +396,9 @@ def match_known(
         best: Match | None = None
         for speaker in speakers:
             for sample in speaker.get("samples", []):
-                if sample_model(sample) != model:
-                    skipped_models.add(sample_model(sample))
+                stamp = sample_embedding_model(sample)
+                if stamp != wanted_model:
+                    skipped_models.add(stamp or "(ไม่มีป้าย)")
                     continue
                 vector = sample.get("embedding")
                 if not is_usable_embedding(vector):
@@ -240,54 +414,80 @@ def match_known(
         if best is not None and best.score >= low:
             matches[label] = best
     if skipped_models:
-        # ผู้ใช้ที่เพิ่งสลับ DIARIZATION_MODEL จะเห็นคนที่เคยจำได้กลายเป็น "ผู้พูด N"
-        # เฉย ๆ -- ต้องมีบรรทัดเดียวใน log ที่อธิบายว่าเพราะอะไร ไม่งั้นดูเหมือนทะเบียนพัง
+        # ผู้ใช้ที่เพิ่งสลับโมเดล embedding จะเห็นคนที่เคยจำได้กลายเป็น "ผู้พูด N" เฉย ๆ
+        # -- ต้องมีบรรทัดเดียวใน log ที่อธิบายว่าเพราะอะไร ไม่งั้นดูเหมือนทะเบียนพัง
         logger.info(
-            "ข้ามตัวอย่างเสียง %d โมเดลในทะเบียนที่ไม่ใช่ %s (%s) -- คนที่ลงทะเบียนไว้ด้วย"
-            "โมเดลอื่นจะยังไม่ถูกจำจนกว่าจะ enroll ใหม่ หรือสลับ DIARIZATION_MODEL กลับ",
+            "ข้ามตัวอย่างเสียงจาก %d พื้นที่เวกเตอร์ที่ไม่ใช่ %s (%s) -- คนที่ลงทะเบียนไว้"
+            "ก่อนหน้านี้จะยังไม่ถูกจำจนกว่าจะ enroll ใหม่ (ตัวอย่างเดิมไม่หาย)",
             len(skipped_models),
-            model,
+            wanted_model,
             ", ".join(sorted(skipped_models)),
         )
     return matches
 
 
+_OPTIONAL_SAMPLE_KEYS = ("embedding_seconds", "segment_count", "model")
+
+
 def add_sample(
     speakers: list[dict],
     name: str,
-    embedding: list[float],
+    sample: dict,
     source: str,
-    model: str,
     today: date | None = None,
 ) -> list[dict]:
     """ทะเบียนชุดใหม่ที่มีตัวอย่างเสียงนี้เพิ่มเข้าไป
 
-    ชื่อซ้ำ = คนเดิม ไม่ใช่คนใหม่ -- ผู้ใช้ที่พิมพ์ชื่อเดิมในการประชุมที่สองกำลังบอกว่า
-    "คนนี้แหละ" การสร้าง entry ที่สองจะทำให้โปรไฟล์แตกเป็นสองก้อนที่ต่างก็อ่อนแอ
+    รับ `sample` เป็น dict ก้อนเดียวแทนพารามิเตอร์เรียงกัน: เดิมเป็น
+    (embedding, source, model) ซึ่งเป็น str ติดกันสองตัว การสลับสองตัวนั้นจะติดป้ายพื้นที่
+    เวกเตอร์ผิดโดยไม่มีอะไรพัง -- ซึ่งเป็นอันตรายเดียวที่ป้ายนี้มีไว้กัน
 
-    คืนรายการชุดใหม่แทนการแก้ของเดิมในที่ ผู้เรียกจึงยังถือของเดิมไว้ได้ถ้าการเขียน
-    ไฟล์ล้มเหลว
+    `embedding_model` บังคับ: sample ที่ไม่มีป้ายจะถูก match_known ข้ามตลอดกาล การเขียนมัน
+    ลงไปเงียบ ๆ คือการสร้างความจำที่ไม่มีวันถูกใช้ ซึ่งผู้ใช้จะเห็นเป็น "ลงทะเบียนแล้วแต่
+    ระบบไม่จำ" โดยไม่มีอะไรอธิบาย ตรวจผ่าน sample_embedding_model() ตัวเดียวกับที่
+    match_known ใช้อ่าน -- ไม่ใช่เช็ค truthiness ของตัวเอง เพราะ `if not sample.get(key)`
+    จับได้แค่ key หายกับ "" ส่วนค่าอย่าง "   ", 42, True, ["x"] ผ่าน truthiness สบาย ๆ
+    แต่ sample_embedding_model คืน None ให้ทุกตัว ผลคือ sample ถูกเขียนลงทะเบียนสำเร็จ
+    แต่ match_known ข้ามมันตลอดกาลอย่างเงียบ ๆ -- ตัวเขียนกับตัวอ่านต้องเห็นตรงกันว่าอะไร
+    ใช้ได้ จึงเรียกตัวอ่านตัวเดียวกันแทนที่จะมีกฎสองชุด ค่าที่เก็บเป็นค่าที่ strip แล้ว
+    ไม่ใช่ค่าดิบจาก payload
 
-    `model` ต้องเป็นโมเดลที่สร้าง `embedding` ตัวนี้จริง ๆ ไม่ใช่โมเดลที่ตั้งอยู่ใน
-    config ตอนกดยืนยัน -- สองอย่างนี้ต่างกันได้เมื่อผู้ใช้สลับโมเดลหลังประชุมเสร็จแต่
-    ก่อนกดตั้งชื่อ ป้ายที่ผิดแปลว่าเวกเตอร์จะถูกเอาไปเทียบข้ามพื้นที่ในภายหลัง (ดู
-    match_known) ซึ่งเป็นสิ่งเดียวที่ป้ายนี้มีไว้กัน
+    `embedding` ต้องผ่าน is_usable_embedding เช่นกัน -- เวกเตอร์ศูนย์ล้วน (cosine ไม่นิยาม)
+    หรือ dict ที่ [float(v) for v in sample["embedding"]] จะแปลงเงียบ ๆ เป็นลิสต์ของ key
+    (เช่น {"1": 2} กลายเป็น [1.0]) ต้องถูกปฏิเสธตั้งแต่ตรงนี้ ไม่ใช่กลายเป็น sample
+    ที่เก็บสำเร็จแต่ใช้เทียบไม่ได้จริง
+
+    `model` (โมเดลแยกผู้พูด) ไม่บังคับและ *ไม่มีใครใช้ตัดสินใจอะไรแล้ว* -- เก็บไว้เพราะมัน
+    กำหนดขอบท่อน ซึ่งกำหนดว่าเสียงช่วงไหนเข้าไปอยู่ในเวกเตอร์ เป็น provenance ที่มีค่าตอน
+    ต้องสืบว่าทำไม sample ตัวหนึ่งแปลก ไม่ใช่ป้ายที่กันการเทียบข้ามพื้นที่อีกต่อไป
+
+    ชื่อซ้ำ = คนเดิม ไม่ใช่คนใหม่ (เหมือนเดิม) และคืนรายการชุดใหม่แทนการแก้ของเดิมในที่
     """
     cleaned = clean_name(name)
     if not cleaned:
         raise ValueError("ชื่อผู้พูดว่างเปล่าหลังตัดอักขระที่ใช้ไม่ได้ออก")
-    sample = {
-        "embedding": [float(value) for value in embedding],
+    stamp = sample_embedding_model(sample)
+    if stamp is None:
+        raise ValueError("ตัวอย่างเสียงไม่มี embedding_model ที่ใช้ได้")
+    if not is_usable_embedding(sample.get("embedding")):
+        raise ValueError("ตัวอย่างเสียงไม่มี embedding ที่ใช้ได้")
+
+    stored = {
+        "embedding": [float(value) for value in sample["embedding"]],
+        "embedding_model": stamp,
         "source": source,
-        "model": model,
         "added": (today or date.today()).isoformat(),
     }
+    for key in _OPTIONAL_SAMPLE_KEYS:
+        if sample.get(key) is not None:
+            stored[key] = sample[key]
+
     updated = [dict(speaker, samples=list(speaker.get("samples", []))) for speaker in speakers]
     for speaker in updated:
         if speaker.get("name") == cleaned:
-            speaker["samples"] = (speaker["samples"] + [sample])[-MAX_SAMPLES_PER_SPEAKER:]
+            speaker["samples"] = (speaker["samples"] + [stored])[-MAX_SAMPLES_PER_SPEAKER:]
             return updated
-    updated.append({"id": uuid.uuid4().hex, "name": cleaned, "samples": [sample]})
+    updated.append({"id": uuid.uuid4().hex, "name": cleaned, "samples": [stored]})
     return updated
 
 

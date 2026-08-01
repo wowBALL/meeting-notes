@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from src import enroll
 from src.config import Config
-from src.watcher import is_file_stable, scan_inbox, watch_loop
+from src.watcher import is_file_stable, process_enroll_requests, scan_inbox, watch_loop
 
 
 def make_config(tmp_path) -> Config:
@@ -15,6 +15,30 @@ def make_config(tmp_path) -> Config:
         meetings_dir=tmp_path / "meetings",
         hf_token="hf-test-token",
     )
+
+
+class _FakeEmbedder:
+    """embedder ปลอมสำหรับเทสต์ที่ mock enroll.analyze ไปแล้ว -- ไม่เคยถูกเรียกจริง
+
+    process_enroll_requests โหลด embedder เองเมื่อไม่มีใครส่งมาให้และมีใบสั่งงานค้างอยู่
+    จริง (ดู src/watcher.py) เทสต์ในไฟล์นี้ที่ปล่อยให้ embedder เป็น None แล้วมีใบสั่งงาน
+    ค้างจริงต้องใช้ตัวปลอมนี้แทน ไม่งั้นจะไปโหลดโมเดลจาก HF จริงเงียบ ๆ ทุกครั้งที่รัน
+    """
+
+    checkpoint = "fake-embedding-model"
+
+    def __call__(self, waveform, intervals):
+        return [[1.0, 0.0] for _ in intervals]
+
+
+def _mock_load_embedder():
+    """แทน load_embedder ตัวจริง (โหลดโมเดลจาก HF จริง) ด้วย _FakeEmbedder
+
+    แนวเดียวกับ tests/test_pipeline.py::_mock_load_embedder -- เทสต์ในไฟล์นี้ไม่ได้ตั้งใจ
+    วัดพฤติกรรมของ pyannote/wespeaker ตัวจริง แค่ต้องการให้ process_enroll_requests เดินผ่าน
+    เส้นทาง "ไม่มีใครส่ง embedder มาให้" ได้โดยไม่แตะโมเดลจริงหรือแคช HF ของเครื่องที่รันอยู่
+    """
+    return patch("src.watcher.load_embedder", return_value=_FakeEmbedder())
 
 
 def test_scan_inbox_returns_only_audio_files_sorted(tmp_path):
@@ -71,7 +95,7 @@ def test_watch_loop_processes_stable_files_once_with_single_pass(tmp_path):
         watch_loop(config, single_pass=True)
 
     mock_process_file.assert_called_once_with(
-        audio_path, config, diarization_pipeline=None, whisper_model=None
+        audio_path, config, diarization_pipeline=None, whisper_model=None, embedder=None
     )
 
 
@@ -90,7 +114,11 @@ def test_watch_loop_threads_diarization_pipeline_to_process_file(tmp_path):
         watch_loop(config, single_pass=True, diarization_pipeline=sentinel_pipeline)
 
     mock_process_file.assert_called_once_with(
-        audio_path, config, diarization_pipeline=sentinel_pipeline, whisper_model=None
+        audio_path,
+        config,
+        diarization_pipeline=sentinel_pipeline,
+        whisper_model=None,
+        embedder=None,
     )
 
 
@@ -109,7 +137,11 @@ def test_watch_loop_threads_whisper_model_to_process_file(tmp_path):
         watch_loop(config, single_pass=True, whisper_model=sentinel_model)
 
     mock_process_file.assert_called_once_with(
-        audio_path, config, diarization_pipeline=None, whisper_model=sentinel_model
+        audio_path,
+        config,
+        diarization_pipeline=None,
+        whisper_model=sentinel_model,
+        embedder=None,
     )
 
 
@@ -144,7 +176,10 @@ def test_watch_loop_analyzes_a_requested_enrollment_clip(tmp_path):
     sentinel_pipeline = object()
 
     analyzed = {"status": "ok", "embedding": [0.5], "speaker_count": 1}
-    with patch("src.watcher.enroll.analyze", return_value=analyzed) as mock_analyze:
+    with (
+        _mock_load_embedder(),
+        patch("src.watcher.enroll.analyze", return_value=analyzed) as mock_analyze,
+    ):
         watch_loop(
             config, single_pass=True, diarization_pipeline=sentinel_pipeline
         )
@@ -175,9 +210,12 @@ def test_watch_loop_never_writes_the_speaker_registry(tmp_path):
     make_enroll_audio(tmp_path)
     enroll.write_request(tmp_path, "สมชาย.ogg")
 
-    with patch(
-        "src.watcher.enroll.analyze",
-        return_value={"status": "ok", "embedding": [0.5]},
+    with (
+        _mock_load_embedder(),
+        patch(
+            "src.watcher.enroll.analyze",
+            return_value={"status": "ok", "embedding": [0.5]},
+        ),
     ):
         watch_loop(config, single_pass=True)
 
@@ -195,6 +233,7 @@ def test_a_failing_enroll_job_does_not_stop_the_inbox_from_being_processed(tmp_p
     enroll.write_request(tmp_path, "สมชาย.ogg")
 
     with (
+        _mock_load_embedder(),
         patch("src.watcher.is_file_stable", return_value=True),
         patch("src.watcher.process_file") as mock_process_file,
         patch("src.watcher.enroll.analyze", side_effect=OSError("disk on fire")),
@@ -216,6 +255,7 @@ def test_a_failing_result_write_does_not_retry_the_same_clip_forever(tmp_path):
     enroll.write_request(tmp_path, "สมชาย.ogg")
 
     with (
+        _mock_load_embedder(),
         patch(
             "src.watcher.enroll.analyze",
             return_value={"status": "ok", "embedding": [0.5]},
@@ -249,6 +289,7 @@ def test_a_failing_result_write_falls_back_to_a_minimal_failure_result(tmp_path)
         )
 
     with (
+        _mock_load_embedder(),
         patch(
             "src.watcher.enroll.analyze",
             return_value={"status": "ok", "embedding": [0.5]},
@@ -282,7 +323,7 @@ def test_process_enroll_requests_clears_sidecars_for_a_result_whose_file_was_rep
     audio_path = make_enroll_audio(tmp_path, "สมชาย.ogg")
     enroll.write_request(tmp_path, "สมชาย.ogg")
 
-    def analyze_then_replace(path, pipeline, model):
+    def analyze_then_replace(path, pipeline, model, embedder):
         # จำลองผู้ใช้แทนที่ไฟล์ผ่าน Explorer ระหว่างที่ diarization กำลังทำงานอยู่พอดี
         audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
         return {
@@ -292,7 +333,10 @@ def test_process_enroll_requests_clears_sidecars_for_a_result_whose_file_was_rep
             "suggested_name": "สมชาย",
         }
 
-    with patch("src.watcher.enroll.analyze", side_effect=analyze_then_replace):
+    with (
+        _mock_load_embedder(),
+        patch("src.watcher.enroll.analyze", side_effect=analyze_then_replace),
+    ):
         watch_loop(config, single_pass=True)
 
     assert not (tmp_path / "enroll" / "สมชาย.ogg.result.json").exists()
@@ -314,11 +358,12 @@ def test_process_enroll_requests_logs_a_discard_not_a_success_when_binding_fails
     audio_path = make_enroll_audio(tmp_path, "สมชาย.ogg")
     enroll.write_request(tmp_path, "สมชาย.ogg")
 
-    def analyze_then_replace(path, pipeline, model):
+    def analyze_then_replace(path, pipeline, model, embedder):
         audio_path.write_bytes(b"a completely different recording, replaced mid-analysis")
         return {"status": "ok", "embedding": [0.5], "suggested_name": "สมชาย"}
 
     with (
+        _mock_load_embedder(),
         patch("src.watcher.enroll.analyze", side_effect=analyze_then_replace),
         caplog.at_level("INFO"),
     ):
@@ -358,7 +403,10 @@ def test_process_enroll_requests_skips_analysis_when_the_pre_stat_fails(tmp_path
     # pending_requests() เองก็เรียก scan_audio -> is_file() บนไฟล์เดียวกัน (finding 2/3) --
     # mock มันตรงนี้ให้คืนรายการตรง ๆ เพื่อแยกให้ชัดว่าเทสต์นี้ทดสอบเฉพาะ pre-stat ของ
     # watcher เอง (finding 1) ไม่ปนกับ guard อื่นที่ finding 2/3 เพิ่งเพิ่มเข้ามาในไฟล์เดียวกัน
-    with patch("src.watcher.enroll.pending_requests", return_value=["สมชาย.ogg"]):
+    with (
+        _mock_load_embedder(),
+        patch("src.watcher.enroll.pending_requests", return_value=["สมชาย.ogg"]),
+    ):
         monkeypatch.setattr(Path, "stat", flaky_stat)
         with patch("src.watcher.enroll.analyze") as mock_analyze:
             watch_loop(config, single_pass=True)
@@ -400,6 +448,7 @@ def test_the_inbox_is_processed_before_any_enroll_work(tmp_path):
     order = []
 
     with (
+        _mock_load_embedder(),
         patch("src.watcher.is_file_stable", return_value=True),
         patch("src.watcher.process_file", side_effect=lambda *a, **k: order.append("inbox")),
         patch(
@@ -411,3 +460,48 @@ def test_the_inbox_is_processed_before_any_enroll_work(tmp_path):
 
     # ลำดับนี้ load-bearing: การประชุมที่อัดซ้ำไม่ได้ต้องได้ GPU ก่อนงานที่ทำใหม่ได้
     assert order == ["inbox", "enroll"]
+
+
+def test_process_enroll_requests_does_not_load_the_fallback_embedder_when_the_queue_is_empty(
+    tmp_path,
+):
+    """Minor 2 ของรีวิวรอบสอง: การแก้รอบก่อนย้าย load_embedder() สำรองให้รันเฉพาะตอนมี
+    ใบสั่งงานค้างจริงเท่านั้น (ดูคอมเมนต์เรื่อง hf_token/EMBEDDING_MODEL ที่ผิดยิง
+    traceback ทุก poll ใน src/watcher.py) แต่ยังไม่มีเทสต์ตรึงพฤติกรรมนี้ไว้เลย -- ถ้ามีคน
+    ย้ายการเรียกกลับไปไว้ก่อนเช็คคิวว่างในอนาคต ชุดเทสต์จะยังเขียวอยู่เหมือนเดิม
+    """
+    config = make_config(tmp_path)
+
+    with patch("src.watcher.load_embedder") as mock_load_embedder:
+        process_enroll_requests(config)
+
+    mock_load_embedder.assert_not_called()
+
+
+def test_process_enroll_requests_loads_the_fallback_embedder_once_for_several_pending_files(
+    tmp_path,
+):
+    """Minor 2 ของรีวิวรอบสอง: อีกครึ่งของการแก้รอบก่อน -- load_embedder() สำรองต้องโหลด
+    ครั้งเดียวก่อนวนลูปไฟล์ในคิว ไม่ใช่โหลดใหม่ทุกไฟล์ (ดูเหตุผลเต็มใน docstring ของ
+    process_enroll_requests: คิวมีได้หลายไฟล์ต่อรอบ poll เดียว) ไม่มีเทสต์ตรึงไว้เลย --
+    ถ้ามีคนย้ายการเรียกเข้าไปอยู่ใน for loop ในอนาคต ชุดเทสต์จะยังเขียวอยู่เหมือนเดิม
+    """
+    config = make_config(tmp_path)
+    config.inbox_dir.mkdir(parents=True)
+    make_enroll_audio(tmp_path, "สมชาย.ogg")
+    make_enroll_audio(tmp_path, "สมหญิง.ogg")
+    enroll.write_request(tmp_path, "สมชาย.ogg")
+    enroll.write_request(tmp_path, "สมหญิง.ogg")
+
+    with (
+        patch(
+            "src.watcher.load_embedder", return_value=_FakeEmbedder()
+        ) as mock_load_embedder,
+        patch(
+            "src.watcher.enroll.analyze",
+            return_value={"status": "ok", "embedding": [0.5]},
+        ),
+    ):
+        process_enroll_requests(config)
+
+    assert mock_load_embedder.call_count == 1

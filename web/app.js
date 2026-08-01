@@ -48,7 +48,13 @@ const UI = {
     spkGuess: "โมเดลเดาว่า",
     spkNear: "เสียงใกล้เคียงกับ",
     spkConfirmError: "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง",
+    // คิว/ตัวอย่างที่มาจากก่อนอัปเดตระบบจำเสียง (หรือถูกแก้มือ) ไม่มีป้ายพื้นที่เวกเตอร์เลย
+    // -- ต้องบอกว่าให้อัดใหม่/รอวิเคราะห์ใหม่ ไม่ใช่พูดเหมือนระบบพัง (missing_embedding_model)
+    spkErrMissingEmbeddingModel:
+      "รายการนี้มาจากก่อนอัปเดตระบบจำเสียง ไม่มีข้อมูลพอจะบันทึกได้ -- ข้ามคนนี้ไปได้ " +
+      "อัดประชุมครั้งหน้าจะจำได้ตามปกติ",
     models: [
+      ["Qwen/Qwen3.6-35B-A3B", "Qwen 3.6", "ข้อมูลไม่ออกนอกบริษัท · เร็วที่สุด"],
       ["GLM-5.2", "GLM 5.2", "ข้อมูลไม่ออกนอกบริษัท · ช้ากว่า"],
       ["claude-opus-5", "Opus 5", "แม่นสุด · $5/$25 ต่อ MTok"],
       ["claude-sonnet-5", "Sonnet 5", "ประหยัด · $3/$15 ต่อ MTok"],
@@ -104,7 +110,13 @@ const UI = {
     spkGuess: "the model guessed",
     spkNear: "voice is close to",
     spkConfirmError: "Could not save. Try again.",
+    // Queue entries/samples from before the voice-recognition upgrade (or hand-edited)
+    // carry no embedding-space stamp at all -- say "record again", not "system is broken"
+    spkErrMissingEmbeddingModel:
+      "This entry predates the voice-recognition upgrade and lacks what's needed to save " +
+      "-- you can skip it, the next recording will be recognized normally",
     models: [
+      ["Qwen/Qwen3.6-35B-A3B", "Qwen 3.6", "Stays in-house · fastest"],
       ["GLM-5.2", "GLM 5.2", "Stays in-house · slower"],
       ["claude-opus-5", "Opus 5", "Most accurate · $5/$25 per MTok"],
       ["claude-sonnet-5", "Sonnet 5", "Cheaper · $3/$15 per MTok"],
@@ -133,12 +145,15 @@ const STAGE_OF = {
   transcribe_started: 1,
   diarize_started: 2,
   summarize_started: 3,
+  summarize_progress: 3,
   meeting_done: 4,
 };
 
 // อ่านภาษาก่อน render ครั้งแรกเสมอ ไม่งั้นหน้าจอจะกระพริบสลับภาษาตอนโหลด
 let lang = localStorage.getItem("runnerLang") === "en" ? "en" : "th";
-let model = "GLM-5.2";
+// ต้องตรงกับ config.DEFAULT_SUMMARY_MODEL: หน้าเว็บกับเมนู CLI ต้องเริ่มที่โมเดลเดียวกัน
+// ไม่งั้นคนที่กด "เปิดห้อง" ทันทีกับคนที่กด Enter ผ่านเมนูจะได้คนละโมเดลโดยไม่รู้ตัว
+let model = "Qwen/Qwen3.6-35B-A3B";
 // dev เป็นค่าเริ่มต้นเพราะเป็น 3 ใน 4 ครั้งของสัปดาห์ และการเผลอเลือก cross ในประชุม
 // dev ล้วนทำให้โมเดล qualify คำพูดปกติเกินจำเป็นจนสรุปอ่านแล้วอ้อมค้อม
 let profile = "dev";
@@ -228,8 +243,16 @@ function pendingHtml() {
             ? `<div class="hint">${esc(x.spkNear)} “${esc(speaker.suggested.name)}”</div>`
             : "";
           const playing = playingKey === key;
-          const error = speakerErrors[key]
-            ? `<div class="note warn">⚠ ${esc(x.spkConfirmError)}</div>`
+          // speakerErrors[key] เก็บรหัส error ของเซิร์ฟเวอร์ไว้ (ไม่ใช่แค่ true/false
+          // เหมือนเดิม) เพื่อให้ missing_embedding_model ได้ข้อความของตัวเอง แทนที่จะ
+          // ถูกกลืนเป็น spkConfirmError ทั่วไปที่บอกให้ "ลองใหม่" ทั้งที่ลองใหม่ไม่ช่วย
+          const errorCode = speakerErrors[key];
+          const errorText =
+            errorCode === "missing_embedding_model"
+              ? x.spkErrMissingEmbeddingModel
+              : x.spkConfirmError;
+          const error = errorCode
+            ? `<div class="note warn">⚠ ${esc(errorText)}</div>`
             : "";
           return `<div class="spk" data-key="${esc(key)}">
             <div class="who">${esc(speaker.label)}</div>
@@ -356,10 +379,13 @@ async function confirmSpeaker(key, skip) {
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
-      // เซิร์ฟเวอร์แยกสาเหตุไว้แล้ว (400 ชื่อไม่ผ่าน, 404 รายการหลุดคิวไปแล้ว,
-      // 500 ตัดคิวไม่สำเร็จ) แต่การ์ดนี้ไม่ใช่ที่สำหรับอธิบายละเอียด -- ขึ้นบรรทัด
-      // เตือนสั้น ๆ พอ แล้วคงชื่อที่พิมพ์ค้างไว้ให้กดลองใหม่ได้ ไม่ล้างคิวทิ้ง
-      speakerErrors[key] = true;
+      // เซิร์ฟเวอร์แยกสาเหตุไว้แล้ว (400 ชื่อไม่ผ่าน/ยังไม่มีป้ายพื้นที่เวกเตอร์, 404
+      // รายการหลุดคิวไปแล้ว, 500 ตัดคิวไม่สำเร็จ) -- อ่านโค้ดออกมาเก็บไว้ (ไม่ใช่แค่ true)
+      // เพื่อให้ pendingHtml() เลือกข้อความที่ตรงกว่า spkConfirmError ทั่วไปได้เมื่อจำเป็น
+      // (เช่น missing_embedding_model ที่ "ลองใหม่" ไม่ช่วยอะไรเลย) คงชื่อที่พิมพ์ค้างไว้
+      // ให้กดลองใหม่ได้ ไม่ล้างคิวทิ้ง
+      const body = await response.json().catch(() => ({}));
+      speakerErrors[key] = body.error || true;
       render(lastState);
       return;
     }
