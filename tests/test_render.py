@@ -1,4 +1,12 @@
-from src.render import build_speaker_labels, format_timestamp, render_transcript_markdown
+from src.render import (
+    build_speaker_labels,
+    format_timestamp,
+    participants_line,
+    render_transcript_markdown,
+    replace_participants_line,
+    speaker_stats,
+    speaker_table,
+)
 
 
 def test_format_timestamp_formats_minutes_and_seconds():
@@ -102,3 +110,85 @@ def test_render_transcript_markdown_without_names_is_unchanged():
     merged = [{"start": 0.0, "end": 2.5, "speaker": "SPEAKER_00", "text": "สวัสดีครับ"}]
 
     assert render_transcript_markdown(merged, speaker_names=None) == render_transcript_markdown(merged)
+
+
+_TRANSCRIPT = """# Transcript
+
+**Wachirakorn (สอง)** [00:10]: เดี๋ยวผมแชร์จอนะครับ ขอเปิด Odoo ก่อน
+
+**ผู้พูด 1** [00:20]: ครับ
+
+**Wachirakorn (สอง)** [00:30]: อันนี้คือ payslip ที่ engine คำนวณออกมา
+
+**ผู้พูด 1** [00:40]: พี่บอลว่าไงบ้าง
+
+**ผู้พูด 2** [08:00]: ผมเพิ่งเข้ามาครับ ขอโทษที่สายนะครับทุกคน
+"""
+
+
+def test_speaker_stats_counts_characters_not_lines():
+    """ความยาวบรรทัดขึ้นกับวิธีที่ whisper ตัด segment -- ตัวเลขที่ใช้จัดอันดับผู้พูด
+    จึงต้องเป็นอักขระ ไม่ใช่จำนวนบรรทัด"""
+    stats = {entry["speaker"]: entry for entry in speaker_stats(_TRANSCRIPT)}
+
+    assert stats["Wachirakorn (สอง)"]["lines"] == 2
+    assert stats["Wachirakorn (สอง)"]["turns"] == 2
+    assert stats["ผู้พูด 1"]["lines"] == 2
+    # ผู้พูด 2 พูดบรรทัดเดียวแต่ยาวกว่าสองบรรทัดของผู้พูด 1 รวมกัน
+    assert stats["ผู้พูด 2"]["chars"] > stats["ผู้พูด 1"]["chars"]
+    assert [entry["speaker"] for entry in speaker_stats(_TRANSCRIPT)][0] == "Wachirakorn (สอง)"
+
+
+def test_speaker_stats_separates_voiceprint_names_from_placeholders():
+    """ชื่อที่มาจากลายเสียงคือหลักฐาน ป้าย "ผู้พูด N" คือช่องว่าง -- สรุปต้องบอกคนอ่าน
+    ได้ว่ามีชื่อจริงกี่คน ไม่ใช่ปล่อยให้เข้าใจว่ารู้จักทุกคน"""
+    stats = {entry["speaker"]: entry for entry in speaker_stats(_TRANSCRIPT)}
+
+    assert stats["Wachirakorn (สอง)"]["identified"] is True
+    assert stats["ผู้พูด 1"]["identified"] is False
+    assert stats["ผู้พูด 2"]["identified"] is False
+
+
+def test_participants_line_counts_instead_of_guessing():
+    line = participants_line(_TRANSCRIPT)
+
+    assert line.startswith("ผู้เข้าร่วม: 3 เสียง (ระบุตัวได้จากลายเสียง 1 คน)")
+    assert "Wachirakorn (สอง)" in line
+    assert "ผู้พูด 1" in line
+    # "พี่บอล" ถูกพูดถึงในบทสนทนา แต่ไม่ใช่ป้ายผู้พูด จึงต้องไม่โผล่ในรายชื่อ
+    assert "พี่บอล" not in line
+
+
+def test_participants_line_marks_whoever_was_not_there_from_the_start():
+    """คนที่เข้ามากลางทางไม่ได้อยู่ตอนที่ครึ่งแรกตกลงอะไรกัน"""
+    line = participants_line(_TRANSCRIPT)
+
+    assert "ผู้พูด 2 " in line and "(พูดครั้งแรก 08:00)" in line
+    assert "Wachirakorn (สอง)" in line.split("(พูดครั้งแรก")[0]
+
+
+def test_replace_participants_line_removes_whatever_the_model_wrote():
+    """prompt เป็นคำขอ ไม่ใช่การบังคับ และประชุมเก่าก็มีบรรทัดนั้นติดมาด้วย"""
+    summary = "ผู้เข้าร่วม: สมชาย, สมหญิง, พี่บอล\n\n## หัวข้อที่คุยกัน\n- เรื่องที่คุยกัน"
+
+    result = replace_participants_line(summary, _TRANSCRIPT)
+
+    assert result.count("ผู้เข้าร่วม:") == 1
+    assert "สมชาย" not in result
+    assert result.startswith("ผู้เข้าร่วม: 3 เสียง")
+    assert "## หัวข้อที่คุยกัน" in result
+
+
+def test_replace_participants_line_leaves_the_summary_alone_without_a_transcript():
+    """transcript ว่าง (หรือ parse ไม่ออก) ต้องไม่ทำให้สรุปที่จ่ายเงินไปแล้วเสียหาย"""
+    summary = "## หัวข้อที่คุยกัน\n- เรื่องที่คุยกัน"
+
+    assert replace_participants_line(summary, "") == summary
+
+
+def test_speaker_table_keeps_the_diagnostic_numbers():
+    table = speaker_table(_TRANSCRIPT)
+
+    assert table.startswith("## ผู้พูดใน transcript")
+    assert "| ผู้พูด 2 |" in table
+    assert "08:00" in table

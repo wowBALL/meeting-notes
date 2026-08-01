@@ -137,6 +137,23 @@ TRANSCRIPT_QUALITY_HEADINGS = (
     "## จุดที่ควรตรวจเอง",
 )
 
+# ป้ายที่ขั้น map เขียนไว้หน้าบรรทัด (ดู prompts/map.md) แล้วหลุดมาถึง summary.md ทาง
+# หัวข้อไทม์ไลน์ ซึ่งวางสรุปรายช่วงตามที่โมเดลเขียนทุกตัวอักษร -- สองหัวข้อข้างบนคือ
+# ผลของการที่ขั้น reduce ยุบป้ายพวกนี้ให้แล้ว แต่ตัวต้นฉบับในไทม์ไลน์ยังอยู่ครบ
+# คนที่เปิด summary.md จึงยังเจอรายงานคุณภาพเหมือนเดิม แค่เลื่อนลงไปอีกหน่อย
+#
+# เป็นเนื้อหาประเภทเดียวกับ TRANSCRIPT_QUALITY_HEADINGS เป๊ะ ๆ (`[คำเพี้ยน?]` ยุบเป็น
+# "คำที่น่าจะถอดเพี้ยน" และ `[ไม่มั่นใจ]` ยุบเป็น "จุดที่ควรตรวจเอง" ตาม reduce.md:47)
+# ย้ายแค่ฝั่งที่ยุบแล้วโดยทิ้งต้นฉบับไว้ จึงเป็นการแก้ครึ่งเดียว
+#
+# ป้ายอื่น (`[หัวข้อ]` `[ตกลงแล้ว]` `[ต้องทำ]` ฯลฯ) ไม่ย้าย -- พวกนั้นคือเนื้อหาประชุม
+TIMELINE_QUALITY_TAGS = (
+    "[คำเพี้ยน?]",
+    "[ไม่มั่นใจ]",
+)
+
+TIMELINE_QUALITY_HEADING = "## ป้ายคุณภาพที่ค้างอยู่ในไทม์ไลน์รายช่วง"
+
 
 def _split_out_quality_sections(summary_markdown: str) -> tuple[str, list[str]]:
     """(สรุปที่เหลือ, หัวข้อคุณภาพที่ถูกดึงออกมา)
@@ -146,24 +163,45 @@ def _split_out_quality_sections(summary_markdown: str) -> tuple[str, list[str]]:
 
     หัวข้อที่ไม่มีอยู่ = ข้ามไปเฉย ๆ ไม่ใช่ error: โมเดลอาจไม่เขียนมาให้ครบทุกครั้ง
     และประชุมที่ถูกสรุปด้วย prompt รุ่นเก่ากว่านี้ก็ไม่มีหัวข้อพวกนี้เลย
+
+    บรรทัดที่ติดป้ายใน TIMELINE_QUALITY_TAGS ถูกดึงออกมาพร้อมหัวข้อ `###` ของช่วงที่มัน
+    อยู่ ไม่ใช่ดึงมากองรวมกัน -- คำที่ถอดเพี้ยนมีค่าตอนย้อนกลับไปฟัง การทิ้งช่วงเวลาไป
+    ทำให้ต้องไล่หาเองว่าคำนั้นอยู่ตรงไหนของไฟล์เสียงยาวสองชั่วโมงครึ่ง
     """
     lines = summary_markdown.splitlines()
     kept: list[str] = []
     pulled: list[str] = []
     current: list[str] | None = None
+    tagged: list[str] = []
+    section: str | None = None
+    labelled: str | None = None
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("## "):
             # ปิดหัวข้อคุณภาพที่กำลังเก็บอยู่ (ถ้ามี) ก่อนตัดสินใจเรื่องหัวข้อใหม่
             current = None
+            section = None
             if any(stripped.startswith(h) for h in TRANSCRIPT_QUALITY_HEADINGS):
                 current = []
                 pulled.append(current)
+        elif stripped.startswith("### "):
+            section = stripped
+        # ป้ายที่อยู่ใต้หัวข้อคุณภาพอยู่แล้วไม่ต้องดึงซ้ำ มันกำลังจะถูกย้ายทั้งหัวข้อ
+        if current is None and stripped.startswith(TIMELINE_QUALITY_TAGS):
+            if section is not None and section != labelled:
+                if tagged:
+                    tagged.append("")
+                tagged.append(section)
+                labelled = section
+            tagged.append(stripped)
+            continue
         if current is not None:
             current.append(line)
         else:
             kept.append(line)
     blocks = ["\n".join(block).strip() for block in pulled]
+    if tagged:
+        blocks.append(f"{TIMELINE_QUALITY_HEADING}\n\n" + "\n".join(tagged))
     return "\n".join(kept).strip(), [b for b in blocks if b]
 
 
@@ -174,6 +212,7 @@ def save_summary(
     glossary_counts: dict[str, int] | None = None,
     fuzzy_seen: dict[str, int] | None = None,
     profile: str | None = None,
+    speaker_table: str | None = None,
 ) -> Path:
     # `model` is required, not optional: the point of choosing a model per meeting
     # is being able to judge afterwards whether the pricier one was worth it, and
@@ -213,6 +252,11 @@ def save_summary(
         footer.append(f"คำ fuzzy ที่เจอในห้อง: {seen}")
     meta_path = meeting_dir / "summary.meta.md"
     meta = "\n".join(footer)
+    if speaker_table:
+        # ตัวเลขรายผู้พูดเป็นเครื่องมือตัดสินคุณภาพการแยกเสียง ไม่ใช่เนื้อหาประชุม --
+        # เหตุผลเดียวกับ TRANSCRIPT_QUALITY_HEADINGS ส่วนบรรทัดสรุปสั้น ๆ ที่คนอ่านจริง
+        # อยู่บนหัว summary.md แล้ว (render.replace_participants_line)
+        meta += "\n\n" + speaker_table
     if quality_sections:
         # บรรทัดสรุปสั้น ๆ อยู่บน หัวข้อยาวอยู่ล่าง คนเปิดไฟล์นี้ส่วนใหญ่มาดูว่าใช้โมเดล
         # อะไร ไม่ใช่มาอ่านรายงานคุณภาพ -- สิ่งที่ถูกถามบ่อยกว่าควรอยู่บรรทัดแรก

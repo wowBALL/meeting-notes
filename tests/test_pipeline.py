@@ -137,9 +137,16 @@ def test_process_file_saves_transcript_and_summary(tmp_path):
     assert meeting_dir == expected_dir
     assert (meeting_dir / "transcript.md").exists()
     summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
-    assert summary == "## ประเด็นสำคัญ\n- ทดสอบ\n"
+    # บรรทัดผู้เข้าร่วมถูกเติมจากการนับ transcript ไม่ใช่จากที่โมเดลเขียน
+    assert summary == (
+        "ผู้เข้าร่วม: 1 เสียง (ระบุตัวได้จากลายเสียง 0 คน) — ผู้พูด 1 100.0%\n\n"
+        "## ประเด็นสำคัญ\n- ทดสอบ\n"
+    )
     meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
-    assert meta == f"สรุปด้วย {config.claude_model}\nประเภทประชุม: {config.meeting_profile}\n"
+    assert meta.startswith(
+        f"สรุปด้วย {config.claude_model}\nประเภทประชุม: {config.meeting_profile}\n"
+    )
+    assert "## ผู้พูดใน transcript" in meta
     assert (meeting_dir / "weekly-standup.mp3").exists()
     assert not audio_path.exists()
 
@@ -455,12 +462,14 @@ def test_a_missing_glossary_file_adds_no_glossary_lines(tmp_path):
         meeting_dir = process_file(audio_path, config)
 
     summary = (meeting_dir / "summary.md").read_text(encoding="utf-8")
-    assert summary == "## สรุป\n"
+    assert summary.endswith("## สรุป\n")
     assert "glossary" not in summary
     assert "fuzzy" not in summary
 
     meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
-    assert meta == (
+    # ตารางผู้พูดก็ไม่เกี่ยวกับ glossary เหมือนบรรทัด "ประเภทประชุม" -- มันนับจาก
+    # transcript จึงมีเสมอ ไม่ว่าจะมีไฟล์ glossary.md หรือไม่
+    assert meta.startswith(
         f"สรุปด้วย {config.claude_model}\n"
         f"ประเภทประชุม: {config.meeting_profile}\n"
     )

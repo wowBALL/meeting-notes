@@ -241,6 +241,63 @@ def test_carryover_still_finds_its_section_after_the_split(tmp_path):
     assert "- เรื่องค้าง" in summary
 
 
+_WITH_TIMELINE_TAGS = """## หัวข้อที่คุยกัน
+- เรื่องที่คุยกัน
+
+## ไทม์ไลน์ตามช่วง
+
+### [00:00–20:00]
+
+[หัวข้อ] อัปเดตงาน Payroll
+[ตกลงแล้ว] ใช้ Final Payslip เป็น source of truth — สรุปโดย: สอง
+[คำเพี้ยน?] PlayLight → เดาว่าคือ Playwright
+[ไม่มั่นใจ] ช่วง 12:30 เสียงทับกัน
+
+### [20:00–40:00]
+
+[หัวข้อ] เรื่อง BMAD
+[คำเพี้ยน?] Bmat → เดาว่าคือ BMAD
+"""
+
+
+def test_the_map_stage_quality_tags_leave_the_summary(tmp_path):
+    """หัวข้อไทม์ไลน์วางสรุปรายช่วงตามที่โมเดลเขียนทุกตัวอักษร ป้ายคุณภาพจึงหลุดมาถึง
+    summary.md ทางนี้ ทั้งที่ฝั่งที่ถูกยุบรวมแล้วถูกย้ายออกไปตั้งแต่ก่อนหน้านี้"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    path = save_summary(meeting_dir, _WITH_TIMELINE_TAGS, "GLM-5.2")
+
+    summary = path.read_text(encoding="utf-8")
+    assert "[คำเพี้ยน?]" not in summary
+    assert "[ไม่มั่นใจ]" not in summary
+    # ป้ายที่เป็นเนื้อหาประชุมต้องอยู่ครบ ไม่ใช่โดนกวาดไปด้วย
+    assert "[หัวข้อ] อัปเดตงาน Payroll" in summary
+    assert "[ตกลงแล้ว] ใช้ Final Payslip เป็น source of truth — สรุปโดย: สอง" in summary
+    # หัวข้อช่วงต้องยังอยู่ในไทม์ไลน์ แม้บรรทัดใต้มันจะถูกดึงออกไปบางส่วน
+    assert "### [00:00–20:00]" in summary
+    assert "### [20:00–40:00]" in summary
+
+
+def test_the_map_stage_quality_tags_keep_their_time_range_in_the_meta_file(tmp_path):
+    """คำที่ถอดเพี้ยนมีค่าตอนย้อนกลับไปฟัง -- ดึงมากองรวมกันโดยทิ้งช่วงเวลาไป แปลว่า
+    ต้องไล่หาเองว่าคำนั้นอยู่ตรงไหนของไฟล์เสียงยาวสองชั่วโมงครึ่ง"""
+    meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"
+    meeting_dir.mkdir(parents=True)
+
+    save_summary(meeting_dir, _WITH_TIMELINE_TAGS, "GLM-5.2")
+
+    meta = (meeting_dir / "summary.meta.md").read_text(encoding="utf-8")
+    assert "## ป้ายคุณภาพที่ค้างอยู่ในไทม์ไลน์รายช่วง" in meta
+    assert "[คำเพี้ยน?] PlayLight → เดาว่าคือ Playwright" in meta
+    assert "[ไม่มั่นใจ] ช่วง 12:30 เสียงทับกัน" in meta
+    assert "[คำเพี้ยน?] Bmat → เดาว่าคือ BMAD" in meta
+    # แต่ละคำต้องอยู่ใต้ช่วงของตัวเอง ไม่ใช่กองรวมกันหมด
+    first = meta.index("### [00:00–20:00]")
+    second = meta.index("### [20:00–40:00]")
+    assert first < meta.index("PlayLight") < second < meta.index("Bmat")
+
+
 def test_a_summary_without_quality_sections_is_unchanged(tmp_path):
     """สรุปจาก prompt รุ่นเก่าที่ไม่มีสองหัวข้อนี้ ต้องได้ไฟล์หน้าตาเดิมเป๊ะ"""
     meeting_dir = tmp_path / "meetings" / "2026-07-22-weekly-standup"

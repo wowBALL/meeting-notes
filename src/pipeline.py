@@ -17,7 +17,12 @@ from src.job import (
 )
 from src.merge import merge_transcript_and_speakers
 from src.pending import build_pending_speakers, write_pending
-from src.render import build_speaker_labels, render_transcript_markdown
+from src.render import (
+    build_speaker_labels,
+    render_transcript_markdown,
+    replace_participants_line,
+    speaker_table,
+)
 from src.retry import retry_with_backoff
 from src.speaker_guess import guess_speaker_names
 from src.speakers import Match, load_registry, match_known
@@ -497,13 +502,17 @@ def _finish_meeting(
         # summary nobody asked for. Everything else below still runs: the meeting
         # is finished, just without that one file.
         if summary_markdown is not None:
+            # transcript_markdown ตัวดิบ ไม่ใช่ corrected_markdown: บรรทัดผู้เข้าร่วมนับ
+            # จากป้ายผู้พูด ซึ่ง glossary ไม่ได้แตะอยู่แล้ว และของดิบคือสิ่งที่ตรงกับ
+            # transcript.md บนดิสก์ที่คนจะเปิดไปตรวจต่อ
             save_summary(
                 meeting_dir,
-                summary_markdown,
+                replace_participants_line(summary_markdown, transcript_markdown),
                 claude_model,
                 glossary_counts=glossary_counts,
                 fuzzy_seen=fuzzy_seen,
                 profile=profile,
+                speaker_table=speaker_table(transcript_markdown),
             )
         archive_audio(meeting_dir, audio_path)
         discard_job(audio_path)
