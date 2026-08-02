@@ -1,5 +1,10 @@
-from src.glossary import Glossary
-from tools.check_glossary import count_in_transcripts, find_collisions
+from src.glossary import DuplicateKey, Glossary
+from tools.check_glossary import (
+    count_in_transcripts,
+    find_collisions,
+    format_duplicate_keys,
+    main,
+)
 
 
 def _levels(findings: list[tuple[str, str]]) -> list[str]:
@@ -63,3 +68,124 @@ def test_count_in_transcripts_measures_against_the_raw_files(tmp_path):
     assert tally["Depth"] == (3, 2)
     # คำที่ไม่เคยโผล่ต้องอยู่ในผลด้วย เป็นศูนย์ -- ไม่งั้นหาของที่ควรลบไม่เจอ
     assert tally["Death"] == (0, 0)
+
+
+# --- เขียนซ้ำในไฟล์ (คีย์ซ้ำ) --------------------------------------------------
+#
+# src/glossary.py รวมฟอร์มให้อัตโนมัติแล้วตั้งแต่แก้บั๊ก assignment->merge จึงไม่ใช่
+# "หนัก" (ข้อมูลไม่หาย) แต่ยังควรรายงานไว้ให้คนไปรวมบรรทัดในไฟล์เพื่อความสะอาด
+
+
+def test_format_duplicate_keys_lists_every_line_the_term_was_declared_on():
+    dup = DuplicateKey(section="exact", term="JWKS", lines=(66, 115))
+
+    messages = format_duplicate_keys([dup])
+
+    assert len(messages) == 1
+    assert "JWKS" in messages[0]
+    assert "66" in messages[0]
+    assert "115" in messages[0]
+
+
+def test_format_duplicate_keys_returns_one_message_per_duplicate():
+    dups = [
+        DuplicateKey(section="exact", term="JWKS", lines=(66, 115)),
+        DuplicateKey(section="exact", term="Approve", lines=(108, 129, 171)),
+    ]
+
+    messages = format_duplicate_keys(dups)
+
+    assert len(messages) == 2
+
+
+def test_no_duplicates_produces_no_messages():
+    assert format_duplicate_keys([]) == []
+
+
+def _write_glossary(tmp_path, text):
+    glossary_path = tmp_path / "glossary.md"
+    teams_path = tmp_path / "teams.md"
+    glossary_path.write_text(text, encoding="utf-8")
+    teams_path.write_text("", encoding="utf-8")
+    return glossary_path, teams_path
+
+
+def test_duplicate_keys_are_reported_but_do_not_force_a_nonzero_exit_code(
+    tmp_path, capsys
+):
+    """คีย์ซ้ำไม่ทำให้ข้อมูลหายอีกต่อไปหลังแก้ parser (รวมอัตโนมัติ) -- จึงเป็นแค่
+    เรื่องความสะอาดของไฟล์ ไม่ใช่บั๊กที่ควรทำให้ exit code ไม่เป็นศูนย์
+
+    ฟอร์มยาว >= 4 อักขระโดยตั้งใจ -- ฟอร์มสั้นจะโดน MIN_SAFE_LENGTH ของ find_collisions
+    แล้ว "JWKS" จะโผล่ในบล็อก "ควรดู" ไปด้วย ทำให้ assert "JWKS" in out ผ่านได้แม้
+    บล็อกคีย์ซ้ำจะถูกตัดออกไปเงียบๆ (พิสูจน์แล้วด้วย mutation -- ปิดบล็อกคีย์ซ้ำทิ้ง
+    ทั้งก้อนแล้วเทสรุ่นแรกที่ใช้ฟอร์มสั้นยังผ่านอยู่) จึง assert หัวข้อ/สัญลักษณ์ของ
+    บล็อกนี้โดยตรง ไม่ใช่แค่ชื่อคำถูกซึ่งโผล่ได้จากหลายจุด
+    """
+    glossary_path, teams_path = _write_glossary(
+        tmp_path, "## exact\nJWKS: alpha\nJWKS: bravo\n"
+    )
+
+    code = main(
+        [
+            "--glossary",
+            str(glossary_path),
+            "--teams",
+            str(teams_path),
+            "--meetings",
+            str(tmp_path / "no-such-meetings-dir"),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "เขียนซ้ำในไฟล์ (1):" in out
+    assert "↻" in out
+    assert "JWKS" in out
+
+
+def test_a_heavy_collision_alongside_a_duplicate_key_still_exits_nonzero(
+    tmp_path, capsys
+):
+    """คีย์ซ้ำไม่ควรไปกลบหรือลด severity ของ finding อื่นที่ยังร้ายแรงอยู่จริง"""
+    glossary_path, teams_path = _write_glossary(
+        tmp_path,
+        "## exact\nControl Plane: Pane\nPane Layout: PaneLayoutTypo\n"
+        "JWKS: alpha\nJWKS: bravo\n",
+    )
+
+    code = main(
+        [
+            "--glossary",
+            str(glossary_path),
+            "--teams",
+            str(teams_path),
+            "--meetings",
+            str(tmp_path / "no-such-meetings-dir"),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Pane" in out
+    assert "เขียนซ้ำในไฟล์ (1):" in out
+
+
+def test_a_clean_file_with_no_duplicates_prints_no_duplicate_section(
+    tmp_path, capsys
+):
+    glossary_path, teams_path = _write_glossary(tmp_path, "## exact\nRailway: เรลเวย์\n")
+
+    main(
+        [
+            "--glossary",
+            str(glossary_path),
+            "--teams",
+            str(teams_path),
+            "--meetings",
+            str(tmp_path / "no-such-meetings-dir"),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert "เขียนซ้ำ" not in out

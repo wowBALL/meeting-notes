@@ -20,7 +20,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from src.glossary import load
+from src.glossary import DuplicateKey, load
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -110,6 +110,24 @@ def find_collisions(glossary) -> list[tuple[str, str]]:
     return findings
 
 
+def format_duplicate_keys(duplicates: list[DuplicateKey]) -> list[str]:
+    """ข้อความอ่านง่ายจาก glossary.duplicate_keys -- แค่ชี้ตำแหน่ง ไม่ใช่บั๊กร้ายแรง
+
+    src/glossary.py รวมฟอร์มจากทุกบรรทัดที่ประกาศคำถูกตัวเดียวกันซ้ำให้อัตโนมัติ
+    แล้ว (ดู _parse_glossary_file) ข้อมูลจึงไม่หายอีกต่อไปแม้ไม่รัน check ตัวนี้เลย
+    ฟังก์ชันนี้จึงแค่บอกว่าควรไปรวมบรรทัดในไฟล์ให้เหลือบรรทัดเดียวเพื่อความสะอาด
+    ไม่ใช่คำเตือนที่ควรบล็อกอะไร
+    """
+    messages = []
+    for dup in duplicates:
+        line_list = ", ".join(str(n) for n in dup.lines)
+        messages.append(
+            f'[{dup.section}] "{dup.term}" ประกาศซ้ำที่บรรทัด {line_list} -- '
+            "โหลดแล้วรวมฟอร์มให้อัตโนมัติ แต่ควรรวมเป็นบรรทัดเดียวในไฟล์เพื่อความสะอาด"
+        )
+    return messages
+
+
 def count_in_transcripts(glossary, meetings_dir: Path) -> dict[str, tuple[int, int]]:
     """คำผิดแต่ละตัวโผล่ในประชุมจริงกี่ครั้ง ในกี่ประชุม
 
@@ -181,6 +199,15 @@ def main(argv: list[str] | None = None) -> int:
         print()
     if not findings:
         print("ไม่เจอคำผิดที่กินคำอื่น\n")
+
+    # ไม่นับรวมกับ heavy/light: src/glossary.py รวมฟอร์มให้อัตโนมัติแล้ว ข้อมูลไม่หาย
+    # จึงไม่ควรทำให้ exit code ไม่เป็นศูนย์ -- แค่ชี้ตำแหน่งให้คนไปรวมบรรทัดเอง
+    duplicate_messages = format_duplicate_keys(glossary.duplicate_keys)
+    if duplicate_messages:
+        print(f"เขียนซ้ำในไฟล์ ({len(duplicate_messages)}):")
+        for message in duplicate_messages:
+            print(f"  ↻ {message}")
+        print()
 
     meetings_dir = Path(args.meetings)
     if meetings_dir.is_dir():

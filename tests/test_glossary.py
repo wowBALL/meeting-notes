@@ -2,7 +2,7 @@ import logging
 import re
 
 from src.chunk import parse_transcript_segments
-from src.glossary import HOTWORDS_MAX_CHARS, load
+from src.glossary import DuplicateKey, HOTWORDS_MAX_CHARS, load
 
 GLOSSARY_SAMPLE = """# Glossary
 
@@ -427,6 +427,78 @@ def test_missing_files_load_as_empty_without_raising(tmp_path):
     assert result.aliases == {}
     assert result.ambiguous == []
     assert result.teams == {}
+    assert result.duplicate_keys == []
+
+
+# --- คีย์ซ้ำใน section เดียวกัน -----------------------------------------------
+#
+# ก่อนแก้ _parse_glossary_file ทำ buckets[section][correct] = parsed ซึ่งเป็น
+# assignment ไม่ใช่ merge -- คำถูกตัวเดียวกันโผล่สองบรรทัดใน section เดียวกัน
+# บรรทัดแรกหายทั้งบรรทัดแบบเงียบๆ ไม่มี log ไม่มี warning เจอจริงใน glossary.md
+# ของ repo นี้เมื่อ 2026-08-02: มีของตายอยู่แล้ว 4 บรรทัด รวม 11 คำผิด ทั้งที่คน
+# ดูแลไฟล์นี้ด้วยมือมาตลอด
+
+
+def test_duplicate_key_in_the_same_section_merges_forms_instead_of_dropping_earlier_line(
+    tmp_path, caplog
+):
+    with caplog.at_level(logging.WARNING):
+        glossary = _loaded(
+            tmp_path, glossary="## exact\nJWKS: JWT-KS, JWTKS\nJWKS: jks, cwks\n"
+        )
+
+    assert glossary.exact == {"JWKS": ["JWT-KS", "JWTKS", "jks", "cwks"]}
+    assert "JWKS" in caplog.text
+
+
+def test_duplicate_key_does_not_repeat_a_form_both_lines_already_share(tmp_path):
+    glossary = _loaded(
+        tmp_path, glossary="## exact\nJWKS: jks, cwks\nJWKS: jks, extra\n"
+    )
+
+    assert glossary.exact == {"JWKS": ["jks", "cwks", "extra"]}
+
+
+def test_duplicate_key_three_times_merges_all_and_records_every_line(tmp_path):
+    glossary = _loaded(
+        tmp_path, glossary="## exact\nApprove: A\nApprove: B\nApprove: C\n"
+    )
+
+    assert glossary.exact == {"Approve": ["A", "B", "C"]}
+    assert glossary.duplicate_keys == [
+        DuplicateKey(section="exact", term="Approve", lines=(2, 3, 4))
+    ]
+
+
+def test_duplicate_key_records_the_exact_line_numbers_comments_and_blanks_included(
+    tmp_path,
+):
+    glossary = _loaded(
+        tmp_path,
+        glossary="## exact\n# comment\nJWKS: a\n\nDocker: ด็อกเกอร์\nJWKS: b\n",
+    )
+
+    assert glossary.duplicate_keys == [
+        DuplicateKey(section="exact", term="JWKS", lines=(3, 6))
+    ]
+
+
+def test_duplicate_key_across_different_sections_is_not_a_duplicate(tmp_path):
+    """GORM/Attendance/Kubernetes ของจริงตั้งใจอยู่ทั้ง exact และ fuzzy พร้อมกัน --
+    คนละ dict กัน คำถูกตัวเดียวกันข้าม section จึงไม่ใช่บั๊ก ต้องไม่นับเป็นคีย์ซ้ำ"""
+    glossary = _loaded(
+        tmp_path, glossary="## exact\nGORM: กรอม\n\n## fuzzy\nGORM: จีออม\n"
+    )
+
+    assert glossary.exact == {"GORM": ["กรอม"]}
+    assert glossary.fuzzy == {"GORM": ["จีออม"]}
+    assert glossary.duplicate_keys == []
+
+
+def test_no_duplicates_produces_an_empty_list(tmp_path):
+    glossary = _loaded(tmp_path)
+
+    assert glossary.duplicate_keys == []
 
 
 def test_crlf_file_leaves_no_carriage_return_in_any_term(tmp_path):

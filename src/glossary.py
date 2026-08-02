@@ -83,6 +83,20 @@ def _substitute(text: str, mapping: dict[str, list[str]], counts: dict[str, int]
     return pattern.sub(_fix, text)
 
 
+@dataclass(frozen=True)
+class DuplicateKey:
+    """คำถูกตัวเดียวกันถูกประกาศซ้ำมากกว่าหนึ่งบรรทัดใน section เดียวกัน
+
+    ไม่ใช่บั๊กที่ทำให้ข้อมูลหายอีกต่อไป (_parse_glossary_file รวมฟอร์มให้อัตโนมัติ
+    แล้ว) แต่ยังควรรายงานไว้ให้คนไปรวมเป็นบรรทัดเดียวในไฟล์เพื่อความสะอาด --
+    tools/check_glossary.py เป็นคนพิมพ์ข้อความนี้ออกให้คนอ่าน
+    """
+
+    section: str
+    term: str
+    lines: tuple[int, ...]  # ทุกบรรทัดที่คำถูกนี้ถูกประกาศใน section นี้ เรียงจากน้อยไปมาก
+
+
 @dataclass
 class Glossary:
     exact: dict[str, list[str]] = field(default_factory=dict)
@@ -91,6 +105,7 @@ class Glossary:
     aliases: dict[str, list[str]] = field(default_factory=dict)
     ambiguous: list[dict] = field(default_factory=list)
     teams: dict[str, list[str]] = field(default_factory=dict)
+    duplicate_keys: list[DuplicateKey] = field(default_factory=list)
 
     def apply_exact(self, text: str) -> tuple[str, dict[str, int]]:
         """(ข้อความที่แก้แล้ว, จำนวนที่แก้รายคำถูก)
@@ -286,7 +301,14 @@ def _parse_glossary_file(path: Path | None) -> Glossary:
     }
     section = None
 
-    for raw_line in _read_lines(path):
+    # ตำแหน่งที่ (section, correct) เคยถูกเห็นครั้งแรก -- ต้องเก็บไว้ทุกคำ ไม่ใช่แค่
+    # ตอนเจอซ้ำ เพราะรู้ว่า "ซ้ำ" ก็ต่อเมื่อรู้ว่า "เคยเห็นมาก่อนที่บรรทัดไหน"
+    # แยกคีย์ด้วย section เสมอ -- คำถูกตัวเดียวกันข้าม section ไม่ใช่คีย์ซ้ำโดยเจตนา
+    # (GORM/Attendance/Kubernetes ของจริงตั้งใจอยู่ทั้ง exact และ fuzzy พร้อมกัน)
+    first_seen_at: dict[tuple[str, str], int] = {}
+    duplicate_lines: dict[tuple[str, str], list[int]] = {}
+
+    for line_no, raw_line in enumerate(_read_lines(path), start=1):
         line = raw_line.strip()
         if not line:
             continue
@@ -320,7 +342,32 @@ def _parse_glossary_file(path: Path | None) -> Glossary:
                     ", ".join(repr(t) for t in unsafe),
                 )
                 continue
-            buckets[section][correct] = parsed
+            key = (section, correct)
+            bucket = buckets[section]
+            if correct in bucket:
+                # Critical: ต้อง merge ไม่ใช่ assign -- ก่อนแก้บรรทัดนี้เขียนว่า
+                # bucket[correct] = parsed เฉยๆ ซึ่งเป็น assignment ทับของเดิมหาย
+                # ทั้งบรรทัดแบบเงียบๆ ไม่มี log ไม่มี warning เจอจริงใน glossary.md
+                # ของ repo นี้ (2026-08-02): 4 บรรทัดตาย 11 คำผิดหาย ทั้งที่คนดูแล
+                # ไฟล์นี้ด้วยมือมาตลอด -- ไฟล์นี้โตด้วยการต่อบล็อกใหม่ท้าย section
+                # ทีละประชุม คีย์ซ้ำจึงเกิดขึ้นเป็นปกติ ไม่ใช่กรณีพิเศษที่มองข้ามได้
+                existing = bucket[correct]
+                new_forms = [f for f in parsed if f not in existing]
+                bucket[correct] = existing + new_forms
+                if key not in duplicate_lines:
+                    duplicate_lines[key] = [first_seen_at[key]]
+                duplicate_lines[key].append(line_no)
+                logger.warning(
+                    "Merging duplicate %s entry %r declared again at line %d "
+                    "(now has %d forms) -- consider combining into one line",
+                    section,
+                    correct,
+                    line_no,
+                    len(bucket[correct]),
+                )
+            else:
+                bucket[correct] = parsed
+                first_seen_at[key] = line_no
         elif section == "ambiguous":
             entry = _parse_ambiguous(line)
             if entry is None:
@@ -328,6 +375,10 @@ def _parse_glossary_file(path: Path | None) -> Glossary:
                 continue
             glossary.ambiguous.append(entry)
 
+    glossary.duplicate_keys = [
+        DuplicateKey(section=dup_section, term=term, lines=tuple(lines))
+        for (dup_section, term), lines in duplicate_lines.items()
+    ]
     return glossary
 
 
