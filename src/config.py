@@ -256,6 +256,12 @@ DEFAULT_CHUNK_OVERLAP_TOKENS = 1_500
 # มั่วจนการรวมบล็อกยิ่งกลบความผิดพลาด (ดู docstring ของ merge_speaker_turns)
 DEFAULT_MERGE_SPEAKER_TURNS = True
 
+# "typhoon" ต้องมี .typhoon_venv ตั้งไว้แล้ว (ดู src/transcribe_typhoon.py) -- เร็วกว่า
+# large-v3 บน CPU ล้วนและหลอนน้อยกว่าตามที่วัดไว้ แต่ไม่มี hotwords ทำให้พลาดศัพท์
+# glossary หนักกว่า large-v3+hotwords มาก ยังเป็นตัวเลือกทดลอง ไม่ใช่ค่าเริ่มต้น
+DEFAULT_ASR_ENGINE = "whisper"
+KNOWN_ASR_ENGINES = (DEFAULT_ASR_ENGINE, "typhoon")
+
 
 @dataclass
 class Config:
@@ -281,6 +287,7 @@ class Config:
     whisper_condition_on_previous_text: bool = (
         DEFAULT_WHISPER_CONDITION_ON_PREVIOUS_TEXT
     )
+    asr_engine: str = DEFAULT_ASR_ENGINE
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -420,6 +427,18 @@ def load_config(base_dir: Path | None = None) -> Config:
             "เดียววนจนจบ) -- ตั้งใจจริงให้ปล่อยไว้ ไม่งั้นตั้ง "
             "WHISPER_CONDITION_ON_PREVIOUS_TEXT=false"
         )
+    asr_engine = os.environ.get("ASR_ENGINE", "").strip().lower() or DEFAULT_ASR_ENGINE
+    if asr_engine not in KNOWN_ASR_ENGINES:
+        logger.warning(
+            "ASR_ENGINE=%r ไม่ใช่ตัวถอดเสียงที่รองรับ (%s) ใช้ %r แทน / "
+            "unknown ASR_ENGINE %r, falling back to %r",
+            asr_engine,
+            ", ".join(KNOWN_ASR_ENGINES),
+            DEFAULT_ASR_ENGINE,
+            asr_engine,
+            DEFAULT_ASR_ENGINE,
+        )
+        asr_engine = DEFAULT_ASR_ENGINE
     speaker_match_high = _read_float("SPEAKER_MATCH_HIGH", DEFAULT_SPEAKER_MATCH_HIGH)
     speaker_match_low = _read_float("SPEAKER_MATCH_LOW", DEFAULT_SPEAKER_MATCH_LOW)
     # HIGH ต้องไม่ต่ำกว่า LOW -- ถ้ากลับกัน ทุกคนที่ผ่านเกณฑ์ LOW จะผ่านเกณฑ์ HIGH ไปด้วย
@@ -467,4 +486,5 @@ def load_config(base_dir: Path | None = None) -> Config:
         whisper_batched=whisper_batched,
         whisper_hotwords=whisper_hotwords,
         whisper_condition_on_previous_text=whisper_condition_on_previous_text,
+        asr_engine=asr_engine,
     )

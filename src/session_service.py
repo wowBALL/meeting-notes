@@ -91,6 +91,7 @@ class RecorderState:
         self.room = None
         self.model = None
         self.profile = None
+        self.asr_engine = None
         self.started_at = None
         self.stop_event = None
         self.thread = None
@@ -431,6 +432,10 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             # ตัดสินใจกับค่าที่ไม่รู้จัก (เตือนแล้วใช้ dev) การปฏิเสธที่นี่จะทำให้
             # กดเปิดห้องไม่ได้เพราะค่าที่แก้ทีหลังได้ ทั้งที่ประชุมกำลังจะเริ่ม
             state.profile = payload.get("profile")
+            # ไม่ validate เหมือนกัน แบบเดียวกับ model/profile -- ฝั่ง pipeline เป็นคน
+            # ตัดสินใจกับค่าที่ไม่รู้จัก (ใช้ whisper ต่อ) การปฏิเสธที่นี่จะทำให้กดเปิด
+            # ห้องไม่ได้เพราะค่าที่แก้ทีหลังได้ ทั้งที่ประชุมกำลังจะเริ่ม
+            state.asr_engine = payload.get("asr_engine")
             state.started_at = time.monotonic()
             state.stop_event = threading.Event()
             state.warnings = []
@@ -439,7 +444,12 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             state.mic_muted.clear()
             stop_event = state.stop_event
             mic_muted = state.mic_muted
-            room, model, profile = state.room, state.model, state.profile
+            room, model, profile, asr_engine = (
+                state.room,
+                state.model,
+                state.profile,
+                state.asr_engine,
+            )
 
         def on_event(code, params=None, level="info"):
             # ไมค์/ลำโพงที่ถูกดักฟังจริงต้องเห็นได้ตลอดการอัด ไม่ใช่ไปขุดใน log --
@@ -464,6 +474,7 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                     on_event,
                     mic_muted=mic_muted,
                     profile=profile,
+                    asr_engine=asr_engine,
                 )
             except Exception:
                 logger.exception("ตัวอัดล้มระหว่างทำงาน")

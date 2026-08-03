@@ -66,6 +66,12 @@ const UI = {
       ["dev", "dev ล้วน", "ศัพท์เทคนิคตรงๆ"],
       ["cross", "Business + dev", 'แยก "ทำได้" ออกจาก "จะทำ" · ขยายศัพท์ให้คนนอกทีม'],
     ],
+    engineKind: "ตัวถอดเสียง",
+    // id ต้องตรงกับ config.KNOWN_ASR_ENGINES
+    engines: [
+      ["whisper", "large-v3 (ค่าเริ่มต้น)", "แม่นสุด · มี hotwords ช่วยจับศัพท์เฉพาะทาง"],
+      ["typhoon", "Typhoon (ทดลอง)", "เร็วกว่า 3-10 เท่า บน CPU · ไม่มี hotwords พลาดศัพท์เฉพาะทางง่ายกว่า"],
+    ],
   },
   en: {
     title: "Meeting recorder",
@@ -131,6 +137,11 @@ const UI = {
         'Separates "can be done" from "will be done" · expands jargon',
       ],
     ],
+    engineKind: "Transcription engine",
+    engines: [
+      ["whisper", "large-v3 (default)", "Most accurate · hotwords catch jargon"],
+      ["typhoon", "Typhoon (experimental)", "3-10x faster on CPU · no hotwords, misses jargon more easily"],
+    ],
   },
 };
 
@@ -157,6 +168,9 @@ let model = "Qwen/Qwen3.6-35B-A3B";
 // dev เป็นค่าเริ่มต้นเพราะเป็น 3 ใน 4 ครั้งของสัปดาห์ และการเผลอเลือก cross ในประชุม
 // dev ล้วนทำให้โมเดล qualify คำพูดปกติเกินจำเป็นจนสรุปอ่านแล้วอ้อมค้อม
 let profile = "dev";
+// ต้องตรงกับ config.DEFAULT_ASR_ENGINE -- หน้าเว็บกับค่า .env ต้องเริ่มที่ตัวถอดเสียง
+// เดียวกัน ไม่งั้นคนที่กด "เปิดห้อง" ทันทีจะได้คนละตัวถอดเสียงกับที่ตั้งใจ
+let asrEngine = "whisper";
 let roomDraft = "";
 let stopping = false;
 let offline = false;
@@ -430,10 +444,21 @@ function viewIdle(state) {
     state && state.worker_ready === false
       ? `<div class="note warn">⚠ ${esc(x.workerOffNote)}</div>`
       : "";
+  const engineOptions = x.engines
+    .map(
+      ([id, title, desc]) => `
+      <div class="opt ${asrEngine === id ? "on" : ""}" data-engine="${id}">
+        <span class="tick">✓</span>
+        <span><span class="t">${esc(title)}</span><br><span class="d">${esc(desc)}</span></span>
+      </div>`
+    )
+    .join("");
   return `${warningsHtml(state)}${workerNote}${pendingHtml()}
     <label class="field">${esc(x.mode)}</label>
     ${options}
     ${profileOptions}
+    <label class="field" style="margin-top:14px">${esc(x.engineKind)}</label>
+    ${engineOptions}
     <label class="field" style="margin-top:14px">${esc(x.room)}</label>
     <input type="text" id="room" placeholder="${esc(x.roomPh)}" value="${esc(roomDraft)}" />
     <button class="primary" id="go" style="margin-top:14px">${esc(x.open)}</button>`;
@@ -532,6 +557,8 @@ function signatureOf(state, view, progress) {
     // ถ้าไม่มีค่านี้ การกดเลือกประเภทประชุมจะเปลี่ยนตัวแปรจริงแต่เครื่องหมายถูก
     // ไม่ขยับ ผู้ใช้เห็นว่ากดไม่ติดแล้วกดซ้ำ หรือเริ่มอัดด้วยประเภทที่ไม่ได้ตั้งใจ
     profile,
+    // เหตุผลเดียวกับ profile ข้างบน: ไม่มีค่านี้แล้วกดเลือกตัวถอดเสียงจะดูเหมือนกดไม่ติด
+    asrEngine,
     lang,
     stopping,
     progress ? `${progress.stage}:${progress.failed}` : "",
@@ -619,6 +646,12 @@ function wire() {
       render(lastState);
     };
   });
+  document.querySelectorAll("[data-engine]").forEach((o) => {
+    o.onclick = () => {
+      asrEngine = o.dataset.engine;
+      render(lastState);
+    };
+  });
   const room = el("room");
   if (room) room.oninput = () => (roomDraft = room.value);
   const go = el("go");
@@ -661,7 +694,7 @@ async function openRoom() {
     const response = await fetch("/api/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, profile, name: roomDraft }),
+      body: JSON.stringify({ model, profile, asr_engine: asrEngine, name: roomDraft }),
     });
     // 409 = มีห้องเปิดอยู่แล้ว ให้สถานะจริงชนะ ไม่ต้องเดา
     if (response.status === 201) {

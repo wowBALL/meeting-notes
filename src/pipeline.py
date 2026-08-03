@@ -10,6 +10,7 @@ from src.diarize import diarize_audio
 from src.job import (
     NO_SUMMARY_MODEL,
     discard_job,
+    read_asr_engine,
     read_model,
     read_profile,
     read_transcript,
@@ -38,6 +39,7 @@ from src.glossary import load as load_glossary
 from src.prompts import CROSS_TEAM_PROFILE
 from src.summarize import check_model_reachable, summarize_transcript
 from src.transcribe import transcribe_audio
+from src.transcribe_typhoon import transcribe_audio_typhoon
 from src.voiceprint import Voiceprint, extract_voiceprints, load_embedder
 
 logger = logging.getLogger(__name__)
@@ -194,6 +196,8 @@ def process_file(
     # และผู้ใช้แก้ .env ระหว่างนั้นได้ ประชุมที่ค้างอยู่ต้องยังใช้ค่าที่เลือกไว้จริง
     # ไม่มีค่า = ไฟล์ที่ลากใส่ inbox/ เอง หรือ .job.json ที่เขียนก่อนมีฟีเจอร์นี้
     profile = read_profile(audio_path) or config.meeting_profile
+    # ตัวถอดเสียงที่เลือกไว้ตอนอัดชนะ ASR_ENGINE ใน .env ด้วยกฎเดียวกันเป๊ะ
+    asr_engine = read_asr_engine(audio_path) or config.asr_engine
 
     # ทุก activity.append ที่นี่ไม่มีทาง raise (ดู src/activity.py) จึงไม่ห่อ try --
     # ห่อแล้วจะบังคับให้คนอ่านคิดว่ามันอาจ raise ได้ ซึ่งไม่จริง
@@ -237,21 +241,28 @@ def process_file(
 
         activity.append(config.base_dir, job, "transcribe_started")
         try:
-            whisper_segments = retry_with_backoff(
-                lambda: transcribe_audio(
-                    wav_path,
-                    model_size=config.whisper_model,
-                    model=whisper_model,
-                    batched=config.whisper_batched,
-                    # สตริงว่าง (ไม่มี glossary.md) ต้องกลายเป็น None ไม่ใช่ "" --
-                    # faster-whisper เปิดช่อง sot_prev ให้ทันทีที่ hotwords truthy
-                    # ค่าว่างจึงเป็นการจ่าย token ทิ้งเปล่า ๆ ทุกหน้าต่าง
-                    hotwords=hotwords or None,
-                    condition_on_previous_text=(
-                        config.whisper_condition_on_previous_text
-                    ),
+            if asr_engine == "typhoon":
+                # ไม่มี hotwords: RNN-T ของ Typhoon ไม่มีทาง inject bias ตอน decode
+                # แบบ faster-whisper (ดู memory typhoon-asr-realtime-evaluated)
+                whisper_segments = retry_with_backoff(
+                    lambda: transcribe_audio_typhoon(wav_path, config.base_dir)
                 )
-            )
+            else:
+                whisper_segments = retry_with_backoff(
+                    lambda: transcribe_audio(
+                        wav_path,
+                        model_size=config.whisper_model,
+                        model=whisper_model,
+                        batched=config.whisper_batched,
+                        # สตริงว่าง (ไม่มี glossary.md) ต้องกลายเป็น None ไม่ใช่ "" --
+                        # faster-whisper เปิดช่อง sot_prev ให้ทันทีที่ hotwords truthy
+                        # ค่าว่างจึงเป็นการจ่าย token ทิ้งเปล่า ๆ ทุกหน้าต่าง
+                        hotwords=hotwords or None,
+                        condition_on_previous_text=(
+                            config.whisper_condition_on_previous_text
+                        ),
+                    )
+                )
         except Exception as e:
             activity.append(config.base_dir, job, "job_failed", "error", {"error": str(e)})
             move_to_failed(audio_path, config.failed_dir, f"Transcription failed: {e}")

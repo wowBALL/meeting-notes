@@ -75,6 +75,7 @@ def write_manifest(
     devices: dict | None = None,
     claude_model: str | None = None,
     profile: str | None = None,
+    asr_engine: str | None = None,
 ) -> None:
     manifest = {
         "stem": stem,
@@ -94,6 +95,9 @@ def write_manifest(
         # ประเภทประชุมที่ผู้ใช้เลือกไว้ตอนอัด เดินทางเส้นเดียวกับ claude_model
         # เป๊ะๆ ด้วยเหตุผลเดียวกัน (watcher อ่าน .env ครั้งเดียวตอนตัวเองเริ่ม)
         "profile": profile,
+        # ตัวถอดเสียงที่เลือกไว้ตอนอัด เดินทางเส้นเดียวกับ claude_model/profile
+        # เป๊ะๆ ด้วยเหตุผลเดียวกัน (watcher อ่าน .env ครั้งเดียวตอนตัวเองเริ่ม)
+        "asr_engine": asr_engine,
     }
     (session_dir / MANIFEST_NAME).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -227,6 +231,7 @@ def finish_session(
         devices=manifest.get("devices"),
         claude_model=manifest.get("claude_model"),
         profile=manifest.get("profile"),
+        asr_engine=manifest.get("asr_engine"),
     )
 
     concat_list_path = session_dir / "concat.txt"
@@ -248,12 +253,13 @@ def finish_session(
     # feature existed has no such key.
     claude_model = manifest.get("claude_model")
     profile = manifest.get("profile")
-    # `or profile` ไม่ใช่แค่ `claude_model`: `src.record --profile cross` ที่ไม่ได้ส่ง
-    # --model มีค่า profile ที่ต้องรักษาไว้ ถ้าดูแค่ model ค่านั้นจะหายไปเงียบๆ
+    asr_engine = manifest.get("asr_engine")
+    # `or profile or asr_engine` ไม่ใช่แค่ `claude_model`: `src.record --profile cross`
+    # ที่ไม่ได้ส่ง --model มีค่า profile ที่ต้องรักษาไว้ ถ้าดูแค่ model ค่านั้นจะหายไปเงียบๆ
     # write_job เขียน claude_model=None ลงไปได้ read_model คืน None แล้วผู้เรียก
-    # ตกไปใช้ค่าจาก .env ตามปกติ
-    if claude_model or profile:
-        write_job(inbox_dir, stem, claude_model, profile=profile)
+    # ตกไปใช้ค่าจาก .env ตามปกติ -- asr_engine เดินตามกฎเดียวกัน
+    if claude_model or profile or asr_engine:
+        write_job(inbox_dir, stem, claude_model, profile=profile, asr_engine=asr_engine)
 
     destination = inbox_dir / f"{stem}.ogg"
     # Atomic within the volume: the watcher never sees a partially written file.

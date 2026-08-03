@@ -336,21 +336,27 @@ def recover_orphan_sessions(inbox_dir: Path, emit=None) -> list[Path]:
     return recovered
 
 
-def parse_args(argv: list[str]) -> tuple[str | None, str | None]:
-    """(meeting name, chosen summary model) from the command line."""
+def parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None, str | None]:
+    """(meeting name, chosen summary model, profile, asr_engine) from the command line."""
     parser = argparse.ArgumentParser(prog="src.record")
     parser.add_argument("name", nargs="?", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--profile", default=None)
+    parser.add_argument("--asr-engine", default=None)
     args = parser.parse_args(argv)
     # start-meeting.bat passes an empty string through when the user skips the
     # prompt, and an empty meeting name must behave exactly like no name at all.
     # เหตุผลเดียวกันกับ --profile: set /p ที่ถูกกด Enter ผ่านส่งสตริงว่างมา
     #
-    # ไม่ validate ชื่อ profile ที่นี่โดยเจตนา เหมือนที่ไม่ validate ชื่อโมเดล --
-    # ตัวอัดแค่ส่งต่อ ฝั่งสรุปเป็นคนตัดสินใจกับค่าที่ไม่รู้จัก (เตือนแล้วใช้ dev)
+    # ไม่ validate ชื่อ profile/asr_engine ที่นี่โดยเจตนา เหมือนที่ไม่ validate ชื่อโมเดล --
+    # ตัวอัดแค่ส่งต่อ ฝั่งสรุป/ถอดเสียงเป็นคนตัดสินใจกับค่าที่ไม่รู้จัก (เตือนแล้วใช้ default)
     # ถ้า validate ที่นี่ การพิมพ์ผิดในเมนูจะทำให้ประชุมอัดไม่ได้เลย
-    return (args.name or None), args.model, (args.profile or None)
+    return (
+        (args.name or None),
+        args.model,
+        (args.profile or None),
+        (args.asr_engine or None),
+    )
 
 
 def run_recording(
@@ -361,6 +367,7 @@ def run_recording(
     on_event=None,
     mic_muted: threading.Event | None = None,
     profile: str | None = None,
+    asr_engine: str | None = None,
 ) -> Path | None:
     """อัดจนกว่า stop_event จะถูก set แล้วคืน path ของไฟล์ที่ encode แล้ว
 
@@ -449,6 +456,7 @@ def run_recording(
             devices,
             claude_model=claude_model,
             profile=profile,
+            asr_engine=asr_engine,
         )
 
         def on_part_closed(parts: list[str]) -> None:
@@ -470,6 +478,7 @@ def run_recording(
                 devices,
                 claude_model=claude_model,
                 profile=profile,
+                asr_engine=asr_engine,
             )
             emit("part_closed", {"count": len(parts)})
 
@@ -566,7 +575,7 @@ def run_recording(
 
 def main() -> None:
     """ทางเข้าแบบ CLI ที่ start-meeting.bat เรียก: Ctrl+C หยุด ข้อความออก stdout"""
-    name, claude_model, profile = parse_args(sys.argv[1:])
+    name, claude_model, profile, asr_engine = parse_args(sys.argv[1:])
     config = load_config()
     lang = config.ui_lang
 
@@ -577,7 +586,15 @@ def main() -> None:
         if code == "recording_started":
             print(render("press_ctrl_c", {}, lang))
 
-    run_recording(name, claude_model, config, threading.Event(), emit, profile=profile)
+    run_recording(
+        name,
+        claude_model,
+        config,
+        threading.Event(),
+        emit,
+        profile=profile,
+        asr_engine=asr_engine,
+    )
 
 
 if __name__ == "__main__":

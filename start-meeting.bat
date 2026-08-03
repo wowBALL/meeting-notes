@@ -134,6 +134,18 @@ echo ใช้ประเภท: %PROFILE_ID%
 :profile_done
 
 echo.
+echo เลือกตัวถอดเสียง:
+echo   [1] Whisper large-v3  - ค่าเริ่มต้น แม่นสุด
+echo   [2] Typhoon (ทดลอง)   - เร็วกว่า 3-10 เท่า แต่พลาดศัพท์เฉพาะทาง/glossary ง่ายกว่า
+rem Anything that is not "2" lands on whisper, so a typo cannot reach Python as an
+rem unknown engine. whisper is the default because it is the proven daily-use path;
+rem Typhoon (src/transcribe_typhoon.py) is experimental and needs .typhoon_venv present.
+set "ASR_ENGINE_ID=whisper"
+set /p ASR_CHOICE=เลือก [1/2] (Enter=1):
+if "%ASR_CHOICE%"=="2" set "ASR_ENGINE_ID=typhoon"
+echo ใช้ตัวถอดเสียง: %ASR_ENGINE_ID%
+
+echo.
 set /p MEETING_NAME=Meeting name (optional, press Enter to skip):
 
 echo.
@@ -141,11 +153,11 @@ echo Recording started. Press Ctrl+C when the meeting ends.
 echo.
 
 if "%MEETING_NAME%"=="" (
-    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID% --profile %PROFILE_ID%
+    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID% --profile %PROFILE_ID% --asr-engine %ASR_ENGINE_ID%
 ) else (
     rem "--" ends argparse option parsing, so a meeting name starting with "-"
     rem (e.g. "-standup") is taken as the positional name instead of an option.
-    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID% --profile %PROFILE_ID% -- "%MEETING_NAME%"
+    .\.venv\Scripts\python.exe -m src.record --model %MODEL_ID% --profile %PROFILE_ID% --asr-engine %ASR_ENGINE_ID% -- "%MEETING_NAME%"
 )
 
 endlocal

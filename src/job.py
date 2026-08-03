@@ -23,19 +23,25 @@ def job_path_for(audio_path: Path) -> Path:
 
 
 def write_job(
-    inbox_dir: Path, stem: str, claude_model: str, profile: str | None = None
+    inbox_dir: Path,
+    stem: str,
+    claude_model: str,
+    profile: str | None = None,
+    asr_engine: str | None = None,
 ) -> Path:
-    """`profile` เดินทางในไฟล์เดียวกับ `claude_model` โดยเจตนา -- กลไกเดียวกันเป๊ะ
+    """`profile`/`asr_engine` เดินทางในไฟล์เดียวกับ `claude_model` โดยเจตนา -- กลไกเดียวกันเป๊ะ
 
     เหตุผลเดียวกับที่ model ต้องอยู่ที่นี่: watcher เป็น process แยกที่อ่าน .env
     ครั้งเดียวตอนตัวเองเริ่ม ค่าที่ผู้ใช้เลือก "ต่อประชุม" จึงอยู่ใน .env ไม่ได้
     มันต้องเดินทางมากับไฟล์เสียง และการอยู่ไฟล์เดียวกันทำให้คิวที่สลับลำดับกัน
-    ไม่มีทางจับ profile ของประชุมหนึ่งไปใช้กับอีกประชุมได้
+    ไม่มีทางจับ profile/asr_engine ของประชุมหนึ่งไปใช้กับอีกประชุมได้
     """
     path = inbox_dir / f"{stem}{JOB_SUFFIX}"
     data: dict[str, str] = {"claude_model": claude_model}
     if profile:
         data["profile"] = profile
+    if asr_engine:
+        data["asr_engine"] = asr_engine
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -78,6 +84,17 @@ def read_profile(audio_path: Path) -> str | None:
     """
     profile = _load(audio_path).get("profile")
     return profile if isinstance(profile, str) else None
+
+
+def read_asr_engine(audio_path: Path) -> str | None:
+    """ตัวถอดเสียงที่เลือกไว้ตอนอัด หรือ None ให้ผู้เรียกตกไปใช้ค่าจาก .env
+
+    None ครอบทั้งสองกรณีที่ต่างกันแต่ปฏิบัติเหมือนกัน: ไฟล์เสียงที่ผู้ใช้ลากใส่
+    inbox/ เอง (ไม่มี job file) และ job file ที่เขียนไว้ก่อนจะมีฟีเจอร์นี้ -- แบบ
+    เดียวกับ read_profile
+    """
+    engine = _load(audio_path).get("asr_engine")
+    return engine if isinstance(engine, str) else None
 
 
 def record_transcript(audio_path: Path, transcript_path: Path) -> None:

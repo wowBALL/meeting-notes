@@ -111,6 +111,7 @@ def test_manifest_round_trips_every_field(tmp_path):
         "devices": {},
         "claude_model": None,
         "profile": None,
+        "asr_engine": None,
     }
 
 
