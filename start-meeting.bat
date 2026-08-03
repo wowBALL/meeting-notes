@@ -33,7 +33,12 @@ rem Windows 11 the title belongs to Windows Terminal rather than cmd.exe, so
 rem the old tasklist/windowtitle check never matched and every run of this
 rem script stacked another watcher (they race for inbox files and the second
 rem one dies loading models into a GPU the first already filled).
-powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -like '*src.main*' }) { exit 0 } exit 1" >NUL 2>&1
+rem Also require the venv's own python.exe: the WindowsApps python.exe alias
+rem matches "python" and *src.main* too but lacks soundfile, so it exits
+rem right after failing to import it. Matching on name/cmdline alone made
+rem this script see that dead process and skip starting the real watcher,
+rem so the real one silently never ran (found 2026-08-03, see memory).
+powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -like '*src.main*' -and $_.ExecutablePath -like '*\.venv\Scripts\python.exe' }) { exit 0 } exit 1" >NUL 2>&1
 if errorlevel 1 (
     echo Starting watcher...
     start "MeetingWatcher" cmd /k "cd /d %PROJECT_DIR% && .\.venv\Scripts\python.exe -m src.main"
