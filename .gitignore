@@ -45,3 +45,9 @@ enroll-mock.html
 speakers-truth.json
 .calib-cache/
 .calib-clips/
+
+# config ของเครื่องมือ Obsidian ฝั่ง dev ไม่ใช่ของโปรเจกต์ (คล้าย .claude/ ด้านบน)
+.obsidian/
+
+# สรุป session ของ Claude -- handoff document ระหว่าง session ไม่ใช่เอกสารโปรเจกต์
+SESSION-SUMMARY-*.md
