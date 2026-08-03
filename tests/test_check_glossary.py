@@ -4,6 +4,7 @@ from tools.check_glossary import (
     find_collisions,
     format_duplicate_keys,
     main,
+    sample_context,
 )
 
 
@@ -49,6 +50,51 @@ def test_fuzzy_forms_are_not_flagged_because_the_model_reads_the_context():
     glossary = Glossary(fuzzy={"Load Test": ["Node Test"], "Role": ["Low"]})
 
     assert find_collisions(glossary) == []
+
+
+def test_sample_context_shows_a_collision_find_collisions_cannot_see(tmp_path):
+    """find_collisions เช็คได้แค่คำผิดชนกับ "คำถูก" ที่ประกาศไว้ในตารางเอง แต่คำผิดสั้นๆ
+    ไปกินกลางคำไทยทั่วไปที่ไม่ได้อยู่ในตารางเลยก็ได้ (เคสจริง: "ครูป" ของ Kubernetes
+    ไปกินกลาง "ครูประกาศ" ซึ่งเป็นชื่อคน ไม่ใช่คำถูกของใครในตารางนี้สักคำ) sample_context
+    คือทางเดียวที่จับเคสนี้ได้ -- ให้คนเห็นบริบทจริงแล้วตัดสินเอง"""
+    meeting = tmp_path / "2026-08-03_16-01-PCI"
+    meeting.mkdir()
+    (meeting / "transcript.md").write_text(
+        "**satit (บอล)** [22:19]: ให้ครูประกาศช่วยดูให้ว่าทั้งหมดมันโอเคไหม",
+        encoding="utf-8",
+    )
+    glossary = Glossary(exact={"Kubernetes": ["ครูป"]})
+
+    context = sample_context(glossary, tmp_path)
+
+    assert "ครูป" in context
+    assert any("ครูประกาศ" in snippet for snippet in context["ครูป"])
+
+
+def test_sample_context_only_covers_exact_and_aliases(tmp_path):
+    """fuzzy/project-names ให้โมเดลตัดสินจากบริบทเองอยู่แล้ว (ดู _replacing_layers) --
+    โชว์บริบทของชั้นนั้นเป็นเสียงเตือนผิดที่ ไม่ควรอยู่ในผลลัพธ์เลย"""
+    meeting = tmp_path / "2026-01-01_09-00-a"
+    meeting.mkdir()
+    (meeting / "transcript.md").write_text(
+        "**ผู้พูด 1** [00:00]: โปรแกรมนี้ใช้ GORM", encoding="utf-8"
+    )
+    glossary = Glossary(fuzzy={"GORM": ["กรม"]})
+
+    assert sample_context(glossary, tmp_path) == {}
+
+
+def test_sample_context_caps_examples_per_wrong_form(tmp_path):
+    meeting = tmp_path / "2026-01-01_09-00-a"
+    meeting.mkdir()
+    (meeting / "transcript.md").write_text(
+        "**ผู้พูด 1** [00:00]: Depth หนึ่ง Depth สอง Depth สาม", encoding="utf-8"
+    )
+    glossary = Glossary(exact={"Dev": ["Depth"]})
+
+    context = sample_context(glossary, tmp_path)
+
+    assert len(context["Depth"]) == 2
 
 
 def test_count_in_transcripts_measures_against_the_raw_files(tmp_path):

@@ -27,7 +27,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # ต่ำกว่านี้ในชั้นที่แทนที่จริง = เกือบแน่ว่าจะไปโดนกลางคำอื่น ตัวเลขนี้มาจากกฎที่เขียนไว้
 # ใน header ของ glossary.md เอง ("คำผิดสั้นๆ ต่ำกว่า ~4 อักขระ จะไปโดนกลางคำอื่น")
 # สคริปต์นี้แค่บังคับใช้กฎที่ไฟล์ประกาศไว้แล้ว ไม่ได้ตั้งกฎใหม่
+#
+# เป็นแค่ heuristic โดยประมาณ ไม่ใช่การรับประกัน: "ครูป" ยาวพอดี 4 อักขระ ผ่านเช็คนี้
+# ไปได้ แต่ยังชนจริงกับ "ครูประกาศ" (ชื่อคน ไม่ใช่คำถูกในตารางเลย เจอใน PCI 2026-08-03)
+# -- find_collisions() เช็คได้แค่ชนกับ "คำถูก" ที่รู้จักในตาราง ไม่เช็คคำไทยทั่วไปที่ไม่ได้
+# อยู่ในตารางเลย ภาษาไทยไม่มีพจนานุกรมคำต้องห้ามให้เทียบ จึงไม่มีทางเช็คอัตโนมัติให้ครบ
+# ทางเดียวที่จับพวกนี้ได้คือให้คนเห็นบริบทจริงแล้วตัดสินเอง (ดู sample_context ด้านล่าง)
 MIN_SAFE_LENGTH = 4
+
+# ความกว้างของบริบทที่โชว์รอบคำผิดแต่ละครั้ง (อักขระ) -- พอให้อ่านออกว่าเป็นคำถูกจริง
+# หรือไปกินคำอื่นเงียบๆ โดยไม่ต้องเปิดไฟล์ transcript เต็มไฟล์
+CONTEXT_CHARS = 25
+MAX_EXAMPLES_PER_WRONG = 2
 
 
 def _replacing_layers(glossary) -> dict[str, dict[str, list[str]]]:
@@ -158,6 +169,46 @@ def count_in_transcripts(glossary, meetings_dir: Path) -> dict[str, tuple[int, i
     return tally
 
 
+def sample_context(glossary, meetings_dir: Path) -> dict[str, list[str]]:
+    """ตัวอย่างข้อความรอบคำผิดชั้น exact/aliases ที่เจอจริงใน transcript
+
+    เฉพาะชั้น exact/aliases เท่านั้น (ดู _replacing_layers) -- fuzzy/project-names
+    ให้โมเดลตัดสินจากบริบทเองอยู่แล้ว โชว์บริบทของชั้นนั้นจะเป็นเสียงเตือนผิดที่
+    เหมือนที่ find_collisions ตั้งใจไม่ทำกับมัน
+
+    เจตนาคือปิดช่องที่ find_collisions ปิดไม่ได้: มันเช็คได้แค่คำผิดชนกับ "คำถูก" ที่
+    ประกาศไว้ในตารางเอง แต่คำผิดสั้นๆ ไปกินกลางคำไทยทั่วไปที่ไม่ได้อยู่ในตารางเลยก็ได้
+    (เคสจริง: "ครูป" ของ Kubernetes ไปกินกลาง "ครูประกาศ" ซึ่งเป็นชื่อคน ไม่ใช่คำถูก
+    ของใครในตารางนี้สักคำ -- find_collisions ผ่านเคสนี้เพราะไม่มีอะไรให้เทียบชน)
+    ไม่มีพจนานุกรมคำไทยให้เทียบอัตโนมัติได้ครบ ทางเดียวที่เหลือคือให้คนเห็นบริบทจริง
+    แล้วตัดสินเอง
+    """
+    layers = _replacing_layers(glossary)
+    wrongs: set[str] = set()
+    for mapping in layers.values():
+        for forms in mapping.values():
+            wrongs.update(forms)
+
+    transcripts = sorted(meetings_dir.glob("*/transcript.md"))
+    snippets: dict[str, list[str]] = {}
+    for path in transcripts:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for wrong in wrongs:
+            if len(snippets.get(wrong, [])) >= MAX_EXAMPLES_PER_WRONG:
+                continue
+            start = 0
+            while len(snippets.get(wrong, [])) < MAX_EXAMPLES_PER_WRONG:
+                idx = text.find(wrong, start)
+                if idx == -1:
+                    break
+                lo = max(0, idx - CONTEXT_CHARS)
+                hi = min(len(text), idx + len(wrong) + CONTEXT_CHARS)
+                snippet = text[lo:hi].replace("\n", " ")
+                snippets.setdefault(wrong, []).append(snippet)
+                start = idx + len(wrong)
+    return snippets
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="tools.check_glossary")
     parser.add_argument(
@@ -217,10 +268,22 @@ def main(argv: list[str] | None = None) -> int:
         dead = sorted(w for w, v in tally.items() if not v[0])
         print(f"วัดกับ transcript จริง {len(transcripts)} ประชุม:")
         print(f"  เคยโผล่จริง {len(alive)} คำ / ไม่เคยโผล่เลย {len(dead)} คำ")
+
+        # เฉพาะ exact/aliases เท่านั้น: ชั้นที่แทนที่แบบเงียบๆ ก่อนโมเดลเห็น จึงเป็นชั้น
+        # เดียวที่ต้องให้คนตรวจบริบทเอง (ดู docstring ของ sample_context)
+        risky_wrongs: set[str] = set()
+        for mapping in _replacing_layers(glossary).values():
+            for forms in mapping.values():
+                risky_wrongs.update(forms)
+        context = sample_context(glossary, meetings_dir) if risky_wrongs else {}
+
         for wrong, (hits, meetings) in sorted(
             alive.items(), key=lambda kv: -kv[1][0]
         )[:15]:
             print(f'    {hits:>4} ครั้ง / {meetings} ประชุม  "{wrong}"')
+            if wrong in risky_wrongs:
+                for snippet in context.get(wrong, []):
+                    print(f'          เช่น: ...{snippet}...')
         if args.show_dead and dead:
             print("\n  ไม่เคยโผล่เลย -- ในชั้น fuzzy พวกนี้กิน token ทุกครั้งที่สรุป:")
             for wrong in dead:
