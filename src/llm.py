@@ -39,12 +39,28 @@ GLM_REDUCE_MAX_TOKENS = 24576
 QWEN_MAP_MAX_TOKENS = 4096
 QWEN_REDUCE_MAX_TOKENS = 8192
 
-# gemma4 บน endpoint เดียวกัน (litellm/gemma4) -- วัดจริง 2026-07-31 ได้แค่ก้อนเล็ก 2.8KB
-# (7s, reasoning=0) ไม่มีการวัดก้อนใหญ่สุดของประชุมแบบที่ Qwen มี จึงยังไม่รู้ค่าจริงของ
-# reduce stage บนประชุมยาว -- ใช้ budget ชุดเดียวกับ Qwen ไปก่อนเพราะเป็น non-reasoning
-# model เหมือนกัน ถ้าเจอ truncated=True บ่อยกับประชุมยาวให้กลับมาวัดใหม่แล้วแยกค่า
+# gemma4 บน endpoint เดียวกัน (litellm/gemma4) -- output budget ไม่ใช่ปัญหา (วัดแล้วไม่เคย
+# truncated=True ทั้งตอน map ก้อนเล็กและตอน single-call ทั้งประชุม 84 นาที) ใช้ชุดเดียวกับ
+# Qwen ไปก่อนเพราะเป็น non-reasoning model เหมือนกัน ปัญหาจริงของ gemma4 อยู่ที่ reduce
+# stage ไม่ใช่ output budget: วัด 2026-08-05 บนประชุมจริง 84 นาที (3 chunks) แล้ว reduce
+# ยุบเหลือสรุปแค่ chunk แรก (ตัดไปสองในสาม) เงียบๆ ไม่มี finish_reason="length" เลย --
+# ดู SINGLE_CALL_THRESHOLD_TOKENS ของ gemma4 ด้านล่างสำหรับทางเลี่ยงที่วัดแล้วว่าใช้ได้จริง
 GEMMA_MAP_MAX_TOKENS = QWEN_MAP_MAX_TOKENS
 GEMMA_REDUCE_MAX_TOKENS = QWEN_REDUCE_MAX_TOKENS
+
+# ค่าเริ่มต้นที่ Qwen/GLM/Claude ใช้ร่วมกัน -- อยู่ที่นี่แทน src/summarize.py เพราะเป็น
+# คุณสมบัติของ provider (ไปไหวแค่ไหนก่อนต้องหั่น chunk) ไม่ใช่ค่าคงที่ของขั้นตอนสรุป
+# summarize.py ยัง import ชื่อนี้จากไฟล์นี้เพื่อไม่ต้องแก้ที่ import ของเทสต์เดิม
+SINGLE_CALL_THRESHOLD_TOKENS = 20_000
+
+# gemma4 พังเฉพาะตอนต้องผ่าน reduce (ดูคอมเมนต์ที่ GEMMA_MAP_MAX_TOKENS ด้านบน) แต่ตอน
+# บังคับให้ทำ single-call ข้าม chunk ไปเลย (เพดานปกติ 20,000 token) กับ transcript ทั้งก้อน
+# ของประชุม 84 นาทีเดียวกัน (~36,210 token หลัง merge_speaker_turns) มันทำสำเร็จใน 33.1s
+# และเนื้อหาครอบคลุมทั้งประชุมจริง (มีทั้งช่วงต้นและช่วง 65:04-83:30 ท้ายสุด) วัด 2026-08-05
+# เพดาน 40,000 คือปัดขึ้นจากตัวเลขที่วัดได้พร้อมกันชนเล็กน้อย ไม่ใช่ค่าประมาณเดา -- เกินตัวนี้
+# ยังไม่มีข้อมูลวัด และจะตกไปใช้ map-reduce ที่รู้อยู่แล้วว่าพังสำหรับโมเดลนี้ ถ้าเจอประชุมที่
+# ยาวกว่านี้แล้วอยากรู้ผลจริงต้องวัดใหม่ ไม่ใช่ขยับเพดานเอาเอง
+GEMMA_SINGLE_CALL_THRESHOLD_TOKENS = 40_000
 
 # หนึ่ง call ของ GLM ใช้เวลาได้ถึง ~155 วินาทีที่ราว 53 token/วินาที เผื่อไว้มาก
 # เพราะการหมดเวลากลาง reduce แปลว่าเสียสรุปรายช่วงที่จ่ายไปแล้วทั้งหมด
@@ -137,6 +153,13 @@ class Provider:
     # timeout เป็นพารามิเตอร์ที่สี่ (มี default) ไม่ใช่ค่าตายตัวใน completer เพราะ
     # check_reachable ต้องยิงด้วยเวลาสั้น ๆ ในขณะที่งานสรุปจริงต้องการ 900 วินาทีเต็ม
     complete: Callable[..., Completion]
+    # ผู้เรียก (summarize.py) เทียบค่านี้กับ token ของ transcript ทั้งก้อนเพื่อตัดสินใจว่า
+    # จะยิงคำขอเดียวจบหรือต้องหั่น chunk แล้วเข้า map-reduce -- มี default เป็นค่าเดียวกับ
+    # ที่ Qwen/GLM/Claude ใช้มาตลอด (ดู SINGLE_CALL_THRESHOLD_TOKENS) เพื่อไม่ต้องแก้ทุก
+    # entry ที่มีอยู่แล้ว มีแค่ gemma4 ที่ override เพราะวัดแล้วว่า reduce ของมันพัง (ดู
+    # คอมเมนต์ที่ GEMMA_SINGLE_CALL_THRESHOLD_TOKENS) แต่ single-call ไปได้ไกลกว่าเพดาน
+    # ปกติจริง
+    single_call_threshold_tokens: int = SINGLE_CALL_THRESHOLD_TOKENS
 
 
 def _require_setting(env_var: str, model_id: str) -> str:
@@ -370,6 +393,7 @@ PROVIDERS: dict[str, Provider] = {
         complete=_openai_compat_completer(
             "litellm/gemma4", "LLM_API_KEY", "LLM_BASE_URL"
         ),
+        single_call_threshold_tokens=GEMMA_SINGLE_CALL_THRESHOLD_TOKENS,
     ),
     "claude-opus-5": _claude("claude-opus-5"),
     "claude-sonnet-5": _claude("claude-sonnet-5"),

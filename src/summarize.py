@@ -19,6 +19,7 @@ from src.config import (
 )
 from src.llm import (
     LLM_TIMEOUT_SECONDS,
+    SINGLE_CALL_THRESHOLD_TOKENS,
     MissingSettingError,
     Provider,
     UnusableAnswerError,
@@ -31,7 +32,12 @@ from src.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
-SINGLE_CALL_THRESHOLD_TOKENS = 20_000
+# SINGLE_CALL_THRESHOLD_TOKENS ย้ายไปอยู่ src/llm.py แล้ว (เป็นคุณสมบัติของ provider ที่
+# ตอนนี้แต่ละตัว override ได้ ดู Provider.single_call_threshold_tokens) import กลับมาไว้
+# ในชื่อเดิมที่นี่เพราะเทสต์เก่าอ้างถึง src.summarize.SINGLE_CALL_THRESHOLD_TOKENS อยู่ --
+# ตัวที่ใช้จริงตอนตัดสินใจ chunk คือ provider.single_call_threshold_tokens ด้านล่าง
+# ไม่ใช่ค่าคงที่ตัวนี้ตรงๆ (ค่านี้เป็นแค่ค่า default ของ provider ส่วนใหญ่)
+#
 # ค่าจริงอยู่ใน config.py (ที่นั่นตรวจ .env ให้ด้วย) ชื่อสองตัวนี้คงไว้เพราะเป็นค่า
 # เริ่มต้นที่ใช้เมื่อผู้เรียกไม่ได้ส่ง overlap มา และมีเทสต์อ้างถึงอยู่
 CHUNK_MAX_TOKENS = DEFAULT_CHUNK_MAX_TOKENS
@@ -261,8 +267,8 @@ def summarize_transcript(
         CHUNK_OVERLAP_TOKENS if chunk_overlap_tokens is None else chunk_overlap_tokens
     )
     if merge_turns:
-        # ต้องรวมก่อนเช็ค SINGLE_CALL_THRESHOLD_TOKENS ไม่ใช่หลัง: ประชุมที่เดิมต้องหั่น
-        # เป็นสอง chunk อาจเหลือต่ำกว่าเพดานแล้วยิงรอบเดียวจบ -- จากสองคำขอเหลือหนึ่ง
+        # ต้องรวมก่อนเช็ค provider.single_call_threshold_tokens ไม่ใช่หลัง: ประชุมที่เดิม
+        # ต้องหั่นเป็นสอง chunk อาจเหลือต่ำกว่าเพดานแล้วยิงรอบเดียวจบ -- จากสองคำขอเหลือหนึ่ง
         # ซึ่งคือทั้งหมดที่ฟีเจอร์นี้มีไว้ทำ (ลดจำนวนงานที่เราใส่เข้าคิวของ endpoint)
         #
         # เพดานผูกกับงบ overlap เสมอ ไม่ใช่ค่าลอย ๆ: บล็อกที่ใหญ่กว่างบ overlap ถูก
@@ -299,7 +305,7 @@ def summarize_transcript(
             label="Single-call summary",
         )
 
-    if estimate_tokens(transcript_markdown) <= SINGLE_CALL_THRESHOLD_TOKENS:
+    if estimate_tokens(transcript_markdown) <= provider.single_call_threshold_tokens:
         logger.info(
             "Summarizing with %s in a single call (~%d tokens)",
             provider.model_id,

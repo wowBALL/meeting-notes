@@ -1042,6 +1042,7 @@ def test_a_provider_that_returns_no_text_is_not_retried():
     provider.model_id = "GLM-5.2"
     provider.map_max_tokens = 100
     provider.reduce_max_tokens = 200
+    provider.single_call_threshold_tokens = 20_000
     provider.complete = complete
 
     with (
