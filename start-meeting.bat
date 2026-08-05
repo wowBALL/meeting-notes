@@ -68,7 +68,7 @@ echo   [2] GLM 5.2   - ข้อมูลไม่ออกนอกบริษ
 echo   [3] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
 echo   [4] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
 echo   [5] ถอดเสียงอย่างเดียว - ไม่สรุป (ไม่เสียเงิน)
-echo   [6] gemma4    - ทดลอง (สรุปหายกลางทางกับประชุมยาว อย่าใช้กับประชุมยาว)
+echo   [6] gemma4    - ทดลอง (ใช้กับประชุมทั่วไปได้)
 rem Anything that is not "2".."6" lands on Qwen 3.6, so a typo cannot reach
 rem Python as an invalid model id. set /p rather than choice: choice takes a single
 rem keypress and ignores Enter, and pressing Enter for the default is the point here.
@@ -78,7 +78,12 @@ rem in-house options it is the one that actually finishes with the whole meeting
 rem intact (see src/llm.py: GLM-5.2 spent its whole budget on reasoning and returned
 rem empty content 10 times out of 10; gemma4 was tried as default on 2026-08-05 and
 rem silently dropped two of three chunks in the reduce step on a real 84-minute
-rem meeting -- no truncation notice, it just stopped -- see src/config.py).
+rem meeting -- no truncation notice, it just stopped -- see src/config.py). gemma4's
+rem reduce step is still broken, but summarize_transcript() now routes it through a
+rem single call instead of chunking for anything up to 150,000 tokens (see
+rem GEMMA_SINGLE_CALL_THRESHOLD_TOKENS in src/llm.py), which covers every real
+rem meeting seen so far -- it's still not the default because that map-reduce
+rem fallback for meetings past 150,000 tokens is untested and known-bad.
 rem
 rem The numbering matches web/app.js top to bottom, so the two entry points read the
 rem same. That moved transcript-only from [4] to [5] on purpose -- a "4" typed from
