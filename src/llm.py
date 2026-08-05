@@ -39,6 +39,13 @@ GLM_REDUCE_MAX_TOKENS = 24576
 QWEN_MAP_MAX_TOKENS = 4096
 QWEN_REDUCE_MAX_TOKENS = 8192
 
+# gemma4 บน endpoint เดียวกัน (litellm/gemma4) -- วัดจริง 2026-07-31 ได้แค่ก้อนเล็ก 2.8KB
+# (7s, reasoning=0) ไม่มีการวัดก้อนใหญ่สุดของประชุมแบบที่ Qwen มี จึงยังไม่รู้ค่าจริงของ
+# reduce stage บนประชุมยาว -- ใช้ budget ชุดเดียวกับ Qwen ไปก่อนเพราะเป็น non-reasoning
+# model เหมือนกัน ถ้าเจอ truncated=True บ่อยกับประชุมยาวให้กลับมาวัดใหม่แล้วแยกค่า
+GEMMA_MAP_MAX_TOKENS = QWEN_MAP_MAX_TOKENS
+GEMMA_REDUCE_MAX_TOKENS = QWEN_REDUCE_MAX_TOKENS
+
 # หนึ่ง call ของ GLM ใช้เวลาได้ถึง ~155 วินาทีที่ราว 53 token/วินาที เผื่อไว้มาก
 # เพราะการหมดเวลากลาง reduce แปลว่าเสียสรุปรายช่วงที่จ่ายไปแล้วทั้งหมด
 LLM_TIMEOUT_SECONDS = 900
@@ -354,6 +361,14 @@ PROVIDERS: dict[str, Provider] = {
         reduce_max_tokens=QWEN_REDUCE_MAX_TOKENS,
         complete=_openai_compat_completer(
             "Qwen/Qwen3.6-35B-A3B", "LLM_API_KEY", "LLM_BASE_URL"
+        ),
+    ),
+    "litellm/gemma4": Provider(
+        model_id="litellm/gemma4",
+        map_max_tokens=GEMMA_MAP_MAX_TOKENS,
+        reduce_max_tokens=GEMMA_REDUCE_MAX_TOKENS,
+        complete=_openai_compat_completer(
+            "litellm/gemma4", "LLM_API_KEY", "LLM_BASE_URL"
         ),
     ),
     "claude-opus-5": _claude("claude-opus-5"),

@@ -68,19 +68,23 @@ echo   [2] GLM 5.2   - ข้อมูลไม่ออกนอกบริษ
 echo   [3] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
 echo   [4] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
 echo   [5] ถอดเสียงอย่างเดียว - ไม่สรุป (ไม่เสียเงิน)
-rem Anything that is not "2".."5" lands on Qwen 3.6, so a typo cannot reach
+echo   [6] gemma4    - ทดลอง (สรุปหายกลางทางกับประชุมยาว อย่าใช้กับประชุมยาว)
+rem Anything that is not "2".."6" lands on Qwen 3.6, so a typo cannot reach
 rem Python as an invalid model id. set /p rather than choice: choice takes a single
 rem keypress and ignores Enter, and pressing Enter for the default is the point here.
 rem Qwen is the default because the transcript stays on company infrastructure with
-rem it -- the private path has to be the one that needs no decision -- and of the two
-rem in-house options it is the one that actually finishes (see src/llm.py: GLM-5.2
-rem spent its whole budget on reasoning and returned empty content 10 times out of 10).
+rem it -- the private path has to be the one that needs no decision -- and of the
+rem in-house options it is the one that actually finishes with the whole meeting
+rem intact (see src/llm.py: GLM-5.2 spent its whole budget on reasoning and returned
+rem empty content 10 times out of 10; gemma4 was tried as default on 2026-08-05 and
+rem silently dropped two of three chunks in the reduce step on a real 84-minute
+rem meeting -- no truncation notice, it just stopped -- see src/config.py).
 rem
 rem The numbering matches web/app.js top to bottom, so the two entry points read the
 rem same. That moved transcript-only from [4] to [5] on purpose -- a "4" typed from
 rem muscle memory now records with Sonnet 5 instead of skipping the summary.
 set "MODEL_CHOICE=1"
-set /p MODEL_CHOICE=เลือก [1/2/3/4/5] (Enter=1):
+set /p MODEL_CHOICE=เลือก [1/2/3/4/5/6] (Enter=1):
 if "%MODEL_CHOICE%"=="2" (
     rem Must stay byte-identical to the registry key in src/llm.py -- the endpoint
     rem rejects a lowercased id.
@@ -93,6 +97,10 @@ if "%MODEL_CHOICE%"=="2" (
     rem Must stay byte-identical to job.NO_SUMMARY_MODEL: the pipeline decides
     rem whether to skip summarizing by comparing against this exact string.
     set "MODEL_ID=transcript-only"
+) else if "%MODEL_CHOICE%"=="6" (
+    rem Must stay byte-identical to the registry key in src/llm.py -- the endpoint
+    rem rejects anything else.
+    set "MODEL_ID=litellm/gemma4"
 ) else (
     rem Must stay byte-identical to the registry key in src/llm.py, "Qwen/" and
     rem capitalisation included -- the endpoint rejects anything else.
