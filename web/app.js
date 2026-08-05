@@ -56,7 +56,7 @@ const UI = {
     models: [
       ["Qwen/Qwen3.6-35B-A3B", "Qwen 3.6", "ข้อมูลไม่ออกนอกบริษัท · เร็วที่สุด"],
       ["GLM-5.2", "GLM 5.2", "ข้อมูลไม่ออกนอกบริษัท · ช้ากว่า"],
-      ["litellm/gemma4", "gemma4 (ทดลอง)", "ข้อมูลไม่ออกนอกบริษัท · ใช้กับประชุมทั่วไปได้"],
+      ["litellm/gemma4", "gemma4", "ข้อมูลไม่ออกนอกบริษัท · ใช้กับประชุมทั่วไปได้"],
       ["claude-opus-5", "Opus 5", "แม่นสุด · $5/$25 ต่อ MTok"],
       ["claude-sonnet-5", "Sonnet 5", "ประหยัด · $3/$15 ต่อ MTok"],
       ["transcript-only", "ถอดเสียงอย่างเดียว", "ไม่สรุป · ไม่เสียเงิน"],
@@ -125,7 +125,7 @@ const UI = {
     models: [
       ["Qwen/Qwen3.6-35B-A3B", "Qwen 3.6", "Stays in-house · fastest"],
       ["GLM-5.2", "GLM 5.2", "Stays in-house · slower"],
-      ["litellm/gemma4", "gemma4 (experimental)", "Stays in-house · fine for typical meetings"],
+      ["litellm/gemma4", "gemma4", "Stays in-house · fine for typical meetings"],
       ["claude-opus-5", "Opus 5", "Most accurate · $5/$25 per MTok"],
       ["claude-sonnet-5", "Sonnet 5", "Cheaper · $3/$15 per MTok"],
       ["transcript-only", "Transcript only", "No summary · no cost"],

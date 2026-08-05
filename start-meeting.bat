@@ -68,7 +68,7 @@ echo   [2] GLM 5.2   - ข้อมูลไม่ออกนอกบริษ
 echo   [3] Opus 5    - แม่นสุด  ($5/$25 ต่อ MTok)
 echo   [4] Sonnet 5  - ประหยัด  ($3/$15 ต่อ MTok)
 echo   [5] ถอดเสียงอย่างเดียว - ไม่สรุป (ไม่เสียเงิน)
-echo   [6] gemma4    - ทดลอง (ใช้กับประชุมทั่วไปได้)
+echo   [6] gemma4    - ข้อมูลไม่ออกนอกบริษัท (ใช้กับประชุมทั่วไปได้)
 rem Anything that is not "2".."6" lands on Qwen 3.6, so a typo cannot reach
 rem Python as an invalid model id. set /p rather than choice: choice takes a single
 rem keypress and ignores Enter, and pressing Enter for the default is the point here.
