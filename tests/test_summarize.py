@@ -14,6 +14,7 @@ from src.chunk import estimate_tokens, parse_transcript_segments, split_into_chu
 from src.llm import (
     CLAUDE_MAP_MAX_TOKENS,
     CLAUDE_REDUCE_MAX_TOKENS,
+    Completion,
     HttpStatusError,
     MissingSettingError,
     Provider,
@@ -1027,6 +1028,66 @@ def test_reduce_failure_still_raises_when_no_chunk_ever_succeeded():
     with _patch_anthropic(client), patch("time.sleep"):
         with pytest.raises(RuntimeError, match="Every one of the"):
             summarize_transcript(transcript, model="claude-opus-5")
+
+
+def _counting_provider(**overrides) -> tuple[Provider, dict]:
+    """provider ที่นับจำนวนคำขอที่ยิงจริง -- ใช้พิสูจน์ว่า "ไม่ยิงเลย" ไม่ใช่แค่ "ไม่คืนค่า" """
+    calls = {"n": 0}
+
+    def complete(system, content, max_tokens):
+        calls["n"] += 1
+        return Completion(text="สรุป", truncated=False)
+
+    fields = {
+        "model_id": "litellm/gemma4",
+        "map_max_tokens": 100,
+        "reduce_max_tokens": 200,
+        "complete": complete,
+        "single_call_threshold_tokens": 1_000,
+    }
+    fields.update(overrides)
+    return Provider(**fields), calls
+
+
+def test_a_provider_that_cannot_reduce_refuses_to_enter_map_reduce():
+    """โมเดลที่ reduce ไม่ครบต้องล้มให้เห็น ไม่ใช่เดินหน้าต่อแล้วคืนสรุปที่ขาดไปเงียบๆ
+
+    gemma4 วัดแล้ว (2026-08-05, ประชุมจริง 84 นาที 3 chunks) ว่าขั้น reduce ยุบเหลือสรุป
+    แค่ chunk แรก โดยไม่มี finish_reason="length" และไม่มี TRUNCATION_NOTICE ติดมาเลย --
+    REDUCE_FAILURE_NOTICE ที่มีอยู่จับไม่ได้เพราะมันยิงเฉพาะตอน reduce โยน exception
+    ส่วนเคสนี้ reduce "สำเร็จ" ทุกประการ แค่เนื้อหาหายไปสองในสาม
+
+    ทางเลี่ยงที่ใช้อยู่คือยก single_call_threshold_tokens ของ gemma4 เป็น 150,000 ให้
+    ประชุมจริงไม่ถูกหั่น chunk -- แต่นั่นคือการเลี่ยง ไม่ใช่การแก้ ประชุมที่เกินเพดานนั้น
+    ยังตกลงไปทาง map-reduce ได้อยู่ดี เทสต์นี้ล็อกไว้ว่ามันต้องหยุดตรงนั้น
+    """
+    transcript = _long_transcript(100)
+    provider, calls = _counting_provider(can_map_reduce=False)
+
+    with patch.object(summarize_module, "resolve", return_value=provider):
+        with pytest.raises(RuntimeError, match="cannot be trusted with the reduce"):
+            summarize_transcript(transcript, model="litellm/gemma4")
+
+    # ต้องไม่ยิงแม้แต่ครั้งเดียว: map ที่จ่ายไปแล้วจะถูกทิ้งทั้งหมดอยู่ดีเมื่อ reduce
+    # ต้องห้าม การปล่อยให้ map วิ่งจนจบก่อนค่อยล้มคือการจ่ายค่า GPU/โควตาฟรีๆ
+    assert calls["n"] == 0
+
+
+def test_a_provider_that_cannot_reduce_still_summarizes_when_it_fits_in_one_call():
+    """ข้อห้ามต้องแคบที่สุดเท่าที่พอ -- ปิดเฉพาะทาง map-reduce ไม่ใช่ปิดโมเดลทั้งตัว
+
+    single-call ของ gemma4 วัดแล้วผ่านถึง 259,729 token ไม่เจอ error เลย การไปห้ามที่
+    ด่านเดียวกับที่ตัดสินใจ chunk จะพลอยฆ่าเส้นทางที่พิสูจน์แล้วว่าใช้ได้ไปด้วย
+    """
+    provider, calls = _counting_provider(can_map_reduce=False)
+
+    with patch.object(summarize_module, "resolve", return_value=provider):
+        result = summarize_transcript(
+            "# Transcript\n\n**ผู้พูด 1** [00:00]: สั้นมาก", model="litellm/gemma4"
+        )
+
+    assert result == "สรุป"
+    assert calls["n"] == 1
 
 
 def test_a_provider_that_returns_no_text_is_not_retried():

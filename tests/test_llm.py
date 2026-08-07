@@ -197,6 +197,22 @@ def test_resolve_returns_the_qwen_budgets():
     assert QWEN_MAP_MAX_TOKENS < GLM_MAP_MAX_TOKENS
 
 
+def test_gemma4_is_barred_from_the_map_reduce_path():
+    """เพดาน 150,000 token ย้ายประชุมขนาดปกติออกจากทาง map-reduce ได้ แต่ไม่ได้ปิดทางนั้น
+    ทิ้ง -- ประชุมที่เกินเพดานยังตกลงไปเจอ reduce ที่ยุบเนื้อหาเงียบๆ ได้อยู่ดี ธงนี้คือ
+    ตัวปิด ส่วนเพดานคือตัวเลี่ยง ต้องมีทั้งคู่ (ดูคอมเมนต์ที่ GEMMA_SINGLE_CALL_THRESHOLD_TOKENS)
+    """
+    assert resolve("litellm/gemma4").can_map_reduce is False
+
+
+def test_every_other_model_keeps_the_map_reduce_path():
+    """ข้อห้ามต้องผูกกับโมเดลที่วัดแล้วว่าพังเท่านั้น ไม่ใช่กลายเป็นค่าเริ่มต้นของทุกตัว
+    -- Qwen สรุปครบทั้ง 3 chunks ในการวัดเดียวกันที่ gemma4 ตก
+    """
+    for model_id in ("GLM-5.2", "Qwen/Qwen3.6-35B-A3B", "claude-opus-5", "claude-sonnet-5"):
+        assert resolve(model_id).can_map_reduce is True, model_id
+
+
 def test_qwen_uses_the_same_endpoint_settings_as_glm():
     """key และ base URL ตัวเดียวกัน -- ตั้ง .env เพิ่มไม่ต้องทำอะไรเลยเมื่อสลับมาใช้ตัวนี้"""
     patcher, captured = _patch_urlopen(_llm_payload("สรุป"))

@@ -319,6 +319,28 @@ def summarize_transcript(
     if not chunks:
         return single_call()
 
+    # ด่านนี้ต้องอยู่ "หลัง" ทั้งการเช็ค threshold และการ fall back ตอนไม่มี chunk ให้หั่น
+    # ไม่ใช่ก่อน: สิ่งที่ต้องห้ามคือขั้น reduce ไม่ใช่ตัวโมเดล ถ้าย้ายขึ้นไปอยู่ที่ด่าน
+    # threshold มันจะพลอยฆ่าเส้นทาง single-call ที่วัดแล้วว่าใช้ได้จริงไปด้วย (gemma4
+    # ผ่านถึง 259,729 token ไม่เจอ error เลย ดู GEMMA_SINGLE_CALL_THRESHOLD_TOKENS)
+    #
+    # ล้มก่อนขั้น map เริ่ม ไม่ใช่หลัง: chunk summary ทุกก้อนที่จ่ายไปแล้วจะถูกทิ้งอยู่ดี
+    # เมื่อไม่มี reduce ให้เดินต่อ การปล่อยให้ map วิ่งจนจบก่อนค่อยล้มคือการจ่ายค่าโควตา
+    # เต็มราคาเพื่อของที่ทิ้งแน่นอนอยู่แล้ว
+    #
+    # ทำไมต้องล้มแทนที่จะถอยไปใช้โมเดลอื่นให้เอง: หลักเดียวกับที่ llm.py ตั้งใจไม่มี
+    # cross-provider fallback -- การสลับเส้นทางเงียบ ๆ ส่งข้อความออกไปยังปลายทางที่ไม่มี
+    # ใครเลือก ที่นี่เป็นการ fallback ข้าม strategy แทนที่จะข้าม provider แต่เป็นอันตราย
+    # รูปทรงเดียวกัน: ผู้ใช้ได้สรุปที่ดูสมบูรณ์กลับมาโดยไม่รู้ว่ามันมาจากทางไหน
+    if not provider.can_map_reduce:
+        raise RuntimeError(
+            f"{provider.model_id} cannot be trusted with the reduce stage "
+            f"(it drops chunks silently), and this transcript "
+            f"(~{estimate_tokens(transcript_markdown):,} tokens in {len(chunks)} chunks) "
+            f"is past its {provider.single_call_threshold_tokens:,}-token single-call "
+            "limit. Summarize this recording with another model."
+        )
+
     # Chunks are independent, so summarize them concurrently. executor.map yields
     # results in submission order, so the timeline stays in transcript order no
     # matter which chunk finishes first.
