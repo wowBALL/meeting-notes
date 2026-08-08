@@ -3,6 +3,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -2403,6 +2404,71 @@ def test_companion_start_prefers_already_running_over_gpu_busy(config, monkeypat
 
     assert response.status_code == 409
     assert response.get_json()["error"] == "already_running"
+    assert made[0].calls == ["start"]
+
+
+def test_companion_start_probes_the_worker_before_taking_the_lock(config):
+    """companion_gpu_busy() เรียก worker_ready() ซึ่ง cache miss แล้ว spawn powershell
+    (วัดจริงได้ถึง ~2.1 วินาที) -- ถ้า route ยังถือ companion_lock คร่อมตอน cache miss
+    เหมือนก่อนแก้ /api/companion/stop ที่มาพร้อมกันจะต้องรอจนกว่า probe จะเสร็จ เทสต์นี้
+    บังคับ cache miss แน่นอน (probe_cache ว่างตอน create_app) แล้วจับเวลาว่า stop ที่ยิง
+    คู่ขนานระหว่าง probe ยังบล็อกอยู่ ต้องผ่านได้ทันทีโดยไม่รอ"""
+    config.companion_command = ["prog"]
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+
+    def slow_probe():
+        probe_started.set()
+        assert release_probe.wait(timeout=5), "เทสต์ค้าง: ไม่มีใครปล่อย release_probe"
+        return True
+
+    made = []
+
+    def factory(command, cwd=None):
+        companion = RecordingCompanion(command, cwd)
+        made.append(companion)
+        return companion
+
+    app = create_app(
+        config,
+        recorder=blocking_recorder,
+        worker_probe=slow_probe,
+        companion_factory=factory,
+    )
+    client = app.test_client()
+
+    start_result = {}
+
+    def run_start():
+        start_result["response"] = client.post("/api/companion/start")
+
+    start_thread = threading.Thread(target=run_start)
+    start_thread.start()
+    assert probe_started.wait(timeout=5), "worker_probe ไม่ถูกเรียกเลย"
+
+    # ตอนนี้ start_thread ค้างอยู่ใน slow_probe() (ยังไม่ปล่อย release_probe) --
+    # ถ้า start route ถือ companion_lock คร่อม probe request นี้จะต้องรอจนกว่า
+    # release_probe.set() แล้วเธรดของมันจะไม่จบภายใน timeout สั้น ๆ ด้านล่าง
+    stop_result = {}
+
+    def run_stop():
+        stop_result["response"] = client.post("/api/companion/stop")
+
+    stop_thread = threading.Thread(target=run_stop)
+    started_at = time.monotonic()
+    stop_thread.start()
+    stop_thread.join(timeout=2)
+    elapsed = time.monotonic() - started_at
+
+    assert not stop_thread.is_alive(), (
+        "companion_lock ยังถูกถือคร่อม worker_probe อยู่ -- /api/companion/stop ค้างรอ"
+    )
+    assert stop_result["response"].status_code == 200
+    assert elapsed < 1.0
+
+    release_probe.set()
+    start_thread.join(timeout=5)
+    assert start_result["response"].status_code == 201
     assert made[0].calls == ["start"]
 
 

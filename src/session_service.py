@@ -516,12 +516,24 @@ def create_app(
         # เรียก _get_companion_locked() ตรง ๆ ไม่เรียก get_companion() เพราะฟังก์ชันนั้น
         # ล็อก companion_lock เองอีกชั้น threading.Lock ไม่ reentrant จะค้างตัวเองทันที
         #
-        # gpu_is_busy อ่านแค่ tail ของไฟล์ log (สูงสุด ACTIVITY_LIMIT บรรทัด) เป็นงาน
-        # อ่านดิสก์สั้น ไม่ใช่เรียกเครือข่ายหรือ I/O หนัก จึงยอมถือล็อกคร่อมได้โดยไม่ทำให้
-        # request อื่นรอนาน -- และต้องถือคร่อมจริง ๆ ด้วย เพราะลำดับเช็คที่ contract
-        # กำหนด (already_running -> gpu_busy -> launch) ต้องเป็นอะตอมมิกทั้งชุด ถ้าปล่อย
-        # ล็อกระหว่างสองเช็คนี้ request คู่แข่งจะแทรก start() ก่อนได้ ทำให้ request นี้
-        # เข้าใจผิดว่ายัง idle อยู่แล้วเปิดซ้ำ
+        # companion_gpu_busy() เรียก worker_ready() ข้างใน -- ตัวนั้นไม่ใช่งานอ่านดิสก์สั้น
+        # ๆ แบบ activity.tail() ที่เรียกคู่กัน: cache hit (อายุ < WORKER_PROBE_CACHE_SECONDS)
+        # เป็นแค่การอ่าน dict แต่ cache miss จะ spawn powershell ทั้งตัว (probe_worker())
+        # ซึ่งฝั่งวิดเจ็ต COWORK Desktop วัดได้จริงถึง ~2.1 วินาที เพดานคือ timeout 10
+        # วินาทีของ subprocess.run เอง -- ถือล็อกคร่อมของแพงขนาดนี้จะทำให้ POST อื่นทุกตัว
+        # ที่แย่ง companion_lock (stop route, และงานถัดไปที่จะเอา companion status ไปแปะ
+        # ใน GET /api/state ซึ่งหน้าเว็บ poll ทุกวินาที) ค้างรอไปด้วย จึงเรียก worker_ready()
+        # ครั้งหนึ่งไว้ตรงนี้ ก่อนถือล็อก เพื่อจ่ายค่า cache miss (ถ้ามี) นอกช่วงวิกฤต --
+        # พอเข้ามาถือล็อกจริงด้านล่าง cache สดแล้วเสมอ ทำให้ companion_gpu_busy() ข้างใน
+        # เจอแต่ cache hit แทบไม่มีต้นทุนเพิ่ม ลำดับเช็คที่ contract กำหนด (already_running
+        # -> gpu_busy -> launch) จึงยังคงอะตอมมิกทั้งชุดเหมือนเดิมโดยที่ล็อกไม่ได้คร่อม
+        # ของแพงอีกต่อไป
+        #
+        # ที่ล็อกยังคร่อมได้แค่ทำให้อะตอมมิกกับ start()/stop() ของ service ตัวนี้เองเท่านั้น
+        # -- gpu_is_busy() อ่านสถานะของ watcher ซึ่งเป็นคนละโปรเซส ล็อกนี้ล็อกไม่ถึงมัน
+        # สถานะการ์ดจอที่อ่านได้อาจเปลี่ยนไปแล้วตั้งแต่ก่อนถือล็อกด้วยซ้ำ ล็อกกันได้แค่ไม่ให้
+        # request คู่แข่งของ service นี้แทรก start() ระหว่างสองเช็คนี้เท่านั้น
+        worker_ready()
         with companion_lock:
             companion = _get_companion_locked()
             if companion is None:
