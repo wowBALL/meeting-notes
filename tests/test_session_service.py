@@ -2330,3 +2330,79 @@ def _ev(job, code):
 )
 def test_gpu_is_busy(name, entries, worker_running, expected):
     assert gpu_is_busy(entries, worker_running) is expected
+
+
+def test_companion_start_is_refused_when_not_configured(config):
+    client, made = _client_with_companion(config)
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "not_configured"
+    assert made == []
+
+
+def test_companion_start_launches_it(config):
+    config.companion_command = ["prog", "--x"]
+    client, made = _client_with_companion(config)
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 201
+    assert len(made) == 1
+    assert made[0].command == ["prog", "--x"]
+    assert made[0].calls == ["start"]
+
+
+def test_companion_start_is_refused_while_it_is_already_running(config):
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+    client.post("/api/companion/start")
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "already_running"
+    assert made[0].calls == ["start"]
+
+
+def test_companion_start_is_refused_while_the_gpu_is_busy(config, monkeypatch):
+    """ปุ่มเทาคือการขอ 409 คือการบังคับ -- โปรเซสต้องไม่ถูก spawn เลย"""
+    config.companion_command = ["prog"]
+    monkeypatch.setattr(
+        "src.session_service.activity.tail",
+        lambda base_dir, limit: [_ev("a", "transcribe_started")],
+    )
+    client, made = _client_with_companion(config)
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "gpu_busy"
+    # สิ่งที่ต้องพิสูจน์คือ "ไม่มีโปรเซสถูกเปิด" ไม่ใช่ "ไม่มีอ็อบเจกต์ถูกสร้าง" --
+    # เขียนแบบนี้จึงไม่ผูกกับลำดับภายในว่า get_companion() ถูกเรียกก่อนหรือหลังด่าน
+    assert [c.calls for c in made] in ([], [[]])
+
+
+def test_companion_stop_is_idempotent(config):
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+    client.post("/api/companion/start")
+
+    assert client.post("/api/companion/stop").status_code == 200
+    assert client.post("/api/companion/stop").status_code == 200
+    assert made[0].calls == ["start", "stop"]
+
+
+def test_companion_can_be_started_again_after_being_stopped(config):
+    """เปิด-ปิด-เปิดซ้ำบนอ็อบเจกต์เดิม -- เจ้าของระดับ service ต้องใช้ซ้ำได้"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+
+    client.post("/api/companion/start")
+    client.post("/api/companion/stop")
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 201
+    assert len(made) == 1
+    assert made[0].calls == ["start", "stop", "start"]

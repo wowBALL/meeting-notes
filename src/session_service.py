@@ -438,6 +438,72 @@ def create_app(
     def index():
         return send_from_directory(WEB_DIR, "index.html")
 
+    # companion เป็นของ service ไม่ใช่ของการอัดครั้งใดครั้งหนึ่ง เพราะผู้ใช้สั่งเปิดได้
+    # โดยไม่มีห้องประชุม -- กลับด้านจากดีไซน์เดิมที่ผูกกับ open_room()
+    #
+    # อันตรายที่ดีไซน์เดิมกันไว้ (ห้องถัดไปมองเห็นตัวที่ตายไปแล้ว) หมดไปเพราะทุกคำถาม
+    # เรื่อง "ยังรันอยู่ไหม" ผ่าน is_running() ซึ่ง poll() โปรเซสจริงทุกครั้ง ไม่ใช่ธงในหน่วยความจำ
+    companion_lock = threading.Lock()
+    companion_box = {"obj": None}
+
+    def get_companion():
+        """ตัวเดียวตลอดอายุ service -- สร้างครั้งแรกที่ต้องใช้ ไม่ใช่ตอน create_app
+
+        ไม่ได้ตั้งค่าไว้ = คืน None ไม่ใช่ตัวเปล่าที่สั่งอะไรก็ไม่เกิดผล เครื่องที่ไม่ใช้
+        ฟีเจอร์นี้ต้องเดินเส้นทางเดิมเป๊ะ
+        """
+        if not config.companion_command:
+            return None
+        with companion_lock:
+            if companion_box["obj"] is None:
+                try:
+                    companion_box["obj"] = companion_factory(
+                        config.companion_command, config.base_dir
+                    )
+                except Exception:
+                    logger.exception("สร้างตัวคุมโปรเซสข้างเคียงไม่สำเร็จ")
+                    return None
+            return companion_box["obj"]
+
+    def stop_companion():
+        """เงียบเสมอ และสั่งซ้ำได้
+
+        การ์ด is_running() ทำหน้าที่แทน Event ที่ดีไซน์เดิมใช้กันสั่งซ้ำ -- ต่างกันตรงที่
+        Event ตัวเดียวใช้ได้แค่รอบเดียว พอ companion เป็นของ service มันจะกันห้องที่สอง
+        ไม่ให้ปิดได้เลย ส่วน is_running() รีเซ็ตตัวเองทุกครั้งที่ปิดสำเร็จ
+        """
+        companion = companion_box["obj"]
+        if companion is not None and companion.is_running():
+            companion.stop()
+
+    def companion_gpu_busy():
+        return gpu_is_busy(
+            activity.tail(config.base_dir, ACTIVITY_LIMIT), worker_ready()
+        )
+
+    @app.post("/api/companion/start")
+    def start_companion():
+        companion = get_companion()
+        if companion is None:
+            return jsonify({"error": "not_configured"}), 503
+        if companion.is_running():
+            return jsonify({"error": "already_running"}), 409
+        if companion_gpu_busy():
+            return jsonify({"error": "gpu_busy"}), 409
+        with state.lock:
+            room = state.room or ""
+        companion.start({"MEETING_ROOM": room})
+        # start() กลืน exception ทุกตัวโดยเจตนา (ดู companion.py) ความสำเร็จจึงตัดสิน
+        # จากโปรเซสที่มีชีวิตจริง ไม่ใช่จากการที่มันไม่โยน
+        if not companion.is_running():
+            return jsonify({"error": "start_failed"}), 500
+        return jsonify({"state": "running"}), 201
+
+    @app.post("/api/companion/stop")
+    def stop_companion_route():
+        stop_companion()
+        return jsonify({"state": "off"}), 200
+
     @app.get("/api/state")
     def get_state():
         # ภาษามาจากหน้าเว็บ แล้ว service เป็นคนแปลงรหัสเป็นคำพูด -- ถ้าให้ JS
