@@ -13,7 +13,7 @@ from src import enroll, session_service, speakers
 from src.activity import append, tail
 from src.config import Config
 from src.pending import build_pending_speakers, pending_dir, write_pending
-from src.session_service import create_app, probe_worker
+from src.session_service import create_app, probe_worker, gpu_is_busy
 from src.speakers import add_sample, load_registry, save_registry
 from src.voiceprint import Voiceprint
 
@@ -2300,3 +2300,33 @@ def test_each_room_gets_its_own_companion(config):
         _wait_until(client, lambda b: b["recorder"] == "idle")
 
     assert len(made) == 2
+
+
+def _ev(job, code):
+    return {"job": job, "code": code, "ts": "2026-08-08T09:00:00", "level": "info"}
+
+
+@pytest.mark.parametrize(
+    "name,entries,worker_running,expected",
+    [
+        ("ไม่มีอะไรเลย", [], True, False),
+        ("watcher ดับ งานค้างคิว", [_ev("a", "queued")], False, False),
+        ("งานรอคิว", [_ev("a", "queued")], True, True),
+        ("กำลังถอดเสียง", [_ev("a", "queued"), _ev("a", "transcribe_started")], True, True),
+        ("กำลังแยกผู้พูด",
+         [_ev("a", "transcribe_started"), _ev("a", "diarize_started")], True, True),
+        ("ถึงขั้นสรุปแล้ว",
+         [_ev("a", "diarize_started"), _ev("a", "summarize_started")], True, False),
+        ("สรุปเสร็จแล้วเริ่มงานใหม่",
+         [_ev("a", "summarize_started"), _ev("b", "transcribe_started")], True, True),
+        ("จบแล้ว", [_ev("a", "transcribe_started"), _ev("a", "meeting_done")], True, False),
+        ("พังแล้ว", [_ev("a", "transcribe_started"), _ev("a", "job_failed")], True, False),
+        ("งานหนึ่งจบ อีกงานยังถอด",
+         [_ev("a", "meeting_done"), _ev("b", "transcribe_started")], True, True),
+        ("สองงานจบหมด", [_ev("a", "meeting_done"), _ev("b", "job_failed")], True, False),
+        ("บรรทัดพัง ๆ ปนมา",
+         [None, {"job": 1}, {"code": []}, _ev("a", "meeting_done")], True, False),
+    ],
+)
+def test_gpu_is_busy(name, entries, worker_running, expected):
+    assert gpu_is_busy(entries, worker_running) is expected

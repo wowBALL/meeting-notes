@@ -78,6 +78,40 @@ def probe_worker() -> bool:
         return False
 
 
+# ขั้นที่งานถือการ์ดจออยู่จริง
+GPU_STAGES = ("queued", "transcribe_started", "diarize_started")
+
+# ขั้นที่แปลว่างานปล่อยการ์ดจอแล้ว -- summarize_started อยู่ในนี้ไม่ใช่เพราะงานจบ
+# แต่เพราะขั้นสรุปยิงไป LiteLLM ไม่ใช่การ์ดจอเครื่องนี้ ถ้าไม่นับมัน ค่าล่าสุดของงาน
+# จะค้างอยู่ที่ diarize_started ตลอดช่วงสรุป แล้วกั้นเกินจริงเป็นนาที ๆ
+GPU_RELEASE_CODES = ("summarize_started", "meeting_done", "job_failed")
+
+
+def gpu_is_busy(entries, worker_running: bool) -> bool:
+    """การ์ดจอไม่ว่าง = watcher กำลังรัน และมีงานที่ขั้นล่าสุดยังถือการ์ดจออยู่
+
+    worker_running ขาดไม่ได้: watcher ที่ตายกลางงานทิ้งงานค้างในคิวไว้ตลอดกาล
+    ถ้าตัดเงื่อนไขนี้ออก companion จะเปิดไม่ได้อีกเลยโดยไม่มีใครรู้สาเหตุ
+
+    อ่าน "ขั้นล่าสุดของแต่ละงาน" ไม่ใช่ "เคยเห็นขั้นนี้ไหม" -- activity ที่ส่งมาเป็นแค่
+    ส่วนท้ายของไฟล์ การนับสะสมให้คำตอบผิดทันทีที่ไฟล์ถูกตัด (กฎเดียวกับ progressOf
+    ใน meetingrun.js ฝั่ง COWORK Desktop)
+    """
+    if not worker_running:
+        return False
+    latest: dict[str, str] = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        job = entry.get("job")
+        code = entry.get("code")
+        if not isinstance(job, str) or not isinstance(code, str):
+            continue
+        if code in GPU_STAGES or code in GPU_RELEASE_CODES:
+            latest[job] = code
+    return any(code in GPU_STAGES for code in latest.values())
+
+
 class RecorderState:
     """สถานะของการอัดที่ service เป็นเจ้าของ
 
