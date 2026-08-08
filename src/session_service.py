@@ -78,6 +78,40 @@ def probe_worker() -> bool:
         return False
 
 
+# ขั้นที่งานถือการ์ดจออยู่จริง
+GPU_STAGES = ("queued", "transcribe_started", "diarize_started")
+
+# ขั้นที่แปลว่างานปล่อยการ์ดจอแล้ว -- summarize_started อยู่ในนี้ไม่ใช่เพราะงานจบ
+# แต่เพราะขั้นสรุปยิงไป LiteLLM ไม่ใช่การ์ดจอเครื่องนี้ ถ้าไม่นับมัน ค่าล่าสุดของงาน
+# จะค้างอยู่ที่ diarize_started ตลอดช่วงสรุป แล้วกั้นเกินจริงเป็นนาที ๆ
+GPU_RELEASE_CODES = ("summarize_started", "meeting_done", "job_failed")
+
+
+def gpu_is_busy(entries: list[dict], worker_running: bool) -> bool:
+    """การ์ดจอไม่ว่าง = watcher กำลังรัน และมีงานที่ขั้นล่าสุดยังถือการ์ดจออยู่
+
+    worker_running ขาดไม่ได้: watcher ที่ตายกลางงานทิ้งงานค้างในคิวไว้ตลอดกาล
+    ถ้าตัดเงื่อนไขนี้ออก companion จะเปิดไม่ได้อีกเลยโดยไม่มีใครรู้สาเหตุ
+
+    อ่าน "ขั้นล่าสุดของแต่ละงาน" ไม่ใช่ "เคยเห็นขั้นนี้ไหม" -- activity ที่ส่งมาเป็นแค่
+    ส่วนท้ายของไฟล์ การนับสะสมให้คำตอบผิดทันทีที่ไฟล์ถูกตัด (กฎเดียวกับ progressOf
+    ใน meetingrun.js ฝั่ง COWORK Desktop)
+    """
+    if not worker_running:
+        return False
+    latest: dict[str, str] = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        job = entry.get("job")
+        code = entry.get("code")
+        if not isinstance(job, str) or not isinstance(code, str):
+            continue
+        if code in GPU_STAGES or code in GPU_RELEASE_CODES:
+            latest[job] = code
+    return any(code in GPU_STAGES for code in latest.values())
+
+
 class RecorderState:
     """สถานะของการอัดที่ service เป็นเจ้าของ
 
@@ -404,6 +438,179 @@ def create_app(
     def index():
         return send_from_directory(WEB_DIR, "index.html")
 
+    # companion เป็นของ service ไม่ใช่ของการอัดครั้งใดครั้งหนึ่ง เพราะผู้ใช้สั่งเปิดได้
+    # โดยไม่มีห้องประชุม -- กลับด้านจากดีไซน์เดิมที่ผูกกับ open_room()
+    #
+    # อันตรายที่ดีไซน์เดิมกันไว้ (ห้องถัดไปมองเห็นตัวที่ตายไปแล้ว) หมดไปเพราะทุกคำถาม
+    # เรื่อง "ยังรันอยู่ไหม" ผ่าน is_running() ซึ่ง poll() โปรเซสจริงทุกครั้ง ไม่ใช่ธงในหน่วยความจำ
+    companion_lock = threading.Lock()
+    companion_box = {"obj": None}
+
+    def _get_companion_locked():
+        """สร้างตัวแรกถ้ายังไม่มี -- ต้องเรียกตอนถือ companion_lock อยู่แล้วเท่านั้น
+
+        แยกออกจาก get_companion() เพราะ start route (ด้านล่าง) ต้องถือ companion_lock
+        คร่อมทั้งช่วงเช็ค-แล้ว-สั่ง ถ้า route เรียก get_companion() ซึ่งล็อกเองอีกชั้น
+        threading.Lock ที่ไม่ reentrant จะค้างตัวเองทันที -- เลือกแยกฟังก์ชันแทนเปลี่ยน
+        เป็น RLock เพื่อให้เห็นจากชื่อฟังก์ชันตรง ๆ ว่าใครถือล็อกอยู่แล้วเรียกได้ ไม่ต้อง
+        เดาจากชนิดของล็อกว่าซ้อนได้กี่ชั้น
+
+        เช็ค companion_command ไว้ในนี้ด้วย (ซ้ำกับ get_companion() ด้านล่าง) เพราะ
+        start route เรียกฟังก์ชันนี้ตรง ๆ ไม่ผ่าน get_companion() -- ถ้าเอาเช็คนี้ออก
+        เครื่องที่ไม่ได้ตั้งค่า companion จะได้ 201 จาก start route แทนที่จะเป็น
+        503 not_configured ตาม contract
+        """
+        if not config.companion_command:
+            return None
+        if companion_box["obj"] is None:
+            try:
+                companion_box["obj"] = companion_factory(
+                    config.companion_command, config.base_dir
+                )
+            except Exception:
+                logger.exception("สร้างตัวคุมโปรเซสข้างเคียงไม่สำเร็จ")
+        return companion_box["obj"]
+
+    def get_companion():
+        """ตัวเดียวตลอดอายุ service -- สร้างครั้งแรกที่ต้องใช้ ไม่ใช่ตอน create_app
+
+        ไม่ได้ตั้งค่าไว้ = คืน None ไม่ใช่ตัวเปล่าที่สั่งอะไรก็ไม่เกิดผล เครื่องที่ไม่ใช้
+        ฟีเจอร์นี้ต้องเดินเส้นทางเดิมเป๊ะ
+        """
+        if not config.companion_command:
+            return None
+        with companion_lock:
+            return _get_companion_locked()
+
+    def stop_companion():
+        """เงียบเสมอ และสั่งซ้ำได้
+
+        การ์ด is_running() ทำหน้าที่แทน Event ที่ดีไซน์เดิมใช้กันสั่งซ้ำ -- ต่างกันตรงที่
+        Event ตัวเดียวใช้ได้แค่รอบเดียว พอ companion เป็นของ service มันจะกันห้องที่สอง
+        ไม่ให้ปิดได้เลย ส่วน is_running() รีเซ็ตตัวเองทุกครั้งที่ปิดสำเร็จ
+
+        ถือ companion_lock ตลอดคำสั่งนี้: เรียกได้พร้อมกันจาก HTTP stop route และจาก
+        ที่อื่นที่แตะ companion_box ตัวเดียวกัน ไม่ล็อกจะเจอ .stop() วิ่งซ้อนกันสอง thread
+        บน self._proc ตัวเดียว (companion.py ไม่ thread-safe เรื่องนี้)
+        """
+        with companion_lock:
+            companion = companion_box["obj"]
+            if companion is not None and companion.is_running():
+                companion.stop()
+
+    def companion_gpu_busy(activity_entries: list[dict] | None = None):
+        """activity_entries ให้มาจากผู้เรียกได้ (finding 2 ของรีวิวรอบนี้) -- ไม่งั้นอ่านเอง
+
+        get_state() อ่าน activity.tail() ไปแล้วรอบหนึ่งเพื่อฟิลด์ "activity" ของมันเอง
+        ส่งอันเดิมมาที่นี่ต่อจึงไม่ต้องอ่านไฟล์ซ้ำ (json-parse ได้ถึง 200 บรรทัด) บน endpoint
+        ที่วิดเจ็ต poll ทุกวินาที -- ผู้เรียกอื่น (start route) ไม่มีชุดที่อ่านมาแล้ว จึงปล่อย
+        ให้อ่านเองตามเดิมด้วยการไม่ส่ง argument มา
+        """
+        if activity_entries is None:
+            activity_entries = activity.tail(config.base_dir, ACTIVITY_LIMIT)
+        return gpu_is_busy(activity_entries, worker_ready())
+
+    def companion_snapshot(activity_entries: list[dict] | None = None) -> dict:
+        """รูปเดียวที่หน้าจออ่าน -- ไม่มี already_running ในนี้โดยเจตนา
+
+        ตอนมันรันอยู่ state บอกไปแล้ว การมีอีกช่องที่พูดเรื่องเดียวกันคือสองแหล่ง
+        ความจริงที่ขัดกันเองได้ blocked_by จึงตอบเฉพาะเหตุผลที่ "เปิดไม่ได้ทั้งที่ยังไม่ได้เปิด"
+
+        **ห้ามขอ companion_lock ในนี้เด็ดขาด** -- endpoint นี้ถูก poll ทุกวินาทีจากวิดเจ็ต
+        ที่ตั้ง timeout ไว้ 5 วินาที ส่วน Companion.stop() ถือล็อกได้ถึง 10 วินาที
+        (grace 5+5) ขอล็อกตรงนี้เท่ากับทำให้หน้าจอค้างทุกครั้งที่มีใครกดปิด
+        การอ่านค่าเฉย ๆ ไม่ต้องใช้ล็อกอยู่แล้ว: ล็อกมีไว้กันลำดับ เช็ค-แล้ว-สั่ง ของ start/stop
+        ไม่ได้มีไว้กันการอ่าน และคำตอบจากที่นี่เป็นแค่รายงาน ไม่ใช่คำตัดสิน -- คำตัดสินจริง
+        ยังอยู่ในล็อกที่ start route เหมือนเดิม
+
+        activity_entries เป็น parameter เสริม (finding 2 ของรีวิวรอบนี้) ให้ get_state()
+        ส่ง activity.tail() ที่อ่านไปแล้วรอบหนึ่งต่อมาที่นี่ ไม่ต้องอ่านไฟล์ซ้ำสอง
+        รอบต่อการ poll หนึ่งครั้ง -- ผู้เรียกอื่นที่ไม่มีชุดพร้อมอยู่แล้วไม่ต้องส่งอะไรมา
+        companion_gpu_busy() จะอ่านเองเหมือนเดิม
+        """
+        if not config.companion_command:
+            return {"state": "off", "can_start": False, "blocked_by": "not_configured"}
+        # อ่าน companion_box ตรง ๆ ไม่เรียก get_companion() เพราะตัวนั้นขอล็อก --
+        # ยังไม่เคยถูกสร้าง = ยังไม่เคยถูกสั่งเปิด = off แน่นอน ไม่ต้องสร้างเพื่อจะรู้
+        companion = companion_box["obj"]
+        if companion is not None and companion.is_running():
+            return {"state": "running", "can_start": False, "blocked_by": None}
+        # ไม่ต้องกลัวว่า worker_ready() จะแพงตรงนี้ -- get_state() เรียกมันไปแล้วบรรทัดบน
+        # cache จึงสดเสมอเมื่อมาถึงจุดนี้
+        if companion_gpu_busy(activity_entries):
+            return {"state": "off", "can_start": False, "blocked_by": "gpu_busy"}
+        return {"state": "off", "can_start": True, "blocked_by": None}
+
+    @app.post("/api/companion/start")
+    def start_companion():
+        # ด่านสองข้อแรก (not_configured, already_running) เช็คนอกล็อกก่อน แบบ advisory
+        # เท่านั้น -- ตัดสินจาก config.companion_command และ is_running() ล้วน ๆ ไม่ต้อง
+        # แตะ worker_ready() เลย เครื่องที่ไม่ได้ตั้งค่า companion (ไม่ใช้ฟีเจอร์นี้) หรือ
+        # เครื่องที่ companion รันอยู่แล้วจึงไม่ต้อง spawn powershell แค่เพื่อจะถูกปฏิเสธ --
+        # ตรงกับ invariant ของ get_companion() ด้านบน ("เครื่องที่ไม่ใช้ฟีเจอร์นี้ต้องเดิน
+        # เส้นทางเดิมเป๊ะ") ผลตรงนี้ยังไม่ authoritative เพราะยังไม่ถือล็อก แค่กันงานที่
+        # รู้อยู่แล้วว่าจะถูกปฏิเสธแน่ ๆ ไม่ให้ไปจ่ายค่า probe โดยเปล่าประโยชน์ -- คำตอบจริง
+        # มาจากการเช็คซ้ำในล็อกด้านล่างเท่านั้น
+        companion = get_companion()
+        if companion is None:
+            return jsonify({"error": "not_configured"}), 503
+        if companion.is_running():
+            return jsonify({"error": "already_running"}), 409
+
+        # companion_gpu_busy() (เรียกในล็อกด้านล่าง) ใช้ worker_ready() ข้างใน -- cache
+        # miss จะ spawn powershell ทั้งตัว (probe_worker()) วัดจริงถึง ~2.1 วินาที เพดาน
+        # คือ timeout 10 วินาทีของ subprocess.run เอง ถือล็อกคร่อมของแพงขนาดนี้จะทำให้
+        # POST อื่นทุกตัวที่แย่ง companion_lock (stop route, GET /api/state ที่หน้าเว็บ
+        # poll ทุกวินาที) ค้างรอไปด้วย จึงเรียก worker_ready() ครั้งหนึ่งไว้ตรงนี้ นอกล็อก
+        # เพื่อจ่ายค่า cache miss (ถ้ามี) นอกช่วงวิกฤต -- เรียกหลังด่านสองข้อบนเสมอ
+        # เพราะสองข้อนั้นไม่ต้องการ probe เลย ยิงเร็วเกินจำเป็นเท่ากับเสียของฟรี
+        #
+        # หมายเหตุความเสี่ยงที่เหลืออยู่ (ไม่ใช่การรับประกัน): priming ตรงนี้ไม่ได้แปลว่า
+        # cache จะสดแน่นอนตอนถือล็อกจริงด้านล่าง -- Companion.stop() บล็อกได้ถึง 10 วินาที
+        # (grace 5+5 วิ, ดู companion.py) ซึ่งเท่ากับ WORKER_PROBE_CACHE_SECONDS พอดี ถ้า
+        # request นี้ไพรม์ cache เสร็จแล้วไปรอ companion_lock อยู่หลัง stop() ที่ช้าพอดี
+        # cache จะหมดอายุก่อนได้ล็อกจริง แล้ว companion_gpu_busy() ข้างในจะ cache miss
+        # และ spawn probe ซ้ำในล็อกอยู่ดี -- คือสถานการณ์เดียวกับที่รอบแก้ก่อนหน้าตั้งใจ
+        # เอาออกจากล็อก ยอมรับเป็นกรณีหายาก (ต้องมี stop() ช้าพอดีบวกคิวยาวพอดีมาชนกัน)
+        # เพราะยังดีกว่าการถือล็อกคร่อม probe ทุกครั้งแบบเดิม ไม่ใช่เพราะมันเกิดไม่ได้
+        worker_ready()
+
+        with companion_lock:
+            # ล็อกครอบทั้งช่วงเช็ค-แล้ว-สั่ง (not_configured -> already_running ->
+            # gpu_busy -> start -> เช็คซ้ำ) เพราะ service รันด้วย threaded=True
+            # (บรรทัด ~1081) -- สอง POST พร้อมกันเห็น is_running() False ทั้งคู่ได้ถ้า
+            # ล็อกไม่ครอบถึง start() แล้วจะเรียก start() ซ้อนสองรอบ companion.py เก็บ
+            # self._proc ตัวเดียวไม่มีล็อกของตัวเอง รอบที่สองทับตัวแรกจนโปรเซสแรกหลุดค้าง
+            # กิน GPU ต่อโดยไม่มีใครปิด -- ด่านที่ตั้งใจกันเรื่องนี้ไว้เลยรั่ว (แพทเทิร์น
+            # เดียวกับ _registry_lock บรรทัด 30-36 และการใช้งานที่ 770-780)
+            #
+            # สามเช็คต่อไปนี้เป็นคำตอบที่แท้จริง (authoritative) -- สองเช็คแรกที่ทำนอกล็อก
+            # ข้างบนเป็นแค่การลัดคิว ไม่ใช่การตัดสิน เพราะสถานะเปลี่ยนได้ระหว่างที่ยัง
+            # ไม่ได้ถือล็อก (request คู่แข่งแทรก start/stop ได้)
+            #
+            # เรียก _get_companion_locked() ตรง ๆ ไม่เรียก get_companion() เพราะฟังก์ชัน
+            # นั้นล็อก companion_lock เองอีกชั้น threading.Lock ไม่ reentrant จะค้างตัวเองทันที
+            companion = _get_companion_locked()
+            if companion is None:
+                return jsonify({"error": "not_configured"}), 503
+            if companion.is_running():
+                return jsonify({"error": "already_running"}), 409
+            if companion_gpu_busy():
+                return jsonify({"error": "gpu_busy"}), 409
+            with state.lock:
+                room = state.room or ""
+            companion.start({"MEETING_ROOM": room})
+            # start() กลืน exception ทุกตัวโดยเจตนา (ดู companion.py) ความสำเร็จจึงตัดสิน
+            # จากโปรเซสที่มีชีวิตจริง ไม่ใช่จากการที่มันไม่โยน
+            if not companion.is_running():
+                return jsonify({"error": "start_failed"}), 500
+        return jsonify({"state": "running"}), 201
+
+    @app.post("/api/companion/stop")
+    def stop_companion_route():
+        stop_companion()
+        return jsonify({"state": "off"}), 200
+
     @app.get("/api/state")
     def get_state():
         # ภาษามาจากหน้าเว็บ แล้ว service เป็นคนแปลงรหัสเป็นคำพูด -- ถ้าให้ JS
@@ -411,6 +618,13 @@ def create_app(
         lang = request.args.get("lang") or config.ui_lang
         body = state.snapshot()
         body["worker_ready"] = worker_ready()
+        # อ่าน activity.tail() ครั้งเดียวแล้วส่งต่อ (finding 2 ของรีวิวรอบนี้) -- เดิม
+        # companion_snapshot() -> companion_gpu_busy() อ่านไฟล์นี้เองอีกรอบ กลายเป็น
+        # อ่าน+parse JSON สูงสุด 200 บรรทัดสองครั้งต่อการ poll หนึ่งครั้ง endpoint นี้ถูก
+        # widget เดสก์ท็อป poll ทุกวินาทีด้วย timeout ฝั่ง client แค่ 5 วินาที จึงเป็น
+        # hot path ที่ตัดของซ้ำได้ก็ควรตัด
+        entries = activity.tail(config.base_dir, ACTIVITY_LIMIT)
+        body["companion"] = companion_snapshot(entries)
         body["lang"] = lang
         body["warnings"] = [
             {**w, "text": render(w["code"], w.get("params"), lang)}
@@ -419,10 +633,7 @@ def create_app(
         # allowlist ไม่ใช่ {**e, ...}: entry มาจาก state/activity.jsonl ตรง ๆ (activity.tail)
         # ซึ่งแก้มือได้ตามดีไซน์เดียวกับไฟล์คิว (ดู activity.append) -- ฟิลด์ที่ออกไปกับ
         # เหตุผลที่ job/params ต้องอยู่ต่อ ดูที่ _public_activity ด้านบน
-        body["activity"] = [
-            _public_activity(e, lang)
-            for e in activity.tail(config.base_dir, ACTIVITY_LIMIT)
-        ]
+        body["activity"] = [_public_activity(e, lang) for e in entries]
         return jsonify(body)
 
     @app.post("/api/session")
@@ -457,29 +668,6 @@ def create_app(
                 state.asr_engine,
             )
 
-        # companion ผูกกับ "ครั้งที่อัด" ไม่ใช่กับ service -- ห้องใหม่ได้ตัวใหม่เสมอ
-        # เป็นตัวแปรท้องถิ่นไม่ใช่ state เพราะไม่มีใครนอก thread นี้ต้องเห็นมัน และการ
-        # เก็บลง state จะเปิดโอกาสให้ห้องถัดไปมองเห็นตัวที่ตายไปแล้ว
-        #
-        # ไม่ตั้งค่าไว้ = ไม่สร้างอะไรเลย ไม่ใช่สร้างตัวเปล่าที่สั่งอะไรก็ไม่เกิดผล --
-        # เครื่องที่ไม่ใช้ฟีเจอร์นี้ต้องเดินเส้นทางเดิมเป๊ะ ไม่ใช่เส้นทางใหม่ที่บังเอิญ
-        # ไม่ทำอะไร
-        companion = None
-        if config.companion_command:
-            try:
-                companion = companion_factory(config.companion_command, config.base_dir)
-            except Exception:
-                logger.exception("สร้างตัวคุมโปรเซสข้างเคียงไม่สำเร็จ -- ประชุมเดินต่อ")
-        companion_stopped = threading.Event()
-
-        def stop_companion():
-            # ถูกเรียกได้จากสองทาง (on_event ของ recorder thread และ finally ของ
-            # thread เดียวกัน) -- Event กันไม่ให้สั่งซ้ำ
-            if companion is None or companion_stopped.is_set():
-                return
-            companion_stopped.set()
-            companion.stop()
-
         def on_event(code, params=None, level="info"):
             # ไมค์/ลำโพงที่ถูกดักฟังจริงต้องเห็นได้ตลอดการอัด ไม่ใช่ไปขุดใน log --
             # การอัดจากอุปกรณ์ผิดตัวคือสาเหตุอันดับหนึ่งของเคส "ไม่มีเสียง"
@@ -499,11 +687,6 @@ def create_app(
         def work():
             # ตัวอัดที่ระเบิดต้องไม่ทิ้งหน้าจอค้างที่ "กำลังอัด" ตลอดไป -- สถานะ
             # ต้องกลับไป idle ไม่ว่าจะจบทางไหน
-            #
-            # start ที่นี่ไม่ใช่ใน request: ผู้ใช้ไม่ควรต้องรอโปรเซสของเสริมเปิดก่อน
-            # ถึงจะได้ 201 กลับไป
-            if companion is not None:
-                companion.start({"MEETING_ROOM": room or ""})
             try:
                 result = recorder(
                     room,

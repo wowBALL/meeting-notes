@@ -3,6 +3,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -13,7 +14,7 @@ from src import enroll, session_service, speakers
 from src.activity import append, tail
 from src.config import Config
 from src.pending import build_pending_speakers, pending_dir, write_pending
-from src.session_service import create_app, probe_worker
+from src.session_service import create_app, probe_worker, gpu_is_busy
 from src.speakers import add_sample, load_registry, save_registry
 from src.voiceprint import Voiceprint
 
@@ -2157,6 +2158,21 @@ class RecordingCompanion:
         return self.calls.count("start") > self.calls.count("stop")
 
 
+class NeverComesUpCompanion(RecordingCompanion):
+    """companion ปลอมที่ start() ไม่ทำให้โปรเซสรันจริง (finding 6 ของรีวิวรอบนี้)
+
+    RecordingCompanion ธรรมดาให้ is_running() เป็น True ทันทีหลัง start() เสมอ ซึ่งไม่มี
+    ทางจุดชนวน branch `start_failed` ใน /api/companion/start ได้เลย (route เช็ค
+    is_running() หลัง start() แล้วคืน 500 ถ้ายังเป็น False) -- เคสนี้จำลอง spawn ที่
+    ล้มเหลวจริง: Popen สำเร็จ (start() ไม่ throw) แต่โปรเซสลูกตายก่อนที่ poll ครั้งแรกจะ
+    เห็นมันรัน จึงบันทึกว่าถูกเรียกแต่ไม่ทำให้ is_running() เป็น True
+    """
+
+    def start(self, env_extra=None):
+        self.env_extra = env_extra
+        self.calls.append("start_attempted")
+
+
 def _client_with_companion(config, recorder=blocking_recorder):
     made = []
 
@@ -2174,73 +2190,24 @@ def _client_with_companion(config, recorder=blocking_recorder):
     return app.test_client(), made
 
 
-def test_no_companion_is_started_when_none_is_configured(config):
-    """ดีฟอลต์คือไม่มี -- เครื่องที่ไม่ตั้งค่าต้องได้พฤติกรรมเดิมเป๊ะ"""
-    client, made = _client_with_companion(config)
-
-    client.post("/api/session", json={"model": "GLM-5.2"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
-    client.post("/api/session/stop")
-
-    assert made == []
-
-
-def test_opening_a_room_starts_the_configured_companion(config):
-    config.companion_command = ["prog", "--x"]
-    client, made = _client_with_companion(config)
-
-    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
-
-    assert len(made) == 1
-    assert made[0].command == ["prog", "--x"]
-    assert made[0].calls == ["start"]
-
-    client.post("/api/session/stop")
-
-
-def test_the_room_name_reaches_the_companion(config):
-    """ให้ context ทาง env เพื่อไม่ให้มันต้องไปไล่อ่าน state ของ service"""
-    config.companion_command = ["prog"]
-    client, made = _client_with_companion(config)
-
-    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
-
-    assert made[0].env_extra["MEETING_ROOM"] == "standup"
-
-    client.post("/api/session/stop")
-
-
-def test_the_companion_is_stopped_when_the_encode_stage_begins(config):
-    """ต้องหยุดตอนเข้า encode ไม่ใช่หลัง encode จบ -- วัดจากประชุมจริงพบว่าช่วง
-    encode กว้าง 62-69 วินาที ส่วนช่วงหลัง encode_done ถึงงานถัดไปมีแค่ ~2 วินาที"""
-    config.companion_command = ["prog"]
-
-    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None, asr_engine=None):
-        stop_event.wait(timeout=5)
-        if on_event:
-            on_event("encode_started", {})
-        return None
-
-    client, made = _client_with_companion(config, recorder=recorder)
-    client.post("/api/session", json={"model": "GLM-5.2"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
-
-    client.post("/api/session/stop")
-    _wait_until(client, lambda b: b["recorder"] == "idle")
-
-    assert made[0].calls == ["start", "stop"]
-
-
 def test_the_companion_is_stopped_even_when_the_encode_stage_never_begins(config):
-    """ตัวอัดที่ระเบิดกลางทางต้องไม่ทิ้ง companion ค้างถือทรัพยากรไว้"""
+    """ตัวอัดที่ระเบิดกลางทางต้องไม่ทิ้ง companion ค้างถือทรัพยากรไว้
+
+    เดิมเทสนี้ให้ตัวอัดปลอม stop_event.wait(timeout=0.2) ก่อนระเบิด เพื่อถ่วงเวลาให้
+    thread หลักมีจังหวะยิง POST /api/companion/start ทันก่อน finally ของ thread งาน
+    จะไล่ปิด -- ยังเหลือช่วง race 200ms อยู่ดี (แค่แคบลง ไม่ได้ตัดทิ้ง) /api/companion/start
+    ไม่ผูกกับ state.status เลย (อ่านแค่ state.room เพื่อใส่ env ตอน start เท่านั้น ดู
+    session_service.py) จึงสั่งเปิด companion ได้ตั้งแต่ก่อนเปิดห้องประชุมด้วยซ้ำ --
+    สลับลำดับให้ start มาก่อน open_room ตัด race ทิ้งทั้งหมดแทนที่จะแคบมันลง: companion
+    รันอยู่แล้วแน่นอนก่อนที่ thread งานจะแม้แต่เริ่ม จึงไม่ต้องหน่วงเวลาอะไรอีก
+    """
     config.companion_command = ["prog"]
 
     def exploding_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None, asr_engine=None):
         raise RuntimeError("ตัวอัดระเบิด")
 
     client, made = _client_with_companion(config, recorder=exploding_recorder)
+    client.post("/api/companion/start")
     client.post("/api/session", json={"model": "GLM-5.2"})
     _wait_until(client, lambda b: b["recorder"] == "idle")
 
@@ -2260,14 +2227,25 @@ def test_the_companion_is_stopped_exactly_once(config):
     client, made = _client_with_companion(config, recorder=recorder)
     client.post("/api/session", json={"model": "GLM-5.2"})
     _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/companion/start")
     client.post("/api/session/stop")
     _wait_until(client, lambda b: b["recorder"] == "idle")
 
     assert made[0].calls.count("stop") == 1
 
 
-def test_a_companion_that_cannot_start_still_lets_the_room_open(config):
-    """กฎข้อเดียวที่สำคัญที่สุดของฟีเจอร์นี้"""
+def test_a_companion_factory_that_explodes_degrades_the_start_route_instead_of_crashing_it(config):
+    """factory ที่ระเบิดตอนสร้าง companion ต้องไม่ทำให้ /api/companion/start โยน 500
+
+    companion_snapshot() (ที่ /api/state เรียกทุก poll) อ่าน companion_box ตรง ๆ ไม่เรียก
+    get_companion() เลย จึงไม่มีทางแตะ factory -- ที่เดียวที่เรียก factory จริงคือ route
+    นี้เท่านั้น (ผ่าน _get_companion_locked() ซึ่งดัก Exception ไว้แล้วคืน None ดู
+    session_service.py) ต้องยิง POST ตรง ๆ ถึงจะพิสูจน์อะไรได้ -- ยิง /api/session
+    หรือ /api/state เฉย ๆ ไม่มีทางเรียกถึง factory ที่ระเบิดเลยแม้แต่ครั้งเดียว
+
+    ปลายทางจริงวัดได้คือ 503 not_configured เดียวกับเครื่องที่ไม่ได้ตั้งค่า companion
+    เลย (ไม่ใช่ 500) และคงเจตนาเดิมไว้ด้วย: companion ที่เปิดไม่ได้ต้องไม่ดึงห้องประชุม
+    ลงไปด้วย"""
     config.companion_command = ["prog"]
 
     def factory(command, cwd=None):
@@ -2281,22 +2259,449 @@ def test_a_companion_that_cannot_start_still_lets_the_room_open(config):
     )
     client = app.test_client()
 
-    response = client.post("/api/session", json={"model": "GLM-5.2"})
+    start_response = client.post("/api/companion/start")
 
-    assert response.status_code == 201
+    assert start_response.status_code == 503
+    assert start_response.get_json() == {"error": "not_configured"}
+
+    open_response = client.post("/api/session", json={"model": "GLM-5.2"})
+
+    assert open_response.status_code == 201
     assert _wait_until(client, lambda b: b["recorder"] == "recording")["recorder"] == "recording"
 
     client.post("/api/session/stop")
 
 
-def test_each_room_gets_its_own_companion(config):
+def test_the_service_reuses_one_companion_across_rooms(config):
+    """companion เป็นของ service ตัวเดียว ไม่ใช่ของห้อง -- ห้องที่สองต้องไม่ได้ตัวใหม่
+
+    ไม่มี auto-start แล้ว companion จึงไม่ถูกสร้างเองตอนเปิดห้อง (ไม่เหมือนเทสเดิมที่
+    เปิด-ปิดห้องเฉย ๆ แล้วนับจำนวนตัวที่ถูกสร้าง) ต้องสั่งเปิดเองทุกรอบเพื่อพิสูจน์ว่า
+    get_companion() คืนอ็อบเจกต์เดิมซ้ำ ไม่ใช่สร้างใหม่ทุกครั้งที่ห้องเปลี่ยน"""
     config.companion_command = ["prog"]
     client, made = _client_with_companion(config)
 
     for _ in range(2):
         client.post("/api/session", json={"model": "GLM-5.2"})
         _wait_until(client, lambda b: b["recorder"] == "recording")
+        client.post("/api/companion/start")
         client.post("/api/session/stop")
         _wait_until(client, lambda b: b["recorder"] == "idle")
 
-    assert len(made) == 2
+    assert len(made) == 1
+
+
+def test_opening_a_room_no_longer_starts_the_companion(config):
+    """ปุ่มบนหัวแอปเป็นเจ้าของวงจรชีวิตแต่ผู้เดียว -- ห้องประชุมไม่ใช่"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+
+    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+
+    # get_companion() / _get_companion_locked() (ตัวเดียวที่เรียก factory) ถูกเรียก
+    # จาก /api/companion/start route เท่านั้น -- companion_snapshot() ที่ /api/state
+    # เรียกทุก poll (รวมถึง _wait_until ข้างบน) อ่าน companion_box ตรง ๆ โดยเจตนา
+    # ไม่ผ่าน get_companion() เลย (ดู session_service.py) flow นี้ไม่มี POST
+    # /api/companion/start เลยสักครั้ง factory จึงไม่มีทางถูกเรียก made ต้องว่างเปล่าเสมอ
+    assert made == []
+
+    client.post("/api/session/stop")
+
+
+def test_the_room_name_reaches_a_companion_started_during_a_meeting(config):
+    """ให้ context ทาง env เพื่อไม่ให้มันต้องไปไล่อ่าน state ของ service"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+
+    client.post("/api/companion/start")
+
+    assert made[0].env_extra == {"MEETING_ROOM": "standup"}
+
+    client.post("/api/session/stop")
+
+
+def test_a_companion_started_by_hand_is_stopped_when_the_encode_stage_begins(config):
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None,
+                 profile=None, asr_engine=None):
+        on_event("room_opened", {"room": name or ""})
+        stop_event.wait(timeout=5)
+        on_event("encode_started", {})
+        on_event("encode_done", {"path": "fake.ogg"})
+        return cfg.inbox_dir / "fake.ogg"
+
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config, recorder=recorder)
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/companion/start")
+
+    client.post("/api/session/stop")
+    _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert made[0].calls == ["start", "stop"]
+
+
+def test_the_encode_started_hook_is_what_actually_stops_the_companion(config):
+    """finding 1 ของรีวิวรอบนี้: เทสต์ข้างบน (และทุกเทสต์อื่นในไฟล์นี้) เช็คแค่สถานะ
+    ปลายทางหลัง recorder คืนค่าแล้ว ซึ่ง finally ของ work() (ตาข่ายกันตกสำหรับเส้นทาง
+    ที่ไม่ยิง encode_started) ผลิตผลลัพธ์เดียวกันได้เองโดยไม่ต้องมี hook ที่ on_event
+    เลย -- ลบ `if code == "encode_started": stop_companion()` ทิ้งแล้วรันสวีตทั้งไฟล์
+    ยังผ่านหมด ทั้งที่เหตุผลทั้งหมดของฟีเจอร์นี้คือหน้าต่าง 62-69 วินาทีตอนขั้นแปลงไฟล์
+    (ก่อน recorder คืนค่า) ไม่ใช่ ~2 วินาทีหลัง recorder คืนค่าแล้ว
+
+    เทสต์นี้แยกสองเส้นทางออกจากกันโดยจับสถานะ *ระหว่าง* recorder ยังทำงานอยู่ ไม่ใช่
+    หลังจบ: fake recorder ยิง encode_started แล้วเช็ค companion.is_running() ทันที
+    ก่อน return -- ถ้า hook ถูกลบ ตอนนั้น finally ยังไม่ทำงาน (recorder ยังไม่ return)
+    companion จึงยังวิ่งอยู่ ทำให้เทสต์นี้ล้ม (ดูหลักฐานแดง-เขียวในรายงานที่แนบมาด้วย)
+    """
+    config.companion_command = ["prog"]
+    observed = {}
+
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None,
+                 profile=None, asr_engine=None):
+        stop_event.wait(timeout=5)
+        on_event("encode_started", {})
+        # ต้องอ่าน made[0] ตรงนี้ ไม่ใช่หลัง client.post("/api/session/stop") คืนค่า
+        # ในเทสต์ -- เพราะ finally ของ work() (ที่ยังไม่ถูกลบ) จะปิดมันให้เองอยู่ดี
+        # เมื่อ recorder ฟังก์ชันนี้ return จุดที่ต้องจับคือ "ระหว่าง" encode_started
+        # กำลังทำงาน ก่อนจะ return
+        observed["running_right_after_encode_started"] = made[0].is_running()
+        return None
+
+    client, made = _client_with_companion(config, recorder=recorder)
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/companion/start")
+
+    client.post("/api/session/stop")
+    _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert observed["running_right_after_encode_started"] is False
+
+
+def test_the_second_room_can_still_stop_the_companion(config):
+    """ดีไซน์เดิมกันสั่งซ้ำด้วย Event ตัวเดียว ซึ่งใช้ได้แค่รอบเดียว
+
+    พอ companion เป็นของ service การ์ดแบบนั้นจะทำให้ห้องที่สองปิดมันไม่ลงเลย
+    """
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None,
+                 profile=None, asr_engine=None):
+        on_event("room_opened", {"room": name or ""})
+        stop_event.wait(timeout=5)
+        on_event("encode_started", {})
+        return None
+
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config, recorder=recorder)
+
+    for _ in range(2):
+        client.post("/api/session", json={"model": "GLM-5.2"})
+        _wait_until(client, lambda b: b["recorder"] == "recording")
+        client.post("/api/companion/start")
+        client.post("/api/session/stop")
+        _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert made[0].calls == ["start", "stop", "start", "stop"]
+
+
+def _ev(job, code):
+    return {"job": job, "code": code, "ts": "2026-08-08T09:00:00", "level": "info"}
+
+
+@pytest.mark.parametrize(
+    "name,entries,worker_running,expected",
+    [
+        ("ไม่มีอะไรเลย", [], True, False),
+        ("watcher ดับ งานค้างคิว", [_ev("a", "queued")], False, False),
+        ("งานรอคิว", [_ev("a", "queued")], True, True),
+        ("กำลังถอดเสียง", [_ev("a", "queued"), _ev("a", "transcribe_started")], True, True),
+        ("กำลังแยกผู้พูด",
+         [_ev("a", "transcribe_started"), _ev("a", "diarize_started")], True, True),
+        ("ถึงขั้นสรุปแล้ว",
+         [_ev("a", "diarize_started"), _ev("a", "summarize_started")], True, False),
+        ("สรุปเสร็จแล้วเริ่มงานใหม่",
+         [_ev("a", "summarize_started"), _ev("b", "transcribe_started")], True, True),
+        ("จบแล้ว", [_ev("a", "transcribe_started"), _ev("a", "meeting_done")], True, False),
+        ("พังแล้ว", [_ev("a", "transcribe_started"), _ev("a", "job_failed")], True, False),
+        ("งานหนึ่งจบ อีกงานยังถอด",
+         [_ev("a", "meeting_done"), _ev("b", "transcribe_started")], True, True),
+        ("สองงานจบหมด", [_ev("a", "meeting_done"), _ev("b", "job_failed")], True, False),
+        ("บรรทัดพัง ๆ ปนมา",
+         [None, {"job": 1}, {"code": []}, _ev("a", "meeting_done")], True, False),
+    ],
+)
+def test_gpu_is_busy(name, entries, worker_running, expected):
+    assert gpu_is_busy(entries, worker_running) is expected
+
+
+def test_companion_start_is_refused_when_not_configured(config):
+    client, made = _client_with_companion(config)
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "not_configured"
+    assert made == []
+
+
+def test_companion_start_when_not_configured_never_probes_the_worker(config):
+    """Finding A ของรอบรีวิวนี้: not_configured ตัดสินได้จาก config.companion_command
+    อย่างเดียว ไม่ต้องแตะ worker_ready() เลย -- เครื่องที่ไม่ใช้ฟีเจอร์นี้ (ไม่ตั้ง
+    companion_command) ต้องไม่จ่ายค่า spawn powershell ของ probe_worker() แค่เพื่อจะถูก
+    ปฏิเสธด้วย 503 ตรงกับ invariant ใน docstring ของ get_companion(): "เครื่องที่ไม่ใช้
+    ฟีเจอร์นี้ต้องเดินเส้นทางเดิมเป๊ะ" """
+    probe_calls = []
+
+    def counting_probe():
+        probe_calls.append(1)
+        return True
+
+    made = []
+
+    def factory(command, cwd=None):
+        companion = RecordingCompanion(command, cwd)
+        made.append(companion)
+        return companion
+
+    app = create_app(
+        config,
+        recorder=blocking_recorder,
+        worker_probe=counting_probe,
+        companion_factory=factory,
+    )
+    client = app.test_client()
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "not_configured"
+    assert made == []
+    assert probe_calls == []
+
+
+def test_companion_start_launches_it(config):
+    config.companion_command = ["prog", "--x"]
+    client, made = _client_with_companion(config)
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 201
+    assert len(made) == 1
+    assert made[0].command == ["prog", "--x"]
+    assert made[0].calls == ["start"]
+
+
+def test_companion_start_reports_start_failed_when_the_process_never_comes_up(config):
+    """finding 6 ของรีวิวรอบนี้: is_running() == False ทันทีหลัง start() คือทางเดียวที่
+    ผู้ใช้จะเห็น 500 start_failed จริง (start() กลืน exception ทุกตัวไว้แล้ว ดู
+    companion.py) -- ก่อนหน้านี้ไม่มีเทสต์ไหนคุม branch นี้เลยเพราะ RecordingCompanion
+    ปลอมทุกตัวที่ใช้ในไฟล์นี้รายงาน running เสมอหลัง start()"""
+    config.companion_command = ["prog"]
+    made = []
+
+    def factory(command, cwd=None):
+        companion = NeverComesUpCompanion(command, cwd)
+        made.append(companion)
+        return companion
+
+    app = create_app(
+        config,
+        recorder=blocking_recorder,
+        worker_probe=lambda: True,
+        companion_factory=factory,
+    )
+    client = app.test_client()
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "start_failed"}
+    assert made[0].calls == ["start_attempted"]
+
+
+def test_companion_start_is_refused_while_it_is_already_running(config):
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+    client.post("/api/companion/start")
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "already_running"
+    assert made[0].calls == ["start"]
+
+
+def test_companion_start_is_refused_while_the_gpu_is_busy(config, monkeypatch):
+    """ปุ่มเทาคือการขอ 409 คือการบังคับ -- โปรเซสต้องไม่ถูก spawn เลย"""
+    config.companion_command = ["prog"]
+    monkeypatch.setattr(
+        "src.session_service.activity.tail",
+        lambda base_dir, limit: [_ev("a", "transcribe_started")],
+    )
+    client, made = _client_with_companion(config)
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "gpu_busy"
+    # สิ่งที่ต้องพิสูจน์คือ "ไม่มีโปรเซสถูกเปิด" ไม่ใช่ "ไม่มีอ็อบเจกต์ถูกสร้าง" --
+    # เขียนแบบนี้จึงไม่ผูกกับลำดับภายในว่า get_companion() ถูกเรียกก่อนหรือหลังด่าน
+    assert [c.calls for c in made] in ([], [[]])
+
+
+def test_companion_start_prefers_already_running_over_gpu_busy(config, monkeypatch):
+    """ลำดับด่านที่ contract บังคับคือ not_configured -> already_running -> gpu_busy
+    -> launch -- เทสต์ที่มีอยู่แต่ละตัวจุดชนวนแค่เงื่อนไขเดียว ไม่มีตัวไหนพิสูจน์ลำดับ
+    เมื่อสองเงื่อนไขจริงพร้อมกัน เคสนี้ปิดช่องนั้นด้วยการทำให้ companion รันอยู่แล้ว
+    (already_running) และ GPU ไม่ว่าง (gpu_busy) พร้อมกัน -- คำตอบต้องเป็น
+    already_running ไม่ใช่ gpu_busy"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+    client.post("/api/companion/start")
+
+    monkeypatch.setattr(
+        "src.session_service.activity.tail",
+        lambda base_dir, limit: [_ev("a", "transcribe_started")],
+    )
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "already_running"
+    assert made[0].calls == ["start"]
+
+
+def test_companion_start_probes_the_worker_before_taking_the_lock(config):
+    """companion_gpu_busy() เรียก worker_ready() ซึ่ง cache miss แล้ว spawn powershell
+    (วัดจริงได้ถึง ~2.1 วินาที) -- ถ้า route ยังถือ companion_lock คร่อมตอน cache miss
+    เหมือนก่อนแก้ /api/companion/stop ที่มาพร้อมกันจะต้องรอจนกว่า probe จะเสร็จ เทสต์นี้
+    บังคับ cache miss แน่นอน (probe_cache ว่างตอน create_app) แล้วจับเวลาว่า stop ที่ยิง
+    คู่ขนานระหว่าง probe ยังบล็อกอยู่ ต้องผ่านได้ทันทีโดยไม่รอ"""
+    config.companion_command = ["prog"]
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+
+    def slow_probe():
+        probe_started.set()
+        assert release_probe.wait(timeout=5), "เทสต์ค้าง: ไม่มีใครปล่อย release_probe"
+        return True
+
+    made = []
+
+    def factory(command, cwd=None):
+        companion = RecordingCompanion(command, cwd)
+        made.append(companion)
+        return companion
+
+    app = create_app(
+        config,
+        recorder=blocking_recorder,
+        worker_probe=slow_probe,
+        companion_factory=factory,
+    )
+    client = app.test_client()
+
+    start_result = {}
+
+    def run_start():
+        start_result["response"] = client.post("/api/companion/start")
+
+    start_thread = threading.Thread(target=run_start)
+    start_thread.start()
+    assert probe_started.wait(timeout=5), "worker_probe ไม่ถูกเรียกเลย"
+
+    # ตอนนี้ start_thread ค้างอยู่ใน slow_probe() (ยังไม่ปล่อย release_probe) --
+    # ถ้า start route ถือ companion_lock คร่อม probe request นี้จะต้องรอจนกว่า
+    # release_probe.set() แล้วเธรดของมันจะไม่จบภายใน timeout สั้น ๆ ด้านล่าง
+    stop_result = {}
+
+    def run_stop():
+        stop_result["response"] = client.post("/api/companion/stop")
+
+    stop_thread = threading.Thread(target=run_stop)
+    started_at = time.monotonic()
+    stop_thread.start()
+    stop_thread.join(timeout=2)
+    elapsed = time.monotonic() - started_at
+
+    assert not stop_thread.is_alive(), (
+        "companion_lock ยังถูกถือคร่อม worker_probe อยู่ -- /api/companion/stop ค้างรอ"
+    )
+    assert stop_result["response"].status_code == 200
+    assert elapsed < 1.0
+
+    release_probe.set()
+    start_thread.join(timeout=5)
+    assert start_result["response"].status_code == 201
+    assert made[0].calls == ["start"]
+
+
+def test_companion_stop_is_idempotent(config):
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+    client.post("/api/companion/start")
+
+    assert client.post("/api/companion/stop").status_code == 200
+    assert client.post("/api/companion/stop").status_code == 200
+    assert made[0].calls == ["start", "stop"]
+
+
+def test_companion_can_be_started_again_after_being_stopped(config):
+    """เปิด-ปิด-เปิดซ้ำบนอ็อบเจกต์เดิม -- เจ้าของระดับ service ต้องใช้ซ้ำได้"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+
+    client.post("/api/companion/start")
+    client.post("/api/companion/stop")
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 201
+    assert len(made) == 1
+    assert made[0].calls == ["start", "stop", "start"]
+
+
+def test_state_reports_companion_as_not_configured_by_default(config):
+    client, _ = _client_with_companion(config)
+
+    companion = client.get("/api/state").get_json()["companion"]
+
+    assert companion == {
+        "state": "off",
+        "can_start": False,
+        "blocked_by": "not_configured",
+    }
+
+
+def test_state_reports_companion_ready_to_start(config):
+    config.companion_command = ["prog"]
+    client, _ = _client_with_companion(config)
+
+    companion = client.get("/api/state").get_json()["companion"]
+
+    assert companion == {"state": "off", "can_start": True, "blocked_by": None}
+
+
+def test_state_reports_companion_running(config):
+    config.companion_command = ["prog"]
+    client, _ = _client_with_companion(config)
+    client.post("/api/companion/start")
+
+    companion = client.get("/api/state").get_json()["companion"]
+
+    assert companion == {"state": "running", "can_start": False, "blocked_by": None}
+
+
+def test_state_reports_the_gpu_as_the_reason_it_cannot_start(config, monkeypatch):
+    config.companion_command = ["prog"]
+    monkeypatch.setattr(
+        "src.session_service.activity.tail",
+        lambda base_dir, limit: [_ev("a", "diarize_started")],
+    )
+    client, _ = _client_with_companion(config)
+
+    companion = client.get("/api/state").get_json()["companion"]
+
+    assert companion == {"state": "off", "can_start": False, "blocked_by": "gpu_busy"}
