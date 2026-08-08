@@ -171,6 +171,16 @@ class Provider:
     # คอมเมนต์ที่ GEMMA_SINGLE_CALL_THRESHOLD_TOKENS) แต่ single-call ไปได้ไกลกว่าเพดาน
     # ปกติจริง
     single_call_threshold_tokens: int = SINGLE_CALL_THRESHOLD_TOKENS
+    # False = ห้ามเดินเส้นทาง map-reduce กับ provider ตัวนี้เด็ดขาด ให้ล้มให้เห็นแทน
+    # (ดู summarize.summarize_transcript) -- คู่กับ single_call_threshold_tokens ไม่ใช่
+    # ตัวแทนกัน: ตัวนั้นย้ายเส้นทางให้ประชุมขนาดปกติไม่ต้องหั่น chunk ส่วนตัวนี้ปิดตาย
+    # ทางที่เหลือสำหรับประชุมที่เกินเพดานนั้นไปจริง ๆ
+    #
+    # มีไว้เพราะความล้มเหลวของ reduce ไม่ได้มีแค่แบบที่ REDUCE_FAILURE_NOTICE จับได้
+    # (reduce โยน exception) แต่มีแบบที่โมเดลตอบกลับมาครบถ้วนสวยงามแล้วเนื้อหาหายไป
+    # สองในสามด้วย -- อย่างหลังไม่มีสัญญาณอะไรให้จับเลยที่ชั้นไหนของโค้ดก็ตาม เมื่อจับ
+    # ไม่ได้ก็ต้องไม่เดินเข้าไป
+    can_map_reduce: bool = True
 
 
 def _require_setting(env_var: str, model_id: str) -> str:
@@ -405,6 +415,7 @@ PROVIDERS: dict[str, Provider] = {
             "litellm/gemma4", "LLM_API_KEY", "LLM_BASE_URL"
         ),
         single_call_threshold_tokens=GEMMA_SINGLE_CALL_THRESHOLD_TOKENS,
+        can_map_reduce=False,
     ),
     "claude-opus-5": _claude("claude-opus-5"),
     "claude-sonnet-5": _claude("claude-sonnet-5"),
