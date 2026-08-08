@@ -2529,3 +2529,47 @@ def test_companion_can_be_started_again_after_being_stopped(config):
     assert response.status_code == 201
     assert len(made) == 1
     assert made[0].calls == ["start", "stop", "start"]
+
+
+def test_state_reports_companion_as_not_configured_by_default(config):
+    client, _ = _client_with_companion(config)
+
+    companion = client.get("/api/state").get_json()["companion"]
+
+    assert companion == {
+        "state": "off",
+        "can_start": False,
+        "blocked_by": "not_configured",
+    }
+
+
+def test_state_reports_companion_ready_to_start(config):
+    config.companion_command = ["prog"]
+    client, _ = _client_with_companion(config)
+
+    companion = client.get("/api/state").get_json()["companion"]
+
+    assert companion == {"state": "off", "can_start": True, "blocked_by": None}
+
+
+def test_state_reports_companion_running(config):
+    config.companion_command = ["prog"]
+    client, _ = _client_with_companion(config)
+    client.post("/api/companion/start")
+
+    companion = client.get("/api/state").get_json()["companion"]
+
+    assert companion == {"state": "running", "can_start": False, "blocked_by": None}
+
+
+def test_state_reports_the_gpu_as_the_reason_it_cannot_start(config, monkeypatch):
+    config.companion_command = ["prog"]
+    monkeypatch.setattr(
+        "src.session_service.activity.tail",
+        lambda base_dir, limit: [_ev("a", "diarize_started")],
+    )
+    client, _ = _client_with_companion(config)
+
+    companion = client.get("/api/state").get_json()["companion"]
+
+    assert companion == {"state": "off", "can_start": False, "blocked_by": "gpu_busy"}

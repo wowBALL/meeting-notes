@@ -503,6 +503,32 @@ def create_app(
             activity.tail(config.base_dir, ACTIVITY_LIMIT), worker_ready()
         )
 
+    def companion_snapshot() -> dict:
+        """รูปเดียวที่หน้าจออ่าน -- ไม่มี already_running ในนี้โดยเจตนา
+
+        ตอนมันรันอยู่ state บอกไปแล้ว การมีอีกช่องที่พูดเรื่องเดียวกันคือสองแหล่ง
+        ความจริงที่ขัดกันเองได้ blocked_by จึงตอบเฉพาะเหตุผลที่ "เปิดไม่ได้ทั้งที่ยังไม่ได้เปิด"
+
+        **ห้ามขอ companion_lock ในนี้เด็ดขาด** -- endpoint นี้ถูก poll ทุกวินาทีจากวิดเจ็ต
+        ที่ตั้ง timeout ไว้ 5 วินาที ส่วน Companion.stop() ถือล็อกได้ถึง 10 วินาที
+        (grace 5+5) ขอล็อกตรงนี้เท่ากับทำให้หน้าจอค้างทุกครั้งที่มีใครกดปิด
+        การอ่านค่าเฉย ๆ ไม่ต้องใช้ล็อกอยู่แล้ว: ล็อกมีไว้กันลำดับ เช็ค-แล้ว-สั่ง ของ start/stop
+        ไม่ได้มีไว้กันการอ่าน และคำตอบจากที่นี่เป็นแค่รายงาน ไม่ใช่คำตัดสิน -- คำตัดสินจริง
+        ยังอยู่ในล็อกที่ start route เหมือนเดิม
+        """
+        if not config.companion_command:
+            return {"state": "off", "can_start": False, "blocked_by": "not_configured"}
+        # อ่าน companion_box ตรง ๆ ไม่เรียก get_companion() เพราะตัวนั้นขอล็อก --
+        # ยังไม่เคยถูกสร้าง = ยังไม่เคยถูกสั่งเปิด = off แน่นอน ไม่ต้องสร้างเพื่อจะรู้
+        companion = companion_box["obj"]
+        if companion is not None and companion.is_running():
+            return {"state": "running", "can_start": False, "blocked_by": None}
+        # ไม่ต้องกลัวว่า worker_ready() จะแพงตรงนี้ -- get_state() เรียกมันไปแล้วบรรทัดบน
+        # cache จึงสดเสมอเมื่อมาถึงจุดนี้
+        if companion_gpu_busy():
+            return {"state": "off", "can_start": False, "blocked_by": "gpu_busy"}
+        return {"state": "off", "can_start": True, "blocked_by": None}
+
     @app.post("/api/companion/start")
     def start_companion():
         # ด่านสองข้อแรก (not_configured, already_running) เช็คนอกล็อกก่อน แบบ advisory
@@ -580,6 +606,7 @@ def create_app(
         lang = request.args.get("lang") or config.ui_lang
         body = state.snapshot()
         body["worker_ready"] = worker_ready()
+        body["companion"] = companion_snapshot()
         body["lang"] = lang
         body["warnings"] = [
             {**w, "text": render(w["code"], w.get("params"), lang)}
