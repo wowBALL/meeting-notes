@@ -2135,3 +2135,168 @@ def test_importing_the_web_service_does_not_pull_in_torch():
         "โมดูลที่มันดึงเข้ามา แล้วย้ายเข้าไปในฟังก์ชัน (หรือ TYPE_CHECKING ถ้าใช้เป็น "
         "annotation อย่างเดียว)"
     )
+
+
+class RecordingCompanion:
+    """companion ปลอมที่จำว่าถูกสั่งอะไรบ้างตามลำดับ"""
+
+    def __init__(self, command, cwd=None):
+        self.command = command
+        self.cwd = cwd
+        self.calls = []
+        self.env_extra = None
+
+    def start(self, env_extra=None):
+        self.env_extra = env_extra
+        self.calls.append("start")
+
+    def stop(self):
+        self.calls.append("stop")
+
+    def is_running(self):
+        return self.calls.count("start") > self.calls.count("stop")
+
+
+def _client_with_companion(config, recorder=blocking_recorder):
+    made = []
+
+    def factory(command, cwd=None):
+        companion = RecordingCompanion(command, cwd)
+        made.append(companion)
+        return companion
+
+    app = create_app(
+        config,
+        recorder=recorder,
+        worker_probe=lambda: True,
+        companion_factory=factory,
+    )
+    return app.test_client(), made
+
+
+def test_no_companion_is_started_when_none_is_configured(config):
+    """ดีฟอลต์คือไม่มี -- เครื่องที่ไม่ตั้งค่าต้องได้พฤติกรรมเดิมเป๊ะ"""
+    client, made = _client_with_companion(config)
+
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/session/stop")
+
+    assert made == []
+
+
+def test_opening_a_room_starts_the_configured_companion(config):
+    config.companion_command = ["prog", "--x"]
+    client, made = _client_with_companion(config)
+
+    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+
+    assert len(made) == 1
+    assert made[0].command == ["prog", "--x"]
+    assert made[0].calls == ["start"]
+
+    client.post("/api/session/stop")
+
+
+def test_the_room_name_reaches_the_companion(config):
+    """ให้ context ทาง env เพื่อไม่ให้มันต้องไปไล่อ่าน state ของ service"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+
+    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+
+    assert made[0].env_extra["MEETING_ROOM"] == "standup"
+
+    client.post("/api/session/stop")
+
+
+def test_the_companion_is_stopped_when_the_encode_stage_begins(config):
+    """ต้องหยุดตอนเข้า encode ไม่ใช่หลัง encode จบ -- วัดจากประชุมจริงพบว่าช่วง
+    encode กว้าง 62-69 วินาที ส่วนช่วงหลัง encode_done ถึงงานถัดไปมีแค่ ~2 วินาที"""
+    config.companion_command = ["prog"]
+
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None, asr_engine=None):
+        stop_event.wait(timeout=5)
+        if on_event:
+            on_event("encode_started", {})
+        return None
+
+    client, made = _client_with_companion(config, recorder=recorder)
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+
+    client.post("/api/session/stop")
+    _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert made[0].calls == ["start", "stop"]
+
+
+def test_the_companion_is_stopped_even_when_the_encode_stage_never_begins(config):
+    """ตัวอัดที่ระเบิดกลางทางต้องไม่ทิ้ง companion ค้างถือทรัพยากรไว้"""
+    config.companion_command = ["prog"]
+
+    def exploding_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None, asr_engine=None):
+        raise RuntimeError("ตัวอัดระเบิด")
+
+    client, made = _client_with_companion(config, recorder=exploding_recorder)
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert made[0].calls == ["start", "stop"]
+
+
+def test_the_companion_is_stopped_exactly_once(config):
+    """encode_started แล้ว finally อีกรอบ -- ต้องไม่กลายเป็นสองครั้ง"""
+    config.companion_command = ["prog"]
+
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None, asr_engine=None):
+        stop_event.wait(timeout=5)
+        if on_event:
+            on_event("encode_started", {})
+        return None
+
+    client, made = _client_with_companion(config, recorder=recorder)
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/session/stop")
+    _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert made[0].calls.count("stop") == 1
+
+
+def test_a_companion_that_cannot_start_still_lets_the_room_open(config):
+    """กฎข้อเดียวที่สำคัญที่สุดของฟีเจอร์นี้"""
+    config.companion_command = ["prog"]
+
+    def factory(command, cwd=None):
+        raise OSError("no such file")
+
+    app = create_app(
+        config,
+        recorder=blocking_recorder,
+        worker_probe=lambda: True,
+        companion_factory=factory,
+    )
+    client = app.test_client()
+
+    response = client.post("/api/session", json={"model": "GLM-5.2"})
+
+    assert response.status_code == 201
+    assert _wait_until(client, lambda b: b["recorder"] == "recording")["recorder"] == "recording"
+
+    client.post("/api/session/stop")
+
+
+def test_each_room_gets_its_own_companion(config):
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+
+    for _ in range(2):
+        client.post("/api/session", json={"model": "GLM-5.2"})
+        _wait_until(client, lambda b: b["recorder"] == "recording")
+        client.post("/api/session/stop")
+        _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert len(made) == 2

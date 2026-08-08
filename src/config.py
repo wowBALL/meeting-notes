@@ -1,6 +1,7 @@
+import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -297,6 +298,13 @@ class Config:
         DEFAULT_WHISPER_CONDITION_ON_PREVIOUS_TEXT
     )
     asr_engine: str = DEFAULT_ASR_ENGINE
+    # โปรเซสข้างเคียงที่รันตลอดช่วงอัดแล้วถูกปิดตอนเข้าขั้น encode ลิสต์ว่าง = ปิด
+    # ฟีเจอร์ ซึ่งเป็นดีฟอลต์ -- เครื่องที่ไม่ตั้งค่านี้ต้องได้พฤติกรรมเดิมทุกอย่าง
+    #
+    # เก็บเป็น list ไม่ใช่สตริงเพราะต้องส่งเข้า Popen แบบไม่มี shell (ดู src/companion.py)
+    # และเพราะพาธบน Windows มี `\` ที่ shlex แบบ posix จะกินเป็น escape จนได้พาธผิด
+    # แบบเงียบ ๆ
+    companion_command: list[str] = field(default_factory=list)
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -377,6 +385,29 @@ def _read_float(name: str, default: float) -> float:
         return float(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def _read_companion_command() -> list[str]:
+    """คำสั่ง companion จาก env -- ค่าเสียรูปทุกแบบแปลว่า "ปิด" ไม่ใช่ error
+
+    ปฏิเสธที่นี่ = เปิดห้องไม่ได้เพราะของเสริมตั้งค่าผิด ซึ่งแพงกว่าการไม่มีของเสริมมาก
+    หลักเดียวกับที่ open_room ไม่ validate model/profile
+    """
+    raw = os.environ.get("COMPANION_COMMAND", "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        logger.warning("COMPANION_COMMAND ไม่ใช่ JSON ที่อ่านได้ -- ปิดฟีเจอร์นี้ไว้")
+        return []
+    if not isinstance(parsed, list) or not parsed:
+        logger.warning("COMPANION_COMMAND ต้องเป็น JSON list ที่ไม่ว่าง -- ปิดฟีเจอร์นี้ไว้")
+        return []
+    if not all(isinstance(part, str) for part in parsed):
+        logger.warning("COMPANION_COMMAND ต้องเป็นลิสต์ของสตริงล้วน -- ปิดฟีเจอร์นี้ไว้")
+        return []
+    return parsed
 
 
 def load_config(base_dir: Path | None = None) -> Config:
@@ -496,4 +527,5 @@ def load_config(base_dir: Path | None = None) -> Config:
         whisper_hotwords=whisper_hotwords,
         whisper_condition_on_previous_text=whisper_condition_on_previous_text,
         asr_engine=asr_engine,
+        companion_command=_read_companion_command(),
     )
