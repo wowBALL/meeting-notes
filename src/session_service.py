@@ -17,6 +17,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 
 from src import activity, enroll, pending, speakers
+from src.companion import Companion
 from src.logsetup import UI_LOG, configure_logging
 from src.messages import render
 from src.record import run_recording
@@ -379,7 +380,12 @@ def _speaker_summary(speaker: dict) -> dict:
     }
 
 
-def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Flask:
+def create_app(
+    config,
+    recorder=run_recording,
+    worker_probe=probe_worker,
+    companion_factory=Companion,
+) -> Flask:
     app = Flask(__name__, static_folder=None)
     state = RecorderState()
     activity.trim(config.base_dir)
@@ -451,6 +457,29 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
                 state.asr_engine,
             )
 
+        # companion ผูกกับ "ครั้งที่อัด" ไม่ใช่กับ service -- ห้องใหม่ได้ตัวใหม่เสมอ
+        # เป็นตัวแปรท้องถิ่นไม่ใช่ state เพราะไม่มีใครนอก thread นี้ต้องเห็นมัน และการ
+        # เก็บลง state จะเปิดโอกาสให้ห้องถัดไปมองเห็นตัวที่ตายไปแล้ว
+        #
+        # ไม่ตั้งค่าไว้ = ไม่สร้างอะไรเลย ไม่ใช่สร้างตัวเปล่าที่สั่งอะไรก็ไม่เกิดผล --
+        # เครื่องที่ไม่ใช้ฟีเจอร์นี้ต้องเดินเส้นทางเดิมเป๊ะ ไม่ใช่เส้นทางใหม่ที่บังเอิญ
+        # ไม่ทำอะไร
+        companion = None
+        if config.companion_command:
+            try:
+                companion = companion_factory(config.companion_command, config.base_dir)
+            except Exception:
+                logger.exception("สร้างตัวคุมโปรเซสข้างเคียงไม่สำเร็จ -- ประชุมเดินต่อ")
+        companion_stopped = threading.Event()
+
+        def stop_companion():
+            # ถูกเรียกได้จากสองทาง (on_event ของ recorder thread และ finally ของ
+            # thread เดียวกัน) -- Event กันไม่ให้สั่งซ้ำ
+            if companion is None or companion_stopped.is_set():
+                return
+            companion_stopped.set()
+            companion.stop()
+
         def on_event(code, params=None, level="info"):
             # ไมค์/ลำโพงที่ถูกดักฟังจริงต้องเห็นได้ตลอดการอัด ไม่ใช่ไปขุดใน log --
             # การอัดจากอุปกรณ์ผิดตัวคือสาเหตุอันดับหนึ่งของเคส "ไม่มีเสียง"
@@ -460,11 +489,21 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             if level in ("warn", "error"):
                 with state.lock:
                     state.warnings.append({"code": code, "params": params or {}})
+            # ปิดตรงนี้ ไม่ใช่ตอนตัวอัดคืนค่า: ช่วง encode คือหน้าต่างเวลาที่กว้างพอ
+            # ให้ทรัพยากรระดับ process ถูกคืนทันก่อนขั้นถัดไปจะขอใช้ (วัดจากประชุม
+            # จริง 62-69 วินาที) ส่วนช่วงจาก encode_done ถึงงานถัดไปแคบเกินไป (~2 วิ)
+            if code == "encode_started":
+                stop_companion()
             activity.append(config.base_dir, room or "unnamed", code, level, params)
 
         def work():
             # ตัวอัดที่ระเบิดต้องไม่ทิ้งหน้าจอค้างที่ "กำลังอัด" ตลอดไป -- สถานะ
             # ต้องกลับไป idle ไม่ว่าจะจบทางไหน
+            #
+            # start ที่นี่ไม่ใช่ใน request: ผู้ใช้ไม่ควรต้องรอโปรเซสของเสริมเปิดก่อน
+            # ถึงจะได้ 201 กลับไป
+            if companion is not None:
+                companion.start({"MEETING_ROOM": room or ""})
             try:
                 result = recorder(
                     room,
@@ -479,6 +518,10 @@ def create_app(config, recorder=run_recording, worker_probe=probe_worker) -> Fla
             except Exception:
                 logger.exception("ตัวอัดล้มระหว่างทำงาน")
                 result = None
+            finally:
+                # ตาข่ายกันตกสำหรับเส้นทางที่ไม่เคยยิง encode_started เลย
+                # (ตัวอัดพังกลางทาง / session ถูกทิ้งเพราะไม่มีเสียงจริง)
+                stop_companion()
             with state.lock:
                 state.status = "idle"
                 state.started_at = None
