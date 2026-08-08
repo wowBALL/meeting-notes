@@ -2186,63 +2186,24 @@ def test_no_companion_is_started_when_none_is_configured(config):
     assert made == []
 
 
-def test_opening_a_room_starts_the_configured_companion(config):
-    config.companion_command = ["prog", "--x"]
-    client, made = _client_with_companion(config)
-
-    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
-
-    assert len(made) == 1
-    assert made[0].command == ["prog", "--x"]
-    assert made[0].calls == ["start"]
-
-    client.post("/api/session/stop")
-
-
-def test_the_room_name_reaches_the_companion(config):
-    """ให้ context ทาง env เพื่อไม่ให้มันต้องไปไล่อ่าน state ของ service"""
-    config.companion_command = ["prog"]
-    client, made = _client_with_companion(config)
-
-    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
-
-    assert made[0].env_extra["MEETING_ROOM"] == "standup"
-
-    client.post("/api/session/stop")
-
-
-def test_the_companion_is_stopped_when_the_encode_stage_begins(config):
-    """ต้องหยุดตอนเข้า encode ไม่ใช่หลัง encode จบ -- วัดจากประชุมจริงพบว่าช่วง
-    encode กว้าง 62-69 วินาที ส่วนช่วงหลัง encode_done ถึงงานถัดไปมีแค่ ~2 วินาที"""
-    config.companion_command = ["prog"]
-
-    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None, asr_engine=None):
-        stop_event.wait(timeout=5)
-        if on_event:
-            on_event("encode_started", {})
-        return None
-
-    client, made = _client_with_companion(config, recorder=recorder)
-    client.post("/api/session", json={"model": "GLM-5.2"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
-
-    client.post("/api/session/stop")
-    _wait_until(client, lambda b: b["recorder"] == "idle")
-
-    assert made[0].calls == ["start", "stop"]
-
-
 def test_the_companion_is_stopped_even_when_the_encode_stage_never_begins(config):
     """ตัวอัดที่ระเบิดกลางทางต้องไม่ทิ้ง companion ค้างถือทรัพยากรไว้"""
     config.companion_command = ["prog"]
 
     def exploding_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None, asr_engine=None):
+        # รอสั้น ๆ ก่อนระเบิด ไม่ใช่เพื่อจำลองพฤติกรรมจริง แต่กันแข่งกับ POST
+        # /api/companion/start ของเทส -- ไม่มีอะไรมาสั่ง stop_event ในเทสนี้ (ไม่มี
+        # การเรียก /api/session/stop) เลยใช้ wait(timeout=...) เป็นแค่หน่วงเวลาที่
+        # จะ timeout แน่นอนทุกครั้ง ให้ thread หลักมีเวลาสั่งเปิด companion เองก่อนที่
+        # finally ของ thread นี้จะไล่ปิดมัน (ตาข่ายกันตกต้องปิดของที่เปิดจริง ไม่ใช่
+        # ปิดก่อนที่จะมีอะไรให้ปิด)
+        stop_event.wait(timeout=0.2)
         raise RuntimeError("ตัวอัดระเบิด")
 
     client, made = _client_with_companion(config, recorder=exploding_recorder)
     client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/companion/start")
     _wait_until(client, lambda b: b["recorder"] == "idle")
 
     assert made[0].calls == ["start", "stop"]
@@ -2261,6 +2222,7 @@ def test_the_companion_is_stopped_exactly_once(config):
     client, made = _client_with_companion(config, recorder=recorder)
     client.post("/api/session", json={"model": "GLM-5.2"})
     _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/companion/start")
     client.post("/api/session/stop")
     _wait_until(client, lambda b: b["recorder"] == "idle")
 
@@ -2268,7 +2230,9 @@ def test_the_companion_is_stopped_exactly_once(config):
 
 
 def test_a_companion_that_cannot_start_still_lets_the_room_open(config):
-    """กฎข้อเดียวที่สำคัญที่สุดของฟีเจอร์นี้"""
+    """factory ที่ระเบิดต้องไม่ทำให้ /api/state หรือการเปิดห้องพัง -- ตอนนี้การเปิดห้อง
+    ไม่แตะ companion เลยแล้ว (ไม่มี auto-start) แต่ /api/state ยังเรียก companion_snapshot()
+    ทุกครั้งที่ poll ดังนั้น factory ที่พังต้องไม่ทำให้ endpoint นั้นล่มไปด้วย"""
     config.companion_command = ["prog"]
 
     def factory(command, cwd=None):
@@ -2290,17 +2254,98 @@ def test_a_companion_that_cannot_start_still_lets_the_room_open(config):
     client.post("/api/session/stop")
 
 
-def test_each_room_gets_its_own_companion(config):
+def test_the_service_reuses_one_companion_across_rooms(config):
+    """companion เป็นของ service ตัวเดียว ไม่ใช่ของห้อง -- ห้องที่สองต้องไม่ได้ตัวใหม่
+
+    ไม่มี auto-start แล้ว companion จึงไม่ถูกสร้างเองตอนเปิดห้อง (ไม่เหมือนเทสเดิมที่
+    เปิด-ปิดห้องเฉย ๆ แล้วนับจำนวนตัวที่ถูกสร้าง) ต้องสั่งเปิดเองทุกรอบเพื่อพิสูจน์ว่า
+    get_companion() คืนอ็อบเจกต์เดิมซ้ำ ไม่ใช่สร้างใหม่ทุกครั้งที่ห้องเปลี่ยน"""
     config.companion_command = ["prog"]
     client, made = _client_with_companion(config)
 
     for _ in range(2):
         client.post("/api/session", json={"model": "GLM-5.2"})
         _wait_until(client, lambda b: b["recorder"] == "recording")
+        client.post("/api/companion/start")
         client.post("/api/session/stop")
         _wait_until(client, lambda b: b["recorder"] == "idle")
 
-    assert len(made) == 2
+    assert len(made) == 1
+
+
+def test_opening_a_room_no_longer_starts_the_companion(config):
+    """ปุ่มบนหัวแอปเป็นเจ้าของวงจรชีวิตแต่ผู้เดียว -- ห้องประชุมไม่ใช่"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+
+    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+
+    # เหตุผลเดียวกับเทสด่านกั้นการ์ดจอ: พิสูจน์ว่าไม่มีโปรเซสถูกเปิด ไม่ใช่ว่าไม่มี
+    # อ็อบเจกต์ถูกสร้าง (get_companion() ถูกเรียกจาก /api/state ที่ _wait_until ยิงอยู่แล้ว)
+    assert [c.calls for c in made] in ([], [[]])
+
+    client.post("/api/session/stop")
+
+
+def test_the_room_name_reaches_a_companion_started_during_a_meeting(config):
+    """ให้ context ทาง env เพื่อไม่ให้มันต้องไปไล่อ่าน state ของ service"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+    client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+
+    client.post("/api/companion/start")
+
+    assert made[0].env_extra == {"MEETING_ROOM": "standup"}
+
+    client.post("/api/session/stop")
+
+
+def test_a_companion_started_by_hand_is_stopped_when_the_encode_stage_begins(config):
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None,
+                 profile=None, asr_engine=None):
+        on_event("room_opened", {"room": name or ""})
+        stop_event.wait(timeout=5)
+        on_event("encode_started", {})
+        on_event("encode_done", {"path": "fake.ogg"})
+        return cfg.inbox_dir / "fake.ogg"
+
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config, recorder=recorder)
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/companion/start")
+
+    client.post("/api/session/stop")
+    _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert made[0].calls == ["start", "stop"]
+
+
+def test_the_second_room_can_still_stop_the_companion(config):
+    """ดีไซน์เดิมกันสั่งซ้ำด้วย Event ตัวเดียว ซึ่งใช้ได้แค่รอบเดียว
+
+    พอ companion เป็นของ service การ์ดแบบนั้นจะทำให้ห้องที่สองปิดมันไม่ลงเลย
+    """
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None,
+                 profile=None, asr_engine=None):
+        on_event("room_opened", {"room": name or ""})
+        stop_event.wait(timeout=5)
+        on_event("encode_started", {})
+        return None
+
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config, recorder=recorder)
+
+    for _ in range(2):
+        client.post("/api/session", json={"model": "GLM-5.2"})
+        _wait_until(client, lambda b: b["recorder"] == "recording")
+        client.post("/api/companion/start")
+        client.post("/api/session/stop")
+        _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert made[0].calls == ["start", "stop", "start", "stop"]
 
 
 def _ev(job, code):

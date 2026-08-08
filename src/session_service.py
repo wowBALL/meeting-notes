@@ -653,29 +653,6 @@ def create_app(
                 state.asr_engine,
             )
 
-        # companion ผูกกับ "ครั้งที่อัด" ไม่ใช่กับ service -- ห้องใหม่ได้ตัวใหม่เสมอ
-        # เป็นตัวแปรท้องถิ่นไม่ใช่ state เพราะไม่มีใครนอก thread นี้ต้องเห็นมัน และการ
-        # เก็บลง state จะเปิดโอกาสให้ห้องถัดไปมองเห็นตัวที่ตายไปแล้ว
-        #
-        # ไม่ตั้งค่าไว้ = ไม่สร้างอะไรเลย ไม่ใช่สร้างตัวเปล่าที่สั่งอะไรก็ไม่เกิดผล --
-        # เครื่องที่ไม่ใช้ฟีเจอร์นี้ต้องเดินเส้นทางเดิมเป๊ะ ไม่ใช่เส้นทางใหม่ที่บังเอิญ
-        # ไม่ทำอะไร
-        companion = None
-        if config.companion_command:
-            try:
-                companion = companion_factory(config.companion_command, config.base_dir)
-            except Exception:
-                logger.exception("สร้างตัวคุมโปรเซสข้างเคียงไม่สำเร็จ -- ประชุมเดินต่อ")
-        companion_stopped = threading.Event()
-
-        def stop_companion():
-            # ถูกเรียกได้จากสองทาง (on_event ของ recorder thread และ finally ของ
-            # thread เดียวกัน) -- Event กันไม่ให้สั่งซ้ำ
-            if companion is None or companion_stopped.is_set():
-                return
-            companion_stopped.set()
-            companion.stop()
-
         def on_event(code, params=None, level="info"):
             # ไมค์/ลำโพงที่ถูกดักฟังจริงต้องเห็นได้ตลอดการอัด ไม่ใช่ไปขุดใน log --
             # การอัดจากอุปกรณ์ผิดตัวคือสาเหตุอันดับหนึ่งของเคส "ไม่มีเสียง"
@@ -695,11 +672,6 @@ def create_app(
         def work():
             # ตัวอัดที่ระเบิดต้องไม่ทิ้งหน้าจอค้างที่ "กำลังอัด" ตลอดไป -- สถานะ
             # ต้องกลับไป idle ไม่ว่าจะจบทางไหน
-            #
-            # start ที่นี่ไม่ใช่ใน request: ผู้ใช้ไม่ควรต้องรอโปรเซสของเสริมเปิดก่อน
-            # ถึงจะได้ 201 กลับไป
-            if companion is not None:
-                companion.start({"MEETING_ROOM": room or ""})
             try:
                 result = recorder(
                     room,
