@@ -446,6 +446,31 @@ def create_app(
     companion_lock = threading.Lock()
     companion_box = {"obj": None}
 
+    def _get_companion_locked():
+        """สร้างตัวแรกถ้ายังไม่มี -- ต้องเรียกตอนถือ companion_lock อยู่แล้วเท่านั้น
+
+        แยกออกจาก get_companion() เพราะ start route (ด้านล่าง) ต้องถือ companion_lock
+        คร่อมทั้งช่วงเช็ค-แล้ว-สั่ง ถ้า route เรียก get_companion() ซึ่งล็อกเองอีกชั้น
+        threading.Lock ที่ไม่ reentrant จะค้างตัวเองทันที -- เลือกแยกฟังก์ชันแทนเปลี่ยน
+        เป็น RLock เพื่อให้เห็นจากชื่อฟังก์ชันตรง ๆ ว่าใครถือล็อกอยู่แล้วเรียกได้ ไม่ต้อง
+        เดาจากชนิดของล็อกว่าซ้อนได้กี่ชั้น
+
+        เช็ค companion_command ไว้ในนี้ด้วย (ซ้ำกับ get_companion() ด้านล่าง) เพราะ
+        start route เรียกฟังก์ชันนี้ตรง ๆ ไม่ผ่าน get_companion() -- ถ้าเอาเช็คนี้ออก
+        เครื่องที่ไม่ได้ตั้งค่า companion จะได้ 201 จาก start route แทนที่จะเป็น
+        503 not_configured ตาม contract
+        """
+        if not config.companion_command:
+            return None
+        if companion_box["obj"] is None:
+            try:
+                companion_box["obj"] = companion_factory(
+                    config.companion_command, config.base_dir
+                )
+            except Exception:
+                logger.exception("สร้างตัวคุมโปรเซสข้างเคียงไม่สำเร็จ")
+        return companion_box["obj"]
+
     def get_companion():
         """ตัวเดียวตลอดอายุ service -- สร้างครั้งแรกที่ต้องใช้ ไม่ใช่ตอน create_app
 
@@ -455,15 +480,7 @@ def create_app(
         if not config.companion_command:
             return None
         with companion_lock:
-            if companion_box["obj"] is None:
-                try:
-                    companion_box["obj"] = companion_factory(
-                        config.companion_command, config.base_dir
-                    )
-                except Exception:
-                    logger.exception("สร้างตัวคุมโปรเซสข้างเคียงไม่สำเร็จ")
-                    return None
-            return companion_box["obj"]
+            return _get_companion_locked()
 
     def stop_companion():
         """เงียบเสมอ และสั่งซ้ำได้
@@ -471,10 +488,15 @@ def create_app(
         การ์ด is_running() ทำหน้าที่แทน Event ที่ดีไซน์เดิมใช้กันสั่งซ้ำ -- ต่างกันตรงที่
         Event ตัวเดียวใช้ได้แค่รอบเดียว พอ companion เป็นของ service มันจะกันห้องที่สอง
         ไม่ให้ปิดได้เลย ส่วน is_running() รีเซ็ตตัวเองทุกครั้งที่ปิดสำเร็จ
+
+        ถือ companion_lock ตลอดคำสั่งนี้: เรียกได้พร้อมกันจาก HTTP stop route และจาก
+        ที่อื่นที่แตะ companion_box ตัวเดียวกัน ไม่ล็อกจะเจอ .stop() วิ่งซ้อนกันสอง thread
+        บน self._proc ตัวเดียว (companion.py ไม่ thread-safe เรื่องนี้)
         """
-        companion = companion_box["obj"]
-        if companion is not None and companion.is_running():
-            companion.stop()
+        with companion_lock:
+            companion = companion_box["obj"]
+            if companion is not None and companion.is_running():
+                companion.stop()
 
     def companion_gpu_busy():
         return gpu_is_busy(
@@ -483,20 +505,38 @@ def create_app(
 
     @app.post("/api/companion/start")
     def start_companion():
-        companion = get_companion()
-        if companion is None:
-            return jsonify({"error": "not_configured"}), 503
-        if companion.is_running():
-            return jsonify({"error": "already_running"}), 409
-        if companion_gpu_busy():
-            return jsonify({"error": "gpu_busy"}), 409
-        with state.lock:
-            room = state.room or ""
-        companion.start({"MEETING_ROOM": room})
-        # start() กลืน exception ทุกตัวโดยเจตนา (ดู companion.py) ความสำเร็จจึงตัดสิน
-        # จากโปรเซสที่มีชีวิตจริง ไม่ใช่จากการที่มันไม่โยน
-        if not companion.is_running():
-            return jsonify({"error": "start_failed"}), 500
+        # ล็อกครอบทั้งช่วงเช็ค-แล้ว-สั่ง (not_configured -> already_running ->
+        # gpu_busy -> start -> เช็คซ้ำ) ไม่ใช่แค่ตอนสร้างตัวแรกเหมือนเดิม เพราะ service
+        # รันด้วย threaded=True (บรรทัด ~1081) -- สอง POST พร้อมกันเห็น is_running()
+        # False ทั้งคู่ได้ถ้าล็อกไม่ครอบถึง start() แล้วจะเรียก start() ซ้อนสองรอบ
+        # companion.py เก็บ self._proc ตัวเดียวไม่มีล็อกของตัวเอง รอบที่สองทับตัวแรก
+        # จนโปรเซสแรกหลุดค้างกิน GPU ต่อโดยไม่มีใครปิด -- ด่านที่ตั้งใจกันเรื่องนี้ไว้
+        # เลยรั่ว (แพทเทิร์นเดียวกับ _registry_lock บรรทัด 30-36 และการใช้งานที่ 770-780)
+        #
+        # เรียก _get_companion_locked() ตรง ๆ ไม่เรียก get_companion() เพราะฟังก์ชันนั้น
+        # ล็อก companion_lock เองอีกชั้น threading.Lock ไม่ reentrant จะค้างตัวเองทันที
+        #
+        # gpu_is_busy อ่านแค่ tail ของไฟล์ log (สูงสุด ACTIVITY_LIMIT บรรทัด) เป็นงาน
+        # อ่านดิสก์สั้น ไม่ใช่เรียกเครือข่ายหรือ I/O หนัก จึงยอมถือล็อกคร่อมได้โดยไม่ทำให้
+        # request อื่นรอนาน -- และต้องถือคร่อมจริง ๆ ด้วย เพราะลำดับเช็คที่ contract
+        # กำหนด (already_running -> gpu_busy -> launch) ต้องเป็นอะตอมมิกทั้งชุด ถ้าปล่อย
+        # ล็อกระหว่างสองเช็คนี้ request คู่แข่งจะแทรก start() ก่อนได้ ทำให้ request นี้
+        # เข้าใจผิดว่ายัง idle อยู่แล้วเปิดซ้ำ
+        with companion_lock:
+            companion = _get_companion_locked()
+            if companion is None:
+                return jsonify({"error": "not_configured"}), 503
+            if companion.is_running():
+                return jsonify({"error": "already_running"}), 409
+            if companion_gpu_busy():
+                return jsonify({"error": "gpu_busy"}), 409
+            with state.lock:
+                room = state.room or ""
+            companion.start({"MEETING_ROOM": room})
+            # start() กลืน exception ทุกตัวโดยเจตนา (ดู companion.py) ความสำเร็จจึงตัดสิน
+            # จากโปรเซสที่มีชีวิตจริง ไม่ใช่จากการที่มันไม่โยน
+            if not companion.is_running():
+                return jsonify({"error": "start_failed"}), 500
         return jsonify({"state": "running"}), 201
 
     @app.post("/api/companion/stop")

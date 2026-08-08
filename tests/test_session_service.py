@@ -2384,6 +2384,28 @@ def test_companion_start_is_refused_while_the_gpu_is_busy(config, monkeypatch):
     assert [c.calls for c in made] in ([], [[]])
 
 
+def test_companion_start_prefers_already_running_over_gpu_busy(config, monkeypatch):
+    """ลำดับด่านที่ contract บังคับคือ not_configured -> already_running -> gpu_busy
+    -> launch -- เทสต์ที่มีอยู่แต่ละตัวจุดชนวนแค่เงื่อนไขเดียว ไม่มีตัวไหนพิสูจน์ลำดับ
+    เมื่อสองเงื่อนไขจริงพร้อมกัน เคสนี้ปิดช่องนั้นด้วยการทำให้ companion รันอยู่แล้ว
+    (already_running) และ GPU ไม่ว่าง (gpu_busy) พร้อมกัน -- คำตอบต้องเป็น
+    already_running ไม่ใช่ gpu_busy"""
+    config.companion_command = ["prog"]
+    client, made = _client_with_companion(config)
+    client.post("/api/companion/start")
+
+    monkeypatch.setattr(
+        "src.session_service.activity.tail",
+        lambda base_dir, limit: [_ev("a", "transcribe_started")],
+    )
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "already_running"
+    assert made[0].calls == ["start"]
+
+
 def test_companion_stop_is_idempotent(config):
     config.companion_command = ["prog"]
     client, made = _client_with_companion(config)
