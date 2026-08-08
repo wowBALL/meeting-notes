@@ -2187,23 +2187,24 @@ def test_no_companion_is_started_when_none_is_configured(config):
 
 
 def test_the_companion_is_stopped_even_when_the_encode_stage_never_begins(config):
-    """ตัวอัดที่ระเบิดกลางทางต้องไม่ทิ้ง companion ค้างถือทรัพยากรไว้"""
+    """ตัวอัดที่ระเบิดกลางทางต้องไม่ทิ้ง companion ค้างถือทรัพยากรไว้
+
+    เดิมเทสนี้ให้ตัวอัดปลอม stop_event.wait(timeout=0.2) ก่อนระเบิด เพื่อถ่วงเวลาให้
+    thread หลักมีจังหวะยิง POST /api/companion/start ทันก่อน finally ของ thread งาน
+    จะไล่ปิด -- ยังเหลือช่วง race 200ms อยู่ดี (แค่แคบลง ไม่ได้ตัดทิ้ง) /api/companion/start
+    ไม่ผูกกับ state.status เลย (อ่านแค่ state.room เพื่อใส่ env ตอน start เท่านั้น ดู
+    session_service.py) จึงสั่งเปิด companion ได้ตั้งแต่ก่อนเปิดห้องประชุมด้วยซ้ำ --
+    สลับลำดับให้ start มาก่อน open_room ตัด race ทิ้งทั้งหมดแทนที่จะแคบมันลง: companion
+    รันอยู่แล้วแน่นอนก่อนที่ thread งานจะแม้แต่เริ่ม จึงไม่ต้องหน่วงเวลาอะไรอีก
+    """
     config.companion_command = ["prog"]
 
     def exploding_recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None, profile=None, asr_engine=None):
-        # รอสั้น ๆ ก่อนระเบิด ไม่ใช่เพื่อจำลองพฤติกรรมจริง แต่กันแข่งกับ POST
-        # /api/companion/start ของเทส -- ไม่มีอะไรมาสั่ง stop_event ในเทสนี้ (ไม่มี
-        # การเรียก /api/session/stop) เลยใช้ wait(timeout=...) เป็นแค่หน่วงเวลาที่
-        # จะ timeout แน่นอนทุกครั้ง ให้ thread หลักมีเวลาสั่งเปิด companion เองก่อนที่
-        # finally ของ thread นี้จะไล่ปิดมัน (ตาข่ายกันตกต้องปิดของที่เปิดจริง ไม่ใช่
-        # ปิดก่อนที่จะมีอะไรให้ปิด)
-        stop_event.wait(timeout=0.2)
         raise RuntimeError("ตัวอัดระเบิด")
 
     client, made = _client_with_companion(config, recorder=exploding_recorder)
-    client.post("/api/session", json={"model": "GLM-5.2"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
     client.post("/api/companion/start")
+    client.post("/api/session", json={"model": "GLM-5.2"})
     _wait_until(client, lambda b: b["recorder"] == "idle")
 
     assert made[0].calls == ["start", "stop"]
@@ -2229,10 +2230,18 @@ def test_the_companion_is_stopped_exactly_once(config):
     assert made[0].calls.count("stop") == 1
 
 
-def test_a_companion_that_cannot_start_still_lets_the_room_open(config):
-    """factory ที่ระเบิดต้องไม่ทำให้ /api/state หรือการเปิดห้องพัง -- ตอนนี้การเปิดห้อง
-    ไม่แตะ companion เลยแล้ว (ไม่มี auto-start) แต่ /api/state ยังเรียก companion_snapshot()
-    ทุกครั้งที่ poll ดังนั้น factory ที่พังต้องไม่ทำให้ endpoint นั้นล่มไปด้วย"""
+def test_a_companion_factory_that_explodes_degrades_the_start_route_instead_of_crashing_it(config):
+    """factory ที่ระเบิดตอนสร้าง companion ต้องไม่ทำให้ /api/companion/start โยน 500
+
+    companion_snapshot() (ที่ /api/state เรียกทุก poll) อ่าน companion_box ตรง ๆ ไม่เรียก
+    get_companion() เลย จึงไม่มีทางแตะ factory -- ที่เดียวที่เรียก factory จริงคือ route
+    นี้เท่านั้น (ผ่าน _get_companion_locked() ซึ่งดัก Exception ไว้แล้วคืน None ดู
+    session_service.py) ต้องยิง POST ตรง ๆ ถึงจะพิสูจน์อะไรได้ -- ยิง /api/session
+    หรือ /api/state เฉย ๆ ไม่มีทางเรียกถึง factory ที่ระเบิดเลยแม้แต่ครั้งเดียว
+
+    ปลายทางจริงวัดได้คือ 503 not_configured เดียวกับเครื่องที่ไม่ได้ตั้งค่า companion
+    เลย (ไม่ใช่ 500) และคงเจตนาเดิมไว้ด้วย: companion ที่เปิดไม่ได้ต้องไม่ดึงห้องประชุม
+    ลงไปด้วย"""
     config.companion_command = ["prog"]
 
     def factory(command, cwd=None):
@@ -2246,9 +2255,14 @@ def test_a_companion_that_cannot_start_still_lets_the_room_open(config):
     )
     client = app.test_client()
 
-    response = client.post("/api/session", json={"model": "GLM-5.2"})
+    start_response = client.post("/api/companion/start")
 
-    assert response.status_code == 201
+    assert start_response.status_code == 503
+    assert start_response.get_json() == {"error": "not_configured"}
+
+    open_response = client.post("/api/session", json={"model": "GLM-5.2"})
+
+    assert open_response.status_code == 201
     assert _wait_until(client, lambda b: b["recorder"] == "recording")["recorder"] == "recording"
 
     client.post("/api/session/stop")
@@ -2281,9 +2295,12 @@ def test_opening_a_room_no_longer_starts_the_companion(config):
     client.post("/api/session", json={"model": "GLM-5.2", "name": "standup"})
     _wait_until(client, lambda b: b["recorder"] == "recording")
 
-    # เหตุผลเดียวกับเทสด่านกั้นการ์ดจอ: พิสูจน์ว่าไม่มีโปรเซสถูกเปิด ไม่ใช่ว่าไม่มี
-    # อ็อบเจกต์ถูกสร้าง (get_companion() ถูกเรียกจาก /api/state ที่ _wait_until ยิงอยู่แล้ว)
-    assert [c.calls for c in made] in ([], [[]])
+    # get_companion() / _get_companion_locked() (ตัวเดียวที่เรียก factory) ถูกเรียก
+    # จาก /api/companion/start route เท่านั้น -- companion_snapshot() ที่ /api/state
+    # เรียกทุก poll (รวมถึง _wait_until ข้างบน) อ่าน companion_box ตรง ๆ โดยเจตนา
+    # ไม่ผ่าน get_companion() เลย (ดู session_service.py) flow นี้ไม่มี POST
+    # /api/companion/start เลยสักครั้ง factory จึงไม่มีทางถูกเรียก made ต้องว่างเปล่าเสมอ
+    assert made == []
 
     client.post("/api/session/stop")
 
