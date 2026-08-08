@@ -547,3 +547,46 @@ def test_a_blank_embedding_model_falls_back_to_the_default(tmp_path, monkeypatch
     monkeypatch.setenv("EMBEDDING_MODEL", "   ")
 
     assert load_config(tmp_path).embedding_model == DEFAULT_EMBEDDING_MODEL
+
+
+def test_no_companion_command_means_the_feature_is_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.delenv("COMPANION_COMMAND", raising=False)
+
+    assert load_config(tmp_path).companion_command == []
+
+
+def test_a_json_list_becomes_the_companion_command(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("COMPANION_COMMAND", '["C:/x/pythonw.exe", "-m", "thing"]')
+
+    assert load_config(tmp_path).companion_command == [
+        "C:/x/pythonw.exe",
+        "-m",
+        "thing",
+    ]
+
+
+def test_a_windows_path_survives_its_backslashes(monkeypatch, tmp_path):
+    """JSON ไม่ใช่ shlex -- backslash ในพาธต้อง escape ตามกฎของ JSON
+
+    นี่คือเหตุผลที่เลือก JSON แทนสตริงที่ต้อง split เอง: shlex แบบ posix จะกิน
+    backslash ของพาธ Windows เป็น escape แล้วได้พาธผิดโดยไม่มีอะไรฟ้อง
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("COMPANION_COMMAND", '["D:\\\\a b\\\\pythonw.exe"]')
+
+    assert load_config(tmp_path).companion_command == ['D:\\a b\\pythonw.exe']
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['{"not": "a list"}', "[1, 2]", "not json at all", '"just a string"', "[]"],
+)
+def test_a_malformed_companion_command_turns_the_feature_off(monkeypatch, tmp_path, raw):
+    """ค่าเสียรูปต้องแปลว่าปิด ไม่ใช่เปิดห้องไม่ได้ -- ประชุมกำลังจะเริ่มและ companion
+    เป็นของเสริม การล้มที่นี่คือการเอาของหลักไปเสี่ยงเพื่อของเสริม"""
+    monkeypatch.setenv("HF_TOKEN", "hf-test-token")
+    monkeypatch.setenv("COMPANION_COMMAND", raw)
+
+    assert load_config(tmp_path).companion_command == []
