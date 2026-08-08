@@ -505,36 +505,53 @@ def create_app(
 
     @app.post("/api/companion/start")
     def start_companion():
-        # ล็อกครอบทั้งช่วงเช็ค-แล้ว-สั่ง (not_configured -> already_running ->
-        # gpu_busy -> start -> เช็คซ้ำ) ไม่ใช่แค่ตอนสร้างตัวแรกเหมือนเดิม เพราะ service
-        # รันด้วย threaded=True (บรรทัด ~1081) -- สอง POST พร้อมกันเห็น is_running()
-        # False ทั้งคู่ได้ถ้าล็อกไม่ครอบถึง start() แล้วจะเรียก start() ซ้อนสองรอบ
-        # companion.py เก็บ self._proc ตัวเดียวไม่มีล็อกของตัวเอง รอบที่สองทับตัวแรก
-        # จนโปรเซสแรกหลุดค้างกิน GPU ต่อโดยไม่มีใครปิด -- ด่านที่ตั้งใจกันเรื่องนี้ไว้
-        # เลยรั่ว (แพทเทิร์นเดียวกับ _registry_lock บรรทัด 30-36 และการใช้งานที่ 770-780)
+        # ด่านสองข้อแรก (not_configured, already_running) เช็คนอกล็อกก่อน แบบ advisory
+        # เท่านั้น -- ตัดสินจาก config.companion_command และ is_running() ล้วน ๆ ไม่ต้อง
+        # แตะ worker_ready() เลย เครื่องที่ไม่ได้ตั้งค่า companion (ไม่ใช้ฟีเจอร์นี้) หรือ
+        # เครื่องที่ companion รันอยู่แล้วจึงไม่ต้อง spawn powershell แค่เพื่อจะถูกปฏิเสธ --
+        # ตรงกับ invariant ของ get_companion() ด้านบน ("เครื่องที่ไม่ใช้ฟีเจอร์นี้ต้องเดิน
+        # เส้นทางเดิมเป๊ะ") ผลตรงนี้ยังไม่ authoritative เพราะยังไม่ถือล็อก แค่กันงานที่
+        # รู้อยู่แล้วว่าจะถูกปฏิเสธแน่ ๆ ไม่ให้ไปจ่ายค่า probe โดยเปล่าประโยชน์ -- คำตอบจริง
+        # มาจากการเช็คซ้ำในล็อกด้านล่างเท่านั้น
+        companion = get_companion()
+        if companion is None:
+            return jsonify({"error": "not_configured"}), 503
+        if companion.is_running():
+            return jsonify({"error": "already_running"}), 409
+
+        # companion_gpu_busy() (เรียกในล็อกด้านล่าง) ใช้ worker_ready() ข้างใน -- cache
+        # miss จะ spawn powershell ทั้งตัว (probe_worker()) วัดจริงถึง ~2.1 วินาที เพดาน
+        # คือ timeout 10 วินาทีของ subprocess.run เอง ถือล็อกคร่อมของแพงขนาดนี้จะทำให้
+        # POST อื่นทุกตัวที่แย่ง companion_lock (stop route, GET /api/state ที่หน้าเว็บ
+        # poll ทุกวินาที) ค้างรอไปด้วย จึงเรียก worker_ready() ครั้งหนึ่งไว้ตรงนี้ นอกล็อก
+        # เพื่อจ่ายค่า cache miss (ถ้ามี) นอกช่วงวิกฤต -- เรียกหลังด่านสองข้อบนเสมอ
+        # เพราะสองข้อนั้นไม่ต้องการ probe เลย ยิงเร็วเกินจำเป็นเท่ากับเสียของฟรี
         #
-        # เรียก _get_companion_locked() ตรง ๆ ไม่เรียก get_companion() เพราะฟังก์ชันนั้น
-        # ล็อก companion_lock เองอีกชั้น threading.Lock ไม่ reentrant จะค้างตัวเองทันที
-        #
-        # companion_gpu_busy() เรียก worker_ready() ข้างใน -- ตัวนั้นไม่ใช่งานอ่านดิสก์สั้น
-        # ๆ แบบ activity.tail() ที่เรียกคู่กัน: cache hit (อายุ < WORKER_PROBE_CACHE_SECONDS)
-        # เป็นแค่การอ่าน dict แต่ cache miss จะ spawn powershell ทั้งตัว (probe_worker())
-        # ซึ่งฝั่งวิดเจ็ต COWORK Desktop วัดได้จริงถึง ~2.1 วินาที เพดานคือ timeout 10
-        # วินาทีของ subprocess.run เอง -- ถือล็อกคร่อมของแพงขนาดนี้จะทำให้ POST อื่นทุกตัว
-        # ที่แย่ง companion_lock (stop route, และงานถัดไปที่จะเอา companion status ไปแปะ
-        # ใน GET /api/state ซึ่งหน้าเว็บ poll ทุกวินาที) ค้างรอไปด้วย จึงเรียก worker_ready()
-        # ครั้งหนึ่งไว้ตรงนี้ ก่อนถือล็อก เพื่อจ่ายค่า cache miss (ถ้ามี) นอกช่วงวิกฤต --
-        # พอเข้ามาถือล็อกจริงด้านล่าง cache สดแล้วเสมอ ทำให้ companion_gpu_busy() ข้างใน
-        # เจอแต่ cache hit แทบไม่มีต้นทุนเพิ่ม ลำดับเช็คที่ contract กำหนด (already_running
-        # -> gpu_busy -> launch) จึงยังคงอะตอมมิกทั้งชุดเหมือนเดิมโดยที่ล็อกไม่ได้คร่อม
-        # ของแพงอีกต่อไป
-        #
-        # ที่ล็อกยังคร่อมได้แค่ทำให้อะตอมมิกกับ start()/stop() ของ service ตัวนี้เองเท่านั้น
-        # -- gpu_is_busy() อ่านสถานะของ watcher ซึ่งเป็นคนละโปรเซส ล็อกนี้ล็อกไม่ถึงมัน
-        # สถานะการ์ดจอที่อ่านได้อาจเปลี่ยนไปแล้วตั้งแต่ก่อนถือล็อกด้วยซ้ำ ล็อกกันได้แค่ไม่ให้
-        # request คู่แข่งของ service นี้แทรก start() ระหว่างสองเช็คนี้เท่านั้น
+        # หมายเหตุความเสี่ยงที่เหลืออยู่ (ไม่ใช่การรับประกัน): priming ตรงนี้ไม่ได้แปลว่า
+        # cache จะสดแน่นอนตอนถือล็อกจริงด้านล่าง -- Companion.stop() บล็อกได้ถึง 10 วินาที
+        # (grace 5+5 วิ, ดู companion.py) ซึ่งเท่ากับ WORKER_PROBE_CACHE_SECONDS พอดี ถ้า
+        # request นี้ไพรม์ cache เสร็จแล้วไปรอ companion_lock อยู่หลัง stop() ที่ช้าพอดี
+        # cache จะหมดอายุก่อนได้ล็อกจริง แล้ว companion_gpu_busy() ข้างในจะ cache miss
+        # และ spawn probe ซ้ำในล็อกอยู่ดี -- คือสถานการณ์เดียวกับที่รอบแก้ก่อนหน้าตั้งใจ
+        # เอาออกจากล็อก ยอมรับเป็นกรณีหายาก (ต้องมี stop() ช้าพอดีบวกคิวยาวพอดีมาชนกัน)
+        # เพราะยังดีกว่าการถือล็อกคร่อม probe ทุกครั้งแบบเดิม ไม่ใช่เพราะมันเกิดไม่ได้
         worker_ready()
+
         with companion_lock:
+            # ล็อกครอบทั้งช่วงเช็ค-แล้ว-สั่ง (not_configured -> already_running ->
+            # gpu_busy -> start -> เช็คซ้ำ) เพราะ service รันด้วย threaded=True
+            # (บรรทัด ~1081) -- สอง POST พร้อมกันเห็น is_running() False ทั้งคู่ได้ถ้า
+            # ล็อกไม่ครอบถึง start() แล้วจะเรียก start() ซ้อนสองรอบ companion.py เก็บ
+            # self._proc ตัวเดียวไม่มีล็อกของตัวเอง รอบที่สองทับตัวแรกจนโปรเซสแรกหลุดค้าง
+            # กิน GPU ต่อโดยไม่มีใครปิด -- ด่านที่ตั้งใจกันเรื่องนี้ไว้เลยรั่ว (แพทเทิร์น
+            # เดียวกับ _registry_lock บรรทัด 30-36 และการใช้งานที่ 770-780)
+            #
+            # สามเช็คต่อไปนี้เป็นคำตอบที่แท้จริง (authoritative) -- สองเช็คแรกที่ทำนอกล็อก
+            # ข้างบนเป็นแค่การลัดคิว ไม่ใช่การตัดสิน เพราะสถานะเปลี่ยนได้ระหว่างที่ยัง
+            # ไม่ได้ถือล็อก (request คู่แข่งแทรก start/stop ได้)
+            #
+            # เรียก _get_companion_locked() ตรง ๆ ไม่เรียก get_companion() เพราะฟังก์ชัน
+            # นั้นล็อก companion_lock เองอีกชั้น threading.Lock ไม่ reentrant จะค้างตัวเองทันที
             companion = _get_companion_locked()
             if companion is None:
                 return jsonify({"error": "not_configured"}), 503

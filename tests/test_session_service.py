@@ -2343,6 +2343,41 @@ def test_companion_start_is_refused_when_not_configured(config):
     assert made == []
 
 
+def test_companion_start_when_not_configured_never_probes_the_worker(config):
+    """Finding A ของรอบรีวิวนี้: not_configured ตัดสินได้จาก config.companion_command
+    อย่างเดียว ไม่ต้องแตะ worker_ready() เลย -- เครื่องที่ไม่ใช้ฟีเจอร์นี้ (ไม่ตั้ง
+    companion_command) ต้องไม่จ่ายค่า spawn powershell ของ probe_worker() แค่เพื่อจะถูก
+    ปฏิเสธด้วย 503 ตรงกับ invariant ใน docstring ของ get_companion(): "เครื่องที่ไม่ใช้
+    ฟีเจอร์นี้ต้องเดินเส้นทางเดิมเป๊ะ" """
+    probe_calls = []
+
+    def counting_probe():
+        probe_calls.append(1)
+        return True
+
+    made = []
+
+    def factory(command, cwd=None):
+        companion = RecordingCompanion(command, cwd)
+        made.append(companion)
+        return companion
+
+    app = create_app(
+        config,
+        recorder=blocking_recorder,
+        worker_probe=counting_probe,
+        companion_factory=factory,
+    )
+    client = app.test_client()
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "not_configured"
+    assert made == []
+    assert probe_calls == []
+
+
 def test_companion_start_launches_it(config):
     config.companion_command = ["prog", "--x"]
     client, made = _client_with_companion(config)
