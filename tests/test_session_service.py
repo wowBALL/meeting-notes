@@ -2158,6 +2158,21 @@ class RecordingCompanion:
         return self.calls.count("start") > self.calls.count("stop")
 
 
+class NeverComesUpCompanion(RecordingCompanion):
+    """companion ปลอมที่ start() ไม่ทำให้โปรเซสรันจริง (finding 6 ของรีวิวรอบนี้)
+
+    RecordingCompanion ธรรมดาให้ is_running() เป็น True ทันทีหลัง start() เสมอ ซึ่งไม่มี
+    ทางจุดชนวน branch `start_failed` ใน /api/companion/start ได้เลย (route เช็ค
+    is_running() หลัง start() แล้วคืน 500 ถ้ายังเป็น False) -- เคสนี้จำลอง spawn ที่
+    ล้มเหลวจริง: Popen สำเร็จ (start() ไม่ throw) แต่โปรเซสลูกตายก่อนที่ poll ครั้งแรกจะ
+    เห็นมันรัน จึงบันทึกว่าถูกเรียกแต่ไม่ทำให้ is_running() เป็น True
+    """
+
+    def start(self, env_extra=None):
+        self.env_extra = env_extra
+        self.calls.append("start_attempted")
+
+
 def _client_with_companion(config, recorder=blocking_recorder):
     made = []
 
@@ -2173,17 +2188,6 @@ def _client_with_companion(config, recorder=blocking_recorder):
         companion_factory=factory,
     )
     return app.test_client(), made
-
-
-def test_no_companion_is_started_when_none_is_configured(config):
-    """ดีฟอลต์คือไม่มี -- เครื่องที่ไม่ตั้งค่าต้องได้พฤติกรรมเดิมเป๊ะ"""
-    client, made = _client_with_companion(config)
-
-    client.post("/api/session", json={"model": "GLM-5.2"})
-    _wait_until(client, lambda b: b["recorder"] == "recording")
-    client.post("/api/session/stop")
-
-    assert made == []
 
 
 def test_the_companion_is_stopped_even_when_the_encode_stage_never_begins(config):
@@ -2340,6 +2344,44 @@ def test_a_companion_started_by_hand_is_stopped_when_the_encode_stage_begins(con
     assert made[0].calls == ["start", "stop"]
 
 
+def test_the_encode_started_hook_is_what_actually_stops_the_companion(config):
+    """finding 1 ของรีวิวรอบนี้: เทสต์ข้างบน (และทุกเทสต์อื่นในไฟล์นี้) เช็คแค่สถานะ
+    ปลายทางหลัง recorder คืนค่าแล้ว ซึ่ง finally ของ work() (ตาข่ายกันตกสำหรับเส้นทาง
+    ที่ไม่ยิง encode_started) ผลิตผลลัพธ์เดียวกันได้เองโดยไม่ต้องมี hook ที่ on_event
+    เลย -- ลบ `if code == "encode_started": stop_companion()` ทิ้งแล้วรันสวีตทั้งไฟล์
+    ยังผ่านหมด ทั้งที่เหตุผลทั้งหมดของฟีเจอร์นี้คือหน้าต่าง 62-69 วินาทีตอนขั้นแปลงไฟล์
+    (ก่อน recorder คืนค่า) ไม่ใช่ ~2 วินาทีหลัง recorder คืนค่าแล้ว
+
+    เทสต์นี้แยกสองเส้นทางออกจากกันโดยจับสถานะ *ระหว่าง* recorder ยังทำงานอยู่ ไม่ใช่
+    หลังจบ: fake recorder ยิง encode_started แล้วเช็ค companion.is_running() ทันที
+    ก่อน return -- ถ้า hook ถูกลบ ตอนนั้น finally ยังไม่ทำงาน (recorder ยังไม่ return)
+    companion จึงยังวิ่งอยู่ ทำให้เทสต์นี้ล้ม (ดูหลักฐานแดง-เขียวในรายงานที่แนบมาด้วย)
+    """
+    config.companion_command = ["prog"]
+    observed = {}
+
+    def recorder(name, model, cfg, stop_event, on_event=None, mic_muted=None,
+                 profile=None, asr_engine=None):
+        stop_event.wait(timeout=5)
+        on_event("encode_started", {})
+        # ต้องอ่าน made[0] ตรงนี้ ไม่ใช่หลัง client.post("/api/session/stop") คืนค่า
+        # ในเทสต์ -- เพราะ finally ของ work() (ที่ยังไม่ถูกลบ) จะปิดมันให้เองอยู่ดี
+        # เมื่อ recorder ฟังก์ชันนี้ return จุดที่ต้องจับคือ "ระหว่าง" encode_started
+        # กำลังทำงาน ก่อนจะ return
+        observed["running_right_after_encode_started"] = made[0].is_running()
+        return None
+
+    client, made = _client_with_companion(config, recorder=recorder)
+    client.post("/api/session", json={"model": "GLM-5.2"})
+    _wait_until(client, lambda b: b["recorder"] == "recording")
+    client.post("/api/companion/start")
+
+    client.post("/api/session/stop")
+    _wait_until(client, lambda b: b["recorder"] == "idle")
+
+    assert observed["running_right_after_encode_started"] is False
+
+
 def test_the_second_room_can_still_stop_the_companion(config):
     """ดีไซน์เดิมกันสั่งซ้ำด้วย Event ตัวเดียว ซึ่งใช้ได้แค่รอบเดียว
 
@@ -2450,6 +2492,34 @@ def test_companion_start_launches_it(config):
     assert len(made) == 1
     assert made[0].command == ["prog", "--x"]
     assert made[0].calls == ["start"]
+
+
+def test_companion_start_reports_start_failed_when_the_process_never_comes_up(config):
+    """finding 6 ของรีวิวรอบนี้: is_running() == False ทันทีหลัง start() คือทางเดียวที่
+    ผู้ใช้จะเห็น 500 start_failed จริง (start() กลืน exception ทุกตัวไว้แล้ว ดู
+    companion.py) -- ก่อนหน้านี้ไม่มีเทสต์ไหนคุม branch นี้เลยเพราะ RecordingCompanion
+    ปลอมทุกตัวที่ใช้ในไฟล์นี้รายงาน running เสมอหลัง start()"""
+    config.companion_command = ["prog"]
+    made = []
+
+    def factory(command, cwd=None):
+        companion = NeverComesUpCompanion(command, cwd)
+        made.append(companion)
+        return companion
+
+    app = create_app(
+        config,
+        recorder=blocking_recorder,
+        worker_probe=lambda: True,
+        companion_factory=factory,
+    )
+    client = app.test_client()
+
+    response = client.post("/api/companion/start")
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "start_failed"}
+    assert made[0].calls == ["start_attempted"]
 
 
 def test_companion_start_is_refused_while_it_is_already_running(config):

@@ -87,7 +87,7 @@ GPU_STAGES = ("queued", "transcribe_started", "diarize_started")
 GPU_RELEASE_CODES = ("summarize_started", "meeting_done", "job_failed")
 
 
-def gpu_is_busy(entries, worker_running: bool) -> bool:
+def gpu_is_busy(entries: list[dict], worker_running: bool) -> bool:
     """การ์ดจอไม่ว่าง = watcher กำลังรัน และมีงานที่ขั้นล่าสุดยังถือการ์ดจออยู่
 
     worker_running ขาดไม่ได้: watcher ที่ตายกลางงานทิ้งงานค้างในคิวไว้ตลอดกาล
@@ -498,12 +498,19 @@ def create_app(
             if companion is not None and companion.is_running():
                 companion.stop()
 
-    def companion_gpu_busy():
-        return gpu_is_busy(
-            activity.tail(config.base_dir, ACTIVITY_LIMIT), worker_ready()
-        )
+    def companion_gpu_busy(activity_entries: list[dict] | None = None):
+        """activity_entries ให้มาจากผู้เรียกได้ (finding 2 ของรีวิวรอบนี้) -- ไม่งั้นอ่านเอง
 
-    def companion_snapshot() -> dict:
+        get_state() อ่าน activity.tail() ไปแล้วรอบหนึ่งเพื่อฟิลด์ "activity" ของมันเอง
+        ส่งอันเดิมมาที่นี่ต่อจึงไม่ต้องอ่านไฟล์ซ้ำ (json-parse ได้ถึง 200 บรรทัด) บน endpoint
+        ที่วิดเจ็ต poll ทุกวินาที -- ผู้เรียกอื่น (start route) ไม่มีชุดที่อ่านมาแล้ว จึงปล่อย
+        ให้อ่านเองตามเดิมด้วยการไม่ส่ง argument มา
+        """
+        if activity_entries is None:
+            activity_entries = activity.tail(config.base_dir, ACTIVITY_LIMIT)
+        return gpu_is_busy(activity_entries, worker_ready())
+
+    def companion_snapshot(activity_entries: list[dict] | None = None) -> dict:
         """รูปเดียวที่หน้าจออ่าน -- ไม่มี already_running ในนี้โดยเจตนา
 
         ตอนมันรันอยู่ state บอกไปแล้ว การมีอีกช่องที่พูดเรื่องเดียวกันคือสองแหล่ง
@@ -515,6 +522,11 @@ def create_app(
         การอ่านค่าเฉย ๆ ไม่ต้องใช้ล็อกอยู่แล้ว: ล็อกมีไว้กันลำดับ เช็ค-แล้ว-สั่ง ของ start/stop
         ไม่ได้มีไว้กันการอ่าน และคำตอบจากที่นี่เป็นแค่รายงาน ไม่ใช่คำตัดสิน -- คำตัดสินจริง
         ยังอยู่ในล็อกที่ start route เหมือนเดิม
+
+        activity_entries เป็น parameter เสริม (finding 2 ของรีวิวรอบนี้) ให้ get_state()
+        ส่ง activity.tail() ที่อ่านไปแล้วรอบหนึ่งต่อมาที่นี่ ไม่ต้องอ่านไฟล์ซ้ำสอง
+        รอบต่อการ poll หนึ่งครั้ง -- ผู้เรียกอื่นที่ไม่มีชุดพร้อมอยู่แล้วไม่ต้องส่งอะไรมา
+        companion_gpu_busy() จะอ่านเองเหมือนเดิม
         """
         if not config.companion_command:
             return {"state": "off", "can_start": False, "blocked_by": "not_configured"}
@@ -525,7 +537,7 @@ def create_app(
             return {"state": "running", "can_start": False, "blocked_by": None}
         # ไม่ต้องกลัวว่า worker_ready() จะแพงตรงนี้ -- get_state() เรียกมันไปแล้วบรรทัดบน
         # cache จึงสดเสมอเมื่อมาถึงจุดนี้
-        if companion_gpu_busy():
+        if companion_gpu_busy(activity_entries):
             return {"state": "off", "can_start": False, "blocked_by": "gpu_busy"}
         return {"state": "off", "can_start": True, "blocked_by": None}
 
@@ -606,7 +618,13 @@ def create_app(
         lang = request.args.get("lang") or config.ui_lang
         body = state.snapshot()
         body["worker_ready"] = worker_ready()
-        body["companion"] = companion_snapshot()
+        # อ่าน activity.tail() ครั้งเดียวแล้วส่งต่อ (finding 2 ของรีวิวรอบนี้) -- เดิม
+        # companion_snapshot() -> companion_gpu_busy() อ่านไฟล์นี้เองอีกรอบ กลายเป็น
+        # อ่าน+parse JSON สูงสุด 200 บรรทัดสองครั้งต่อการ poll หนึ่งครั้ง endpoint นี้ถูก
+        # widget เดสก์ท็อป poll ทุกวินาทีด้วย timeout ฝั่ง client แค่ 5 วินาที จึงเป็น
+        # hot path ที่ตัดของซ้ำได้ก็ควรตัด
+        entries = activity.tail(config.base_dir, ACTIVITY_LIMIT)
+        body["companion"] = companion_snapshot(entries)
         body["lang"] = lang
         body["warnings"] = [
             {**w, "text": render(w["code"], w.get("params"), lang)}
@@ -615,10 +633,7 @@ def create_app(
         # allowlist ไม่ใช่ {**e, ...}: entry มาจาก state/activity.jsonl ตรง ๆ (activity.tail)
         # ซึ่งแก้มือได้ตามดีไซน์เดียวกับไฟล์คิว (ดู activity.append) -- ฟิลด์ที่ออกไปกับ
         # เหตุผลที่ job/params ต้องอยู่ต่อ ดูที่ _public_activity ด้านบน
-        body["activity"] = [
-            _public_activity(e, lang)
-            for e in activity.tail(config.base_dir, ACTIVITY_LIMIT)
-        ]
+        body["activity"] = [_public_activity(e, lang) for e in entries]
         return jsonify(body)
 
     @app.post("/api/session")
